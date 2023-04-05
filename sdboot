@@ -7,10 +7,11 @@ set -e
 dialog_altenate_screen=
 
 entryfile=$(mktemp sdboot.XXXXXX)
+snapperfile=$(mktemp sdboot.XXXXXX)
 tmpfile=$(mktemp sdboot.XXXXXX)
 cleanup()
 {
-	rm -f "$entryfile" "$tmpfile"
+	rm -f "$snapperfile" "$entryfile" "$tmpfile"
 }
 trap cleanup EXIT
 
@@ -78,79 +79,154 @@ while true ; do
         esac
 done
 
+entry_filter=("cat")
 update_entries()
 {
-	bootctl list --json=short > "$entryfile"
+	[ -z "$1" ] || entry_filter=("$@")
+	bootctl list --json=short | "${entry_filter[@]}" > "$entryfile"
 }
 
-if ! update_entries 2>"$tmpfile"; then
-	d --title "Error" --textbox "$tmpfile" 0 0
-	exit 1
-fi
-
-while true; do
-	list=()
-	n=0
-	default=
-	while read -r isdefault title; do
-		if [ "$isdefault" = "true" ]; then
-			default="$n"
-			title="\\Zb\Zu$title\\Zn"
-		fi
-		list+=("$n" "$title")
-		n=$((++n))
-	done < <(jq '.[]|[.isDefault, .showTitle]|join(" ")' -r < "$entryfile")
-	if [ "${#list}" = 0 ]; then
-		d --msgbox "No entries" 0 0
-		exit 0
+show_entries()
+{
+	if ! update_entries 2>"$tmpfile"; then
+		d --title "Error" --textbox "$tmpfile" 0 0
+		exit 1
 	fi
-	d --no-hot-list --colors --ok-label "Options" --cancel-label "Quit" --menu "Entries" 0 0 "$(menuheight ${#list[@]})" "${list[@]}" || exit 1
-	n="$result"
 
 	while true; do
-		list=(show json cat Raw edit Edit set-default "set as default" oneshot "set as one-shot")
-		if [ "$n" != "$default" ]; then
-			list+=(delete delete)
+		list=()
+		n=0
+		default=
+		while read -r isdefault title; do
+			if [ "$isdefault" = "true" ]; then
+				default="$n"
+				title="\\Zb\Zu$title\\Zn"
+			fi
+			list+=("$n" "$title")
+			n=$((++n))
+		done < <(jq '.[]|[.isDefault, .showTitle]|join(" ")' -r < "$entryfile")
+		if [ "${#list}" = 0 ]; then
+			d --msgbox "No entries" 0 0
+			exit 0
 		fi
-		d --no-tags --menu "Entry #$n" 0 0 "$(menuheight ${#list[@]})" "${list[@]}" || break
+		d --no-hot-list --colors --ok-label "Options" --cancel-label "Back" --menu "Entries" 0 0 "$(menuheight ${#list[@]})" "${list[@]}" || return 0
+		n="$result"
+
+		while true; do
+			list=(show json cat Raw edit Edit set-default "set as default" oneshot "set as one-shot")
+			if [ "$n" != "$default" ]; then
+				list+=(delete delete)
+			fi
+			d --no-tags --menu "Entry #$n" 0 0 "$(menuheight ${#list[@]})" "${list[@]}" || break
+			action="$result"
+
+			case "$action" in
+				show)
+					jq ".[$n]" < "$entryfile" > "$tmpfile"
+					d --textbox "$tmpfile" 0 0
+					;;
+				cat)
+					read -r fn < <(jq -r ".[$n]|[.path]|join(\" \")" < "$entryfile")
+					d --textbox "$fn" 0 0
+					;;
+				edit)
+					read -r fn < <(jq -r ".[$n]|[.path]|join(\" \")" < "$entryfile")
+					${EDITOR:-vim} "$fn"
+					update_entries
+					break
+					;;
+				delete)
+					read -r id < <(jq -r ".[$n]|[.id]|join(\" \")" < "$entryfile")
+					bootctl unlink "$id" > "$tmpfile" 2>&1
+					d --textbox "$tmpfile" 0 0
+					update_entries
+					break
+					;;
+				set-default)
+					read -r id < <(jq -r ".[$n]|[.id]|join(\" \")" < "$entryfile")
+					bootctl set-default "$id" > "$tmpfile" 2>&1
+					d --textbox "$tmpfile" 0 0
+					update_entries
+					break
+					;;
+				oneshot)
+					read -r id < <(jq -r ".[$n]|[.id]|join(\" \")" < "$entryfile")
+					bootctl set-oneshot "$id" > "$tmpfile" 2>&1
+					d --textbox "$tmpfile" 0 0
+					update_entries
+					break
+					;;
+			esac
+		done
+	done
+}
+
+update_snapper()
+{
+	 snapper --jsonout list > "$snapperfile"
+}
+
+show_snapper()
+{
+	if ! update_snapper 2>"$tmpfile"; then
+		d --title "Error" --textbox "$tmpfile" 0 0
+		exit 1
+	fi
+
+	while true; do
+		list=()
+		n=0
+		default=
+		while read -r n isdefault title; do
+			[ "$n" != "0" ] || continue
+			if [ "$isdefault" = "true" ]; then
+				default="$n"
+				title="\\Zb\Zu$title\\Zn"
+			fi
+			list+=("$n" "$title")
+		done < <(jq '.root|.[]|[.number, .default, .description]|join(" ")' -r < "$snapperfile")
+		if [ "${#list}" = 0 ]; then
+			d --msgbox "No snapshots" 0 0
+			exit 0
+		fi
+		d --no-hot-list --colors --ok-label "Options" --cancel-label "Quit" --menu "Snapshots" 0 0 "$(menuheight ${#list[@]})" "${list[@]}" || exit 1
+		n="$result"
+
+		while true; do
+			list=(show json entries entries)
+			if [ "$n" != "$default" ]; then
+				list+=(delete delete)
+			fi
+			d --no-tags --menu "Snapshot #$n" 0 0 "$(menuheight ${#list[@]})" "${list[@]}" || break
+			action="$result"
+
+			case "$action" in
+				show)
+					jq ".root|.[]|select(.number==$n)" < "$snapperfile" > "$tmpfile"
+					d --textbox "$tmpfile" 0 0
+					;;
+				entries)
+					read -r MACHINE_ID < /etc/machine-id
+					update_entries jq "[.[]|select(.machineId==\"$MACHINE_ID\")|select(has(\"options\"))|select(.options|match(\"@/.snapshots/$n/snapshot\"))]"
+					show_entries
+					;;
+			esac
+		done
+	done
+}
+
+main_menu()
+{
+	while true; do
+		list=(snapper snapper sd-boot sd-boot)
+		d --no-tags --cancel-label "Quit"  --menu "Main Menu" 0 0 "$(menuheight ${#list[@]})" "${list[@]}" || return 0
 		action="$result"
 
 		case "$action" in
-			show)
-				jq ".[$n]" < "$entryfile" > "$tmpfile"
-				d --textbox "$tmpfile" 0 0
-				;;
-			cat)
-				read -r fn < <(jq -r ".[$n]|[.path]|join(\" \")" < "$entryfile")
-				d --textbox "$fn" 0 0
-				;;
-			edit)
-				read -r fn < <(jq -r ".[$n]|[.path]|join(\" \")" < "$entryfile")
-				${EDITOR:-vim} "$fn"
-				update_entries
-				break
-				;;
-			delete)
-				read -r id < <(jq -r ".[$n]|[.id]|join(\" \")" < "$entryfile")
-				bootctl unlink "$id" > "$tmpfile" 2>&1
-				d --textbox "$tmpfile" 0 0
-				update_entries
-				break
-				;;
-			set-default)
-				read -r id < <(jq -r ".[$n]|[.id]|join(\" \")" < "$entryfile")
-				bootctl set-default "$id" > "$tmpfile" 2>&1
-				d --textbox "$tmpfile" 0 0
-				update_entries
-				break
-				;;
-			oneshot)
-				read -r id < <(jq -r ".[$n]|[.id]|join(\" \")" < "$entryfile")
-				bootctl set-oneshot "$id" > "$tmpfile" 2>&1
-				d --textbox "$tmpfile" 0 0
-				update_entries
-				break
-				;;
+			snapper) show_snapper ;;
+			sd-boot) show_entries ;;
 		esac
 	done
-done
+}
+
+main_menu
