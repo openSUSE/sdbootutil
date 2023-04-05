@@ -1,0 +1,156 @@
+#!/bin/bash
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: Copyright 2023 SUSE LLC
+set -e
+
+# set to --keep-title to use altenate screen. Better for debugging but causes flicker
+dialog_altenate_screen=
+
+entryfile=$(mktemp sdboot.XXXXXX)
+tmpfile=$(mktemp sdboot.XXXXXX)
+cleanup()
+{
+	rm -f "$entryfile" "$tmpfile"
+}
+trap cleanup EXIT
+
+helpandquit()
+{
+	cat <<-EOF
+		Usage: $0 [OPTIONS]
+		OPTIONS:
+		  --verbose  verbose
+		  -h         help screen
+	EOF
+	exit 0
+}
+
+log_info()
+{
+	[ "$verbose" -gt 0 ] || return 0
+	echo "$@"
+}
+
+d(){
+	local retval=0
+	# Bash makes it a bit annoying to read the output of a different FD into a variable, it
+	# only supports reading stdout by itself. So redirect 3 to stdout and 1 to the real stdout.
+	exec {stdoutfd}>&1
+	result="$(dialog $dialog_altenate_screen --backtitle "Systemd-boot" --output-fd 3 "$@" 3>&1 1>&${stdoutfd})" || retval=$?
+	# Word splitting makes it necessary to use eval here.
+	eval "exec ${stdoutfd}>&-"
+	return "$retval"
+}
+
+# Given the number of total item pairs, outputs the number of items to display at once
+menuheight() {
+	local height=$(($1 / 2))
+	[ "$height" -le "$dh_menu" ] || height="$dh_menu"
+	echo "$height"
+}
+
+stty_size() {
+	set -- $(stty size)
+	LINES="$1"
+	COLUMNS="$2"
+	# stty size can return zero when not ready or
+	# its a serial console
+	if [ "$COLUMNS" = "0" ] || [ "$LINES" = "0" ]; then
+		LINES=24
+		COLUMNS=80
+	fi
+
+	dh_menu=$((LINES-15))
+	dh_text=$((LINES-5))
+}
+stty_size
+
+getopttmp=$(getopt -o hc:v --long help,flicker,verbose -n "${0##*/}" -- "$@")
+eval set -- "$getopttmp"
+
+while true ; do
+        case "$1" in
+                -h|--help) helpandquit; shift ;;
+		--flicker) dialog_altenate_screen=--keep-tite; shift ;;
+		-v|--verbose) verbose=$((++verbose)); shift ;;
+                --) shift ; break ;;
+                *) echo "Internal error!" ; exit 1 ;;
+        esac
+done
+
+update_entries()
+{
+	bootctl list --json=short > "$entryfile"
+}
+
+if ! update_entries 2>"$tmpfile"; then
+	d --title "Error" --textbox "$tmpfile" 0 0
+	exit 1
+fi
+
+while true; do
+	list=()
+	n=0
+	default=
+	while read -r isdefault title; do
+		if [ "$isdefault" = "true" ]; then
+			default="$n"
+			title="\\Zb\Zu$title\\Zn"
+		fi
+		list+=("$n" "$title")
+		n=$((++n))
+	done < <(jq '.[]|[.isDefault, .showTitle]|join(" ")' -r < "$entryfile")
+	if [ "${#list}" = 0 ]; then
+		d --msgbox "No entries" 0 0
+		exit 0
+	fi
+	d --no-hot-list --colors --ok-label "Options" --cancel-label "Quit" --menu "Entries" 0 0 "$(menuheight ${#list[@]})" "${list[@]}" || exit 1
+	n="$result"
+
+	while true; do
+		list=(show json cat Raw edit Edit set-default "set as default" oneshot "set as one-shot")
+		if [ "$n" != "$default" ]; then
+			list+=(delete delete)
+		fi
+		d --no-tags --menu "Entry #$n" 0 0 "$(menuheight ${#list[@]})" "${list[@]}" || break
+		action="$result"
+
+		case "$action" in
+			show)
+				jq ".[$n]" < "$entryfile" > "$tmpfile"
+				d --textbox "$tmpfile" 0 0
+				;;
+			cat)
+				read -r fn < <(jq -r ".[$n]|[.path]|join(\" \")" < "$entryfile")
+				d --textbox "$fn" 0 0
+				;;
+			edit)
+				read -r fn < <(jq -r ".[$n]|[.path]|join(\" \")" < "$entryfile")
+				${EDITOR:-vim} "$fn"
+				update_entries
+				break
+				;;
+			delete)
+				read -r id < <(jq -r ".[$n]|[.id]|join(\" \")" < "$entryfile")
+				bootctl unlink "$id" > "$tmpfile" 2>&1
+				d --textbox "$tmpfile" 0 0
+				update_entries
+				break
+				;;
+			set-default)
+				read -r id < <(jq -r ".[$n]|[.id]|join(\" \")" < "$entryfile")
+				bootctl set-default "$id" > "$tmpfile" 2>&1
+				d --textbox "$tmpfile" 0 0
+				update_entries
+				break
+				;;
+			oneshot)
+				read -r id < <(jq -r ".[$n]|[.id]|join(\" \")" < "$entryfile")
+				bootctl set-oneshot "$id" > "$tmpfile" 2>&1
+				d --textbox "$tmpfile" 0 0
+				update_entries
+				break
+				;;
+		esac
+	done
+done
