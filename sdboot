@@ -97,14 +97,21 @@ show_entries()
 		list=()
 		n=0
 		default=
-		while read -r isdefault title; do
+		while read -r isdefault isreported type title; do
+			color=
 			if [ "$isdefault" = "true" ]; then
 				default="$n"
-				title="\\Zb\Zu$title\\Zn"
+				color="\\Zb\Zu"
 			fi
-			list+=("$n" "$title")
+			if [ "$isreported" = "false" ]; then
+				color="$color\\Z2"
+			fi
+			if [ "$type" = "loader" ]; then
+				color="$color\\Z5"
+			fi
+			list+=("$n" "$color$title\\Zn")
 			n=$((++n))
-		done < <(jq '.[]|[.isDefault, .showTitle]|join(" ")' -r < "$entryfile")
+		done < <(jq '.[]|[.isDefault, if has("isReported") then .isReported else 0 end, if has("type") then .type else "unknown" end, .showTitle]|join(" ")' -r < "$entryfile")
 		if [ "${#list}" = 0 ]; then
 			d --msgbox "No entries" 0 0
 			exit 0
@@ -112,9 +119,14 @@ show_entries()
 		d --no-hot-list --colors --ok-label "Options" --cancel-label "Back" --menu "Entries" 0 0 "$(menuheight ${#list[@]})" "${list[@]}" || return 0
 		n="$result"
 
+		read -r type < <(jq -r ".[$n]|.type//\"unknown\"" < "$entryfile")
+
 		while true; do
-			list=(show json cat Raw edit Edit set-default "set as default" oneshot "set as one-shot")
-			if [ "$n" != "$default" ]; then
+			list=(show json)
+			if [ "$type" = "type1" ]; then
+				list+=(cat Raw edit Edit set-default "set as default" oneshot "set as one-shot")
+			fi
+			if [ "$n" != "$default" ] && [ "$type" != "loader" ]; then
 				list+=(delete delete)
 			fi
 			d --no-tags --menu "Entry #$n" 0 0 "$(menuheight ${#list[@]})" "${list[@]}" || break
@@ -126,31 +138,31 @@ show_entries()
 					d --textbox "$tmpfile" 0 0
 					;;
 				cat)
-					read -r fn < <(jq -r ".[$n]|[.path]|join(\" \")" < "$entryfile")
+					read -r fn < <(jq -r ".[$n]|.path" < "$entryfile")
 					d --textbox "$fn" 0 0
 					;;
 				edit)
-					read -r fn < <(jq -r ".[$n]|[.path]|join(\" \")" < "$entryfile")
+					read -r fn < <(jq -r ".[$n]|.path" < "$entryfile")
 					${EDITOR:-vim} "$fn"
 					update_entries
 					break
 					;;
 				delete)
-					read -r id < <(jq -r ".[$n]|[.id]|join(\" \")" < "$entryfile")
+					read -r id < <(jq -r ".[$n]|.id" < "$entryfile")
 					bootctl unlink "$id" > "$tmpfile" 2>&1
 					d --textbox "$tmpfile" 0 0
 					update_entries
 					break
 					;;
 				set-default)
-					read -r id < <(jq -r ".[$n]|[.id]|join(\" \")" < "$entryfile")
+					read -r id < <(jq -r ".[$n]|.id" < "$entryfile")
 					bootctl set-default "$id" > "$tmpfile" 2>&1
 					d --textbox "$tmpfile" 0 0
 					update_entries
 					break
 					;;
 				oneshot)
-					read -r id < <(jq -r ".[$n]|[.id]|join(\" \")" < "$entryfile")
+					read -r id < <(jq -r ".[$n]|.id" < "$entryfile")
 					bootctl set-oneshot "$id" > "$tmpfile" 2>&1
 					d --textbox "$tmpfile" 0 0
 					update_entries
