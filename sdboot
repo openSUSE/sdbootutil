@@ -204,8 +204,9 @@ show_snapper()
 					d --textbox "$tmpfile" 0 0
 					;;
 				entries)
-					read -r MACHINE_ID < /etc/machine-id
-					update_entries jq "[.[]|select(.machineId==\"$MACHINE_ID\")|select(has(\"options\"))|select(.options|match(\"@/.snapshots/$n/snapshot\"))]"
+					#read -r MACHINE_ID < /etc/machine-id
+					#update_entries jq "[.[]|select(.machineId==\"$MACHINE_ID\")|select(has(\"options\"))|select(.options|match(\"@/.snapshots/$n/snapshot\"))]"
+					update_entries jq "[.[]|select(has(\"options\"))|select(.options|match(\"root=UUID=$root_uuid .*rootflags=subvol=@/.snapshots/$n/snapshot\"))]"
 					show_entries
 					;;
 			esac
@@ -236,7 +237,7 @@ eval set -- "$getopttmp"
 
 while true ; do
         case "$1" in
-                -h|--help) helpandquit; shift ;;
+                -h|--help) helpandquit ;;
 		--flicker) dialog_altenate_screen=--keep-tite; shift ;;
 		-v|--verbose) verbose=$((++verbose)); shift ;;
                 --) shift ; break ;;
@@ -245,5 +246,6 @@ while true ; do
 done
 
 entry_token=$(bootctl|sed -ne 's/ *token: //p')
+root_uuid=$(findmnt / -r -n -o UUID)
 
 main_menu
