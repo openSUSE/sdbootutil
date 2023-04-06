@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: MIT
 # SPDX-FileCopyrightText: Copyright 2023 SUSE LLC
 set -e
+shopt -s nullglob
 
 # set to --keep-title to use altenate screen. Better for debugging but causes flicker
 dialog_altenate_screen=
@@ -74,15 +75,15 @@ update_entries()
 
 show_entries()
 {
-	if ! update_entries 2>"$tmpfile"; then
+	if ! update_entries "$@" 2>"$tmpfile"; then
 		d --title "Error" --textbox "$tmpfile" 0 0
-		exit 1
+		return 0
 	fi
 
 	while true; do
-		list=()
-		n=0
-		default=
+		local list=()
+		local n=0
+		local default=
 		while read -r isdefault isreported type title; do
 			color=
 			if [ "$isdefault" = "true" ]; then
@@ -100,7 +101,7 @@ show_entries()
 		done < <(jq '.[]|[.isDefault, if has("isReported") then .isReported else 0 end, if has("type") then .type else "unknown" end, .showTitle]|join(" ")' -r < "$entryfile")
 		if [ "${#list}" = 0 ]; then
 			d --msgbox "No entries" 0 0
-			exit 0
+			return 0
 		fi
 		d --no-hot-list --colors --ok-label "Options" --cancel-label "Back" --menu "Entries" 0 0 "$(menuheight ${#list[@]})" "${list[@]}" || return 0
 		n="$result"
@@ -214,16 +215,66 @@ show_snapper()
 	done
 }
 
+calc_chksum() {
+    # shellcheck disable=SC2046
+    set -- $(sha1sum "$1")
+    chksum="$1"
+}
+
+declare -A system_kernels
+update_kernels()
+{
+	for fn in /usr/lib/modules/*/vmlinuz; do
+		kv="${fn%/*}"
+		kv="${kv##*/}"
+		calc_chksum "$fn"
+		system_kernels["/$entry_token/$kv/linux-$chksum"]=system
+	done
+	update_entries jq "[.[]|select(has(\"options\"))|select(.options|match(\"root=UUID=$root_uuid .*rootflags=subvol=$root_subvol\"))]"
+
+	while read -r k; do
+		if [ -z "${system_kernels[$k]}" ]; then
+			system_kernels["$k"]=unknown
+		elif [ "${system_kernels[$k]}" = system ]; then
+			system_kernels["$k"]=installed
+		fi
+	done < <(jq -r '.[]|select(has("linux"))|.linux'< "$entryfile")
+}
+
+show_kernels()
+{
+	while true; do
+		update_kernels
+		list=()
+		n=0
+		default=
+		kernelfiles=("${!system_kernels[@]}")
+		for k in "${kernelfiles[@]}"; do
+			list+=("$n" "${system_kernels[$k]} $k")
+			n=$((++n))
+		done
+		if [ "${#list}" = 0 ]; then
+			d --msgbox "No kernels" 0 0
+			return 1
+		fi
+		d --no-tags --no-hot-list --colors --ok-label "Options" --cancel-label "Back" --menu "Kernels" 0 0 "$(menuheight ${#list[@]})" "${list[@]}" || return 0
+		n="$result"
+		update_entries jq "[.[]|select(has(\"linux\"))|select(.linux|match(\"${kernelfiles[$n]}\"))]"
+		show_entries
+	done
+}
+
 main_menu()
 {
 	while true; do
-		list=(snapper snapper sd-boot sd-boot)
+		list=(kernels kernels snapper snapper sd-boot sd-boot)
 		d --no-tags --cancel-label "Quit"  --menu "Main Menu" 0 0 "$(menuheight ${#list[@]})" "${list[@]}" || return 0
 		action="$result"
 
 		case "$action" in
 			snapper) show_snapper ;;
-			sd-boot) show_entries ;;
+			sd-boot) show_entries cat ;;
+			kernels) show_kernels ;;
 		esac
 	done
 }
@@ -247,5 +298,6 @@ done
 
 entry_token=$(bootctl|sed -ne 's/ *token: //p')
 root_uuid=$(findmnt / -r -n -o UUID)
+root_subvol=$(btrfs subvol show /|head -1)
 
 main_menu
