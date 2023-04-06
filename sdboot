@@ -64,20 +64,6 @@ stty_size() {
 	dh_menu=$((LINES-15))
 	dh_text=$((LINES-5))
 }
-stty_size
-
-getopttmp=$(getopt -o hc:v --long help,flicker,verbose -n "${0##*/}" -- "$@")
-eval set -- "$getopttmp"
-
-while true ; do
-        case "$1" in
-                -h|--help) helpandquit; shift ;;
-		--flicker) dialog_altenate_screen=--keep-tite; shift ;;
-		-v|--verbose) verbose=$((++verbose)); shift ;;
-                --) shift ; break ;;
-                *) echo "Internal error!" ; exit 1 ;;
-        esac
-done
 
 entry_filter=("cat")
 update_entries()
@@ -240,5 +226,24 @@ main_menu()
 		esac
 	done
 }
+
+####### main #######
+
+stty_size
+
+getopttmp=$(getopt -o hc:v --long help,flicker,verbose -n "${0##*/}" -- "$@")
+eval set -- "$getopttmp"
+
+while true ; do
+        case "$1" in
+                -h|--help) helpandquit; shift ;;
+		--flicker) dialog_altenate_screen=--keep-tite; shift ;;
+		-v|--verbose) verbose=$((++verbose)); shift ;;
+                --) shift ; break ;;
+                *) echo "Internal error!" ; exit 1 ;;
+        esac
+done
+
+entry_token=$(bootctl|sed -ne 's/ *token: //p')
 
 main_menu
