@@ -173,9 +173,9 @@ show_snapper()
 	fi
 
 	while true; do
-		list=()
-		n=0
-		default=
+		local list=()
+		local n=0
+		local default=
 		while read -r n isdefault title; do
 			[ "$n" != "0" ] || continue
 			if [ "$isdefault" = "true" ]; then
@@ -192,7 +192,7 @@ show_snapper()
 		n="$result"
 
 		while true; do
-			list=(show json entries entries)
+			list=(show json entries entries kernels kernels)
 			if [ "$n" != "$default" ]; then
 				list+=(delete delete)
 			fi
@@ -210,6 +210,9 @@ show_snapper()
 					update_entries jq "[.[]|select(has(\"options\"))|select(.options|match(\"root=UUID=$root_uuid .*rootflags=subvol=@/.snapshots/$n/snapshot\"))]"
 					show_entries
 					;;
+				kernels)
+					show_kernels "@/.snapshots/$n/snapshot"
+					;;
 			esac
 		done
 	done
@@ -224,40 +227,46 @@ calc_chksum() {
 declare -A system_kernels
 update_kernels()
 {
-	for fn in /usr/lib/modules/*/vmlinuz; do
+	subvol="${1:?}"
+	system_kernels=()
+	# find installed kernels, mark them as unregisted until we find them in ESP too
+	for fn in "${subvol#@}"/usr/lib/modules/*/vmlinuz; do
 		kv="${fn%/*}"
 		kv="${kv##*/}"
 		calc_chksum "$fn"
-		system_kernels["/$entry_token/$kv/linux-$chksum"]=system
+		system_kernels["/$entry_token/$kv/linux-$chksum"]=unregistered
 	done
-	update_entries jq "[.[]|select(has(\"options\"))|select(.options|match(\"root=UUID=$root_uuid .*rootflags=subvol=$root_subvol\"))]"
+	update_entries jq "[.[]|select(has(\"options\"))|select(.options|match(\"root=UUID=$root_uuid .*rootflags=subvol=$subvol\"))]"
 
 	while read -r k; do
+		# kernel in ESP that is not installed
 		if [ -z "${system_kernels[$k]}" ]; then
-			system_kernels["$k"]=unknown
-		elif [ "${system_kernels[$k]}" = system ]; then
-			system_kernels["$k"]=installed
+			system_kernels["$k"]=stale
+		elif [ "${system_kernels[$k]}" = unregistered ]; then
+			system_kernels["$k"]=bootable
 		fi
 	done < <(jq -r '.[]|select(has("linux"))|.linux'< "$entryfile")
 }
 
 show_kernels()
 {
+	subvol="${1:?}"
 	while true; do
-		update_kernels
-		list=()
-		n=0
-		default=
-		kernelfiles=("${!system_kernels[@]}")
+		update_kernels "$subvol"
+		local list=()
+		local n=0
+		local default=
+		local kernelfiles=("${!system_kernels[@]}")
 		for k in "${kernelfiles[@]}"; do
-			list+=("$n" "${system_kernels[$k]} $k")
+			s="${k#/*/}"
+			list+=("$n" "$(printf "%-10s %s" "${system_kernels[$k]}" "$s")")
 			n=$((++n))
 		done
 		if [ "${#list}" = 0 ]; then
 			d --msgbox "No kernels" 0 0
 			return 1
 		fi
-		d --no-tags --no-hot-list --colors --ok-label "Options" --cancel-label "Back" --menu "Kernels" 0 0 "$(menuheight ${#list[@]})" "${list[@]}" || return 0
+		d --no-tags --no-hot-list --colors --ok-label "Options" --cancel-label "Back" --menu "Kernels associated with $subvol" 0 0 "$(menuheight ${#list[@]})" "${list[@]}" || return 0
 		n="$result"
 		update_entries jq "[.[]|select(has(\"linux\"))|select(.linux|match(\"${kernelfiles[$n]}\"))]"
 		show_entries
@@ -274,7 +283,7 @@ main_menu()
 		case "$action" in
 			snapper) show_snapper ;;
 			sd-boot) show_entries cat ;;
-			kernels) show_kernels ;;
+			kernels) show_kernels "$root_subvol";;
 		esac
 	done
 }
