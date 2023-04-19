@@ -75,10 +75,7 @@ update_entries()
 
 show_entries()
 {
-	if ! update_entries "$@" 2>"$tmpfile"; then
-		d --title "Error" --textbox "$tmpfile" 0 0
-		return 0
-	fi
+	local dialogtitle="${1:-Entries}"
 
 	while true; do
 		local list=()
@@ -103,7 +100,7 @@ show_entries()
 			d --msgbox "No entries" 0 0
 			return 0
 		fi
-		d --no-hot-list --colors --ok-label "Options" --cancel-label "Back" --menu "Entries" 0 0 "$(menuheight ${#list[@]})" "${list[@]}" || return 0
+		d --no-hot-list --colors --ok-label "Options" --cancel-label "Back" --menu "$dialogtitle" 0 0 "$(menuheight ${#list[@]})" "${list[@]}" || return 0
 		n="$result"
 
 		read -r type < <(jq -r ".[$n]|.type//\"unknown\"" < "$entryfile")
@@ -186,9 +183,9 @@ show_snapper()
 		done < <(jq '.root|.[]|[.number, .default, .description]|join(" ")' -r < "$snapperfile")
 		if [ "${#list}" = 0 ]; then
 			d --msgbox "No snapshots" 0 0
-			exit 0
+			return 0
 		fi
-		d --no-hot-list --colors --ok-label "Options" --cancel-label "Quit" --menu "Snapshots" 0 0 "$(menuheight ${#list[@]})" "${list[@]}" || exit 1
+		d --no-hot-list --colors --ok-label "Options" --cancel-label "Back" --menu "Snapshots" 0 0 "$(menuheight ${#list[@]})" "${list[@]}" || return 0
 		n="$result"
 
 		while true; do
@@ -208,7 +205,7 @@ show_snapper()
 					#read -r MACHINE_ID < /etc/machine-id
 					#update_entries jq "[.[]|select(.machineId==\"$MACHINE_ID\")|select(has(\"options\"))|select(.options|match(\"@/.snapshots/$n/snapshot\"))]"
 					update_entries jq "[.[]|select(has(\"options\"))|select(.options|match(\"root=UUID=$root_uuid .*rootflags=subvol=@/.snapshots/$n/snapshot\"))]"
-					show_entries
+					show_entries "Entries for Snapshot $n"
 					;;
 				kernels)
 					show_kernels "@/.snapshots/$n/snapshot"
@@ -269,7 +266,7 @@ show_kernels()
 		d --no-tags --no-hot-list --colors --ok-label "Options" --cancel-label "Back" --menu "Kernels associated with $subvol" 0 0 "$(menuheight ${#list[@]})" "${list[@]}" || return 0
 		n="$result"
 		update_entries jq "[.[]|select(has(\"linux\"))|select(.linux|match(\"${kernelfiles[$n]}\"))]"
-		show_entries
+		show_entries "Entries for kernel ${kernelfiles[$n]#/*/}"
 	done
 }
 
@@ -282,7 +279,7 @@ main_menu()
 
 		case "$action" in
 			snapper) show_snapper ;;
-			sd-boot) show_entries cat ;;
+			sd-boot) update_entries cat; show_entries ;;
 			kernels) show_kernels "$root_subvol";;
 		esac
 	done
