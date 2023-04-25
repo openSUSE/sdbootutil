@@ -246,7 +246,7 @@ update_kernels()
 		kv="${fn%/*}"
 		kv="${kv##*/}"
 		calc_chksum "$fn"
-		system_kernels["/$entry_token/$kv/linux-$chksum"]=unregistered
+		system_kernels["/$entry_token/$kv/linux-$chksum"]=missing
 	done
 	update_entries jq "[.[]|select(has(\"options\"))|select(.options|match(\"root=UUID=$root_uuid .*rootflags=subvol=$subvol\"))]"
 
@@ -254,7 +254,7 @@ update_kernels()
 		# kernel in ESP that is not installed
 		if [ -z "${system_kernels[$k]}" ]; then
 			system_kernels["$k"]="!$id"
-		elif [ "${system_kernels[$k]}" = unregistered ]; then
+		elif [ "${system_kernels[$k]}" = missing ]; then
 			system_kernels["$k"]="$id"
 		fi
 	done < <(jq -r '.[]|select(has("linux"))|[.linux,.id]|join(" ")'< "$entryfile")
@@ -272,7 +272,7 @@ show_kernels()
 		local states=()
 		for k in "${kernelfiles[@]}"; do
 			state="${system_kernels[$k]}"
-			if [ "$state" != 'unregistered' ]; then
+			if [ "$state" != 'missing' ]; then
 				if [ "${state:0:1}" = '!' ]; then
 					state="stale"
 				else
