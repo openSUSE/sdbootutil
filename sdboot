@@ -44,6 +44,12 @@ d(){
 	return "$retval"
 }
 
+err()
+{
+	d --title 'Error' --ok-label "Quit" --colors --aspect 60 --msgbox "\Z1Error:\Zn $*" 0 0
+	exit 1
+}
+
 # Given the number of total item pairs, outputs the number of items to display at once
 menuheight() {
 	local height=$(($1 / 2))
@@ -340,5 +346,9 @@ done
 entry_token=$(bootctl|sed -ne 's/ *token: //p')
 root_uuid=$(findmnt / -r -n -o UUID)
 root_subvol=$(btrfs subvol show /|head -1)
+
+[ -n "$entry_token" ] || err "No entry token. sd-boot not installed?"
+[ -n "$root_uuid" ] || err "Can't determine root UUID"
+[ -n "$root_subvol" ] || err "Can't determine root subvolume"
 
 main_menu
