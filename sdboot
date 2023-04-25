@@ -103,57 +103,66 @@ show_entries()
 		d --no-hot-list --colors --ok-label "Options" --cancel-label "Back" --menu "$dialogtitle" 0 0 "$(menuheight ${#list[@]})" "${list[@]}" || return 0
 		n="$result"
 
-		read -r type < <(jq -r ".[$n]|.type//\"unknown\"" < "$entryfile")
+		show_entry ".[$n]"
+	done
+}
 
-		while true; do
-			list=(show json)
-			if [ "$type" = "type1" ]; then
-				list+=(cat Raw edit Edit set-default "set as default" oneshot "set as one-shot")
-			fi
-			if [ "$n" != "$default" ] && [ "$type" != "loader" ]; then
-				list+=(delete delete)
-			fi
-			d --no-tags --menu "Entry #$n" 0 0 "$(menuheight ${#list[@]})" "${list[@]}" || break
-			action="$result"
+show_entry()
+{
+	local filter="$1"
+	local type
+	local isreported
+	local isdefault
 
-			case "$action" in
-				show)
-					jq ".[$n]" < "$entryfile" > "$tmpfile"
-					d --textbox "$tmpfile" 0 0
-					;;
-				cat)
-					read -r fn < <(jq -r ".[$n]|.path" < "$entryfile")
-					d --textbox "$fn" 0 0
-					;;
-				edit)
-					read -r fn < <(jq -r ".[$n]|.path" < "$entryfile")
-					${EDITOR:-vim} "$fn"
-					update_entries
-					break
-					;;
-				delete)
-					read -r id < <(jq -r ".[$n]|.id" < "$entryfile")
-					bootctl unlink "$id" > "$tmpfile" 2>&1
-					d --textbox "$tmpfile" 0 0
-					update_entries
-					break
-					;;
-				set-default)
-					read -r id < <(jq -r ".[$n]|.id" < "$entryfile")
-					bootctl set-default "$id" > "$tmpfile" 2>&1
-					d --textbox "$tmpfile" 0 0
-					update_entries
-					break
-					;;
-				oneshot)
-					read -r id < <(jq -r ".[$n]|.id" < "$entryfile")
-					bootctl set-oneshot "$id" > "$tmpfile" 2>&1
-					d --textbox "$tmpfile" 0 0
-					update_entries
-					break
-					;;
-			esac
-		done
+	read -r isdefault isreported type title < <(jq "$filter"'|[.isDefault, if has("isReported") then .isReported else 0 end, if has("type") then .type else "unknown" end, .showTitle]|join(" ")' -r < "$entryfile")
+
+	while true; do
+		local list=(show json)
+		if [ "$type" = "type1" ]; then
+			list+=(cat Raw edit Edit set-default "set as default" oneshot "set as one-shot")
+		fi
+		if [ "$isdefault" = 'false' ] && [ "$type" != "loader" ]; then
+			list+=(delete delete)
+		fi
+		d --no-tags --menu "Entry #$title" 0 0 "$(menuheight ${#list[@]})" "${list[@]}" || break
+		action="$result"
+
+		case "$action" in
+			show)
+				jq "$filter" < "$entryfile" > "$tmpfile"
+				d --textbox "$tmpfile" 0 0
+				;;
+			cat)
+				read -r fn < <(jq -r "$filter|.path" < "$entryfile")
+				d --textbox "$fn" 0 0
+				;;
+			edit)
+				read -r fn < <(jq -r "$filter|.path" < "$entryfile")
+				${EDITOR:-vim} "$fn"
+				update_entries
+				;;
+			delete)
+				read -r id < <(jq -r "$filter|.id" < "$entryfile")
+				bootctl unlink "$id" > "$tmpfile" 2>&1
+				d --textbox "$tmpfile" 0 0
+				update_entries
+				break
+				;;
+			set-default)
+				read -r id < <(jq -r "$filter|.id" < "$entryfile")
+				bootctl set-default "$id" > "$tmpfile" 2>&1
+				d --textbox "$tmpfile" 0 0
+				update_entries
+				break
+				;;
+			oneshot)
+				read -r id < <(jq -r "$filter|.id" < "$entryfile")
+				bootctl set-oneshot "$id" > "$tmpfile" 2>&1
+				d --textbox "$tmpfile" 0 0
+				update_entries
+				break
+				;;
+		esac
 	done
 }
 
@@ -235,14 +244,14 @@ update_kernels()
 	done
 	update_entries jq "[.[]|select(has(\"options\"))|select(.options|match(\"root=UUID=$root_uuid .*rootflags=subvol=$subvol\"))]"
 
-	while read -r k; do
+	while read -r k id; do
 		# kernel in ESP that is not installed
 		if [ -z "${system_kernels[$k]}" ]; then
-			system_kernels["$k"]=stale
+			system_kernels["$k"]="!$id"
 		elif [ "${system_kernels[$k]}" = unregistered ]; then
-			system_kernels["$k"]=bootable
+			system_kernels["$k"]="$id"
 		fi
-	done < <(jq -r '.[]|select(has("linux"))|.linux'< "$entryfile")
+	done < <(jq -r '.[]|select(has("linux"))|[.linux,.id]|join(" ")'< "$entryfile")
 }
 
 show_kernels()
@@ -254,9 +263,19 @@ show_kernels()
 		local n=0
 		local default=
 		local kernelfiles=("${!system_kernels[@]}")
+		local states=()
 		for k in "${kernelfiles[@]}"; do
+			state="${system_kernels[$k]}"
+			if [ "$state" != 'unregistered' ]; then
+				if [ "${state:0:1}" = '!' ]; then
+					state="stale"
+				else
+					state="ok"
+				fi
+			fi
+			states+=("$state")
 			s="${k#/*/}"
-			list+=("$n" "$(printf "%-10s %s" "${system_kernels[$k]}" "$s")")
+			list+=("$n" "$(printf "%-10s %s" "$state" "$s")")
 			n=$((++n))
 		done
 		if [ "${#list}" = 0 ]; then
@@ -265,8 +284,24 @@ show_kernels()
 		fi
 		d --no-tags --no-hot-list --colors --ok-label "Options" --cancel-label "Back" --menu "Kernels associated with $subvol" 0 0 "$(menuheight ${#list[@]})" "${list[@]}" || return 0
 		n="$result"
-		update_entries jq "[.[]|select(has(\"linux\"))|select(.linux|match(\"${kernelfiles[$n]}\"))]"
-		show_entries "Entries for kernel ${kernelfiles[$n]#/*/}"
+
+		local id="${system_kernels[${kernelfiles[$n]}]}"
+		[ "${id:0:1}" = '!' ] && id="${id:1}" # stale
+		list=(show "$id" entries "Other Entries")
+		while true; do
+			d --no-tags --no-hot-list --colors --ok-label "Ok" --cancel-label "Back" --menu "Kernel ${kernelfiles[$n]}" 0 0 "$(menuheight ${#list[@]})" "${list[@]}" || break
+			action="$result"
+
+			case "$action" in
+				entries)
+					update_entries jq "[.[]|select(has(\"linux\"))|select(.linux|match(\"${kernelfiles[$n]}\"))]"
+					show_entries "Entries for kernel ${kernelfiles[$n]#/*/}"
+					;;
+				show)
+					show_entry ".[]|select(.id|match(\"$id\"))"
+					;;
+			esac
+		done
 	done
 }
 
