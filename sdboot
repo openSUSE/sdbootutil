@@ -215,14 +215,14 @@ install_kernel()
 		dstinitrd="${dst%/*}/initrd-$chksum"
 	fi
 
-	sort_key=
+	sort_key="$ID"
 	entry_machine_id=
 	[ "$entry_token" = "$machine_id" ] && entry_machine_id="$machine_id"
 
 	cat > "$tmpdir/entry.conf" <<-EOF
 	# Boot Loader Specification type#1 entry
-	title      $PRETTY_NAME@$snapshot
-	version    $kernel_version${entry_machine_id:+${nl}machine-id $entry_machine_id}${sort_key:+${nl}sort-key   $sort_key}
+	title      $PRETTY_NAME
+	version    $snapshot@$kernel_version${entry_machine_id:+${nl}machine-id $entry_machine_id}${sort_key:+${nl}sort-key   $sort_key}
 	options    $boot_options
 	linux      $dst
 	initrd     $dstinitrd
@@ -401,7 +401,7 @@ show_snapper()
 		n="$result"
 
 		while true; do
-			list=(show json entries entries kernels kernels)
+			list=(kernels kernels entries entries show json)
 			if [ "$n" != "$default" ]; then
 				list+=(delete delete)
 			fi
@@ -528,7 +528,7 @@ show_kernels()
 main_menu()
 {
 	while true; do
-		list=(kernels kernels snapper snapper sd-boot sd-boot)
+		list=(kernels Kernels snapper Snapshots sd-boot Entries)
 		d --no-tags --cancel-label "Quit"  --menu "Main Menu" 0 0 "$(menuheight ${#list[@]})" "${list[@]}" || return 0
 		action="$result"
 
