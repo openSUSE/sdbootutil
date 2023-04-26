@@ -1,0 +1,4 @@
+- implement tries
+- add a way to set new entry to boot. When installing a newer version of a
+  kernel with same flavor, that flavor needs to be the default. Similarly when
+  a new snapshot is added, the matching flavor needs to be preferred.
