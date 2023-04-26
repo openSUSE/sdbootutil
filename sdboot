@@ -6,30 +6,46 @@ shopt -s nullglob
 
 # set to --keep-title to use altenate screen. Better for debugging but causes flicker
 dialog_altenate_screen=
+dialog_backtitle="Systemd-boot"
+interactive=
+verbose=
+nl=$'\n'
 
-entryfile=$(mktemp sdboot.XXXXXX)
-snapperfile=$(mktemp sdboot.XXXXXX)
-tmpfile=$(mktemp sdboot.XXXXXX)
+tmpdir=$(mktemp -d -t sdboot.XXXXXX)
 cleanup()
 {
-	rm -f "$snapperfile" "$entryfile" "$tmpfile"
+	rm -rf "$tmpdir"
 }
 trap cleanup EXIT
+
+entryfile="$tmpdir/entries.json"
+snapperfile="$tmpdir/snapper.json"
+tmpfile="$tmpdir/tmp"
 
 helpandquit()
 {
 	cat <<-EOF
-		Usage: $0 [OPTIONS]
+		Usage: $0 [OPTIONS] [COMMAND]
 		OPTIONS:
 		  --verbose  verbose
 		  -h         help screen
+
+		COMMAND:
+		add-kernel VERSION [SUBVOL]
+			   create boot entry for specified kernel
+		remove-kernel VERSION [SUBVOL]
+			   remove boot entry for specified kernel
+		kernels    open kernel menu
+		snapshots  open snapshots menu
+		entries    open entry menu
+
 	EOF
 	exit 0
 }
 
 log_info()
 {
-	[ "$verbose" -gt 0 ] || return 0
+	[ "${verbose:-0}" -gt 0 ] || return 0
 	echo "$@"
 }
 
@@ -38,7 +54,7 @@ d(){
 	# Bash makes it a bit annoying to read the output of a different FD into a variable, it
 	# only supports reading stdout by itself. So redirect 3 to stdout and 1 to the real stdout.
 	exec {stdoutfd}>&1
-	result="$(dialog $dialog_altenate_screen --backtitle "Systemd-boot" --output-fd 3 "$@" 3>&1 1>&${stdoutfd})" || retval=$?
+	result="$(dialog $dialog_altenate_screen --backtitle "$dialog_backtitle" --output-fd 3 "$@" 3>&1 1>&${stdoutfd})" || retval=$?
 	# Word splitting makes it necessary to use eval here.
 	eval "exec ${stdoutfd}>&-"
 	return "$retval"
@@ -46,8 +62,31 @@ d(){
 
 err()
 {
-	d --title 'Error' --ok-label "Quit" --colors --aspect 60 --msgbox "\Z1Error:\Zn $*" 0 0
+	if [ "$interactive" = 1 ]; then
+		d --title 'Error' --ok-label "Quit" --colors --aspect 60 --msgbox "\Z1Error:\Zn $*" 0 0
+	else
+		echo "Error: $*" >&2
+	fi
 	exit 1
+}
+
+run_command_live_output()
+{
+	if [ "$interactive" = 1 ]; then
+		"$@" 2>&1 | dialog $dialog_altenate_screen --backtitle "$dialog_backtitle" --title "$1" --aspect 60 --progressbox 0 0
+	else
+		"$@"
+	fi
+}
+
+run_command_output()
+{
+	if [ "$interactive" = 1 ]; then
+		"$@" > "$tmpfile" 2>&1
+		[ -s "$tmpfile" ] && d --textbox "$tmpfile" 0 0
+	else
+		"$@"
+	fi
 }
 
 # Given the number of total item pairs, outputs the number of items to display at once
@@ -72,6 +111,148 @@ stty_size() {
 	dh_text=$((LINES-5))
 }
 
+subvol_is_ro()
+{
+	local subvol="${1:?}"
+	while read -r line; do
+		[ "$line" = "ro=true" ] && return 0
+	done < <(btrfs prop get -t s "${subvol#@}" ro)
+	return 1
+}
+
+detect_parent() {
+	local subvol="$1"
+	parent_uuid="$(btrfs subvol show "${subvol#@}" | sed -ne 's/\s*Parent UUID:\s*//p')"
+	[ "$parent_uuid" != '-' ] || parent_uuid=
+	[ -n "$parent_uuid" ] || return 0
+	parent_subvol="$(/sbin/btrfs subvol show -u "$parent_uuid" "${subvol#@}" | head -1)"
+	parent_snapshot="${parent_subvol#@/.snapshots/}"
+	if [ "$parent_subvol" = "$parent_snapshot" ]; then
+		unset parent_subvol parent_snapshot
+	else
+		parent_snapshot="${parent_snapshot%/snapshot}"
+	fi
+}
+
+sedrootflags()
+{
+	local subvol="${1:?}"
+	sed -e "s/[ \t]\+/ /g;s/\<\(BOOT_IMAGE\|initrd\)=[^ ]* \?//;s,rootflags=subvol=[^ ]*,rootflags=subvol=$subvol,;tx; s,\$, rootflags=subvol=$subvol,;:x"
+}
+
+remove_kernel()
+{
+	local subvol="$1"
+	local kernel_version="$2"
+	local snapshot="${subvol#@/.snapshots/}"
+	snapshot="${snapshot%/*}"
+	local id="$entry_token-$kernel_version-$snapshot.conf"
+	run_command_output bootctl unlink "$id"
+}
+
+install_kernel()
+{
+	local subvol="$1"
+	local kernel_version="$2"
+	local src="${subvol#@}/lib/modules/$kernel_version/vmlinuz"
+	test -e "$src" || err "Can't find $src"
+
+	calc_chksum "$src"
+	dst="/$entry_token/$kernel_version/linux-$chksum"
+
+	local snapshot="${subvol#@/.snapshots/}"
+	snapshot="${snapshot%/*}"
+
+	local initrd="${src%/*}/initrd"
+
+	mkdir -p "$boot_root${dst%/*}"
+
+	if [ -e "$initrd" ]; then
+		ln -s "$initrd" "$tmpdir/initrd"
+	else
+		# check if we can reuse the initrd from the parent
+		# to avoid expensive regeneration
+		detect_parent "$subvol"
+		parent_conf="$boot_root/loader/entries/$entry_token-$kernel_version-$parent_snapshot.conf"
+		if [ -n "$parent_subvol" ] && [ -e "$parent_conf" ]; then
+			subvol_is_ro "$parent_subvol" || err "Parent snapshot $parent_snapshot is not read-only, can't reuse initrd"
+			local k
+			local v
+			while read -r k v; do
+				[ "$k" = 'initrd' ] || continue
+				log_info "found previous initrd $v"
+				dstinitrd="$v"
+				break
+			done < "$parent_conf"
+			[ -n "$dstinitrd" ] || err "no initrd for kernel $kernel_version in parent snapshot $parent_snapshot found"
+		elif [ "$subvol" != "$root_subvol" ]; then
+			err "Can't call dracut for snapshots that have no initrd yet"
+		else
+			run_command_live_output dracut --reproducible "$tmpdir/initrd" "$kernel_version"
+		fi
+	fi
+
+	# XXX: pollutes namespace
+	if [ -f /etc/os-release ]; then
+	    # shellcheck source=/dev/null
+	    . /etc/os-release
+	elif [ -f /usr/lib/os-release ]; then
+	    # shellcheck source=/dev/null
+	    . /usr/lib/os-release
+	fi
+
+	[ -n "$PRETTY_NAME" ] || "Linux $kernel_version"
+
+	local boot_options=
+	for i in /etc/kernel/cmdline /usr/lib/kernel/cmdline /proc/cmdline; do
+		[ -f "$i" ] || continue
+		boot_options="$(sedrootflags "$subvol" < "$i")"
+		break
+	done
+
+	if [ -z "$dstinitrd" ] && [ -e "$tmpdir/initrd" ]; then
+		calc_chksum "$tmpdir/initrd"
+		dstinitrd="${dst%/*}/initrd-$chksum"
+	fi
+
+	sort_key=
+	entry_machine_id=
+	[ "$entry_token" = "$machine_id" ] && entry_machine_id="$machine_id"
+
+	cat > "$tmpdir/entry.conf" <<-EOF
+	# Boot Loader Specification type#1 entry
+	title      $PRETTY_NAME@$snapshot
+	version    $kernel_version${entry_machine_id:+${nl}machine-id $entry_machine_id}${sort_key:+${nl}sort-key   $sort_key}
+	options    $boot_options
+	linux      $dst
+	initrd     $dstinitrd
+	EOF
+
+	local failed=
+	if [ ! -e "$boot_root$dst" ]; then
+		install -m 0644 "$src" "$boot_root$dst" || failed=kernel
+		chown root:root "$boot_root$dst" 2>/dev/null || :
+		log_info "installed $boot_root$dst"
+	else
+		log_info "reusing $boot_root$dst"
+	fi
+	if [ -z "$failed" ] && [ -e "$tmpdir/initrd" ] && [ ! -e "$boot_root$dstinitrd" ]; then
+		install -m 0644 "$tmpdir/initrd" "$boot_root$dstinitrd" || failed=initrd
+		chown root:root "$boot_root$dstinitrd" 2>/dev/null || :
+		log_info "installed $boot_root$dstinitrd"
+	fi
+	if [ -z "$failed" ]; then
+		loader_entry="$boot_root/loader/entries/$entry_token-$kernel_version-$snapshot.conf"
+		install -m 0644 "$tmpdir/entry.conf" "$loader_entry" || failed="bootloader entry"
+		chown root:root "$boot_root$dstinitrd" 2>/dev/null || :
+		log_info "installed $loader_entry"
+	fi
+	if [ -n "$failed" ]; then
+		rm -f "$boot_root$dst" "$boot_root$dstinitrd"
+		err "Failed to install $failed"
+	fi
+}
+
 entry_filter=("cat")
 update_entries()
 {
@@ -82,6 +263,8 @@ update_entries()
 show_entries()
 {
 	local dialogtitle="${1:-Entries}"
+
+	[ -s "$entryfile" ] || update_entries
 
 	while true; do
 		local list=()
@@ -119,16 +302,30 @@ show_entry()
 	local type
 	local isreported
 	local isdefault
+	local new=
 
 	read -r isdefault isreported type title < <(jq "$filter"'|[.isDefault, if has("isReported") then .isReported else 0 end, if has("type") then .type else "unknown" end, .showTitle]|join(" ")' -r < "$entryfile")
+
+	[ "$isdefault" = true ] || isdefault=
+	[ "$isreported" = true ] || new=1
+
+	if [ -n "$isdefault$new" ]; then
+		title="$title ["
+		[ -z "$isdefault" ] || title="${title}default"
+		[ -z "$new" ] || title="${title}${isdefault:+,}new"
+		title="$title]"
+	fi
 
 	while true; do
 		local list=(show json)
 		if [ "$type" = "type1" ]; then
-			list+=(cat Raw edit Edit set-default "set as default" oneshot "set as one-shot")
+			list+=(cat Raw edit Edit)
 		fi
-		if [ "$isdefault" = 'false' ] && [ "$type" != "loader" ]; then
-			list+=(delete delete)
+		if [ -z "$isdefault" ]; then
+			list+=(set-default "set as default" oneshot "set as one-shot")
+			if [ "$type" != "loader" ]; then
+				list+=(delete delete)
+			fi
 		fi
 		d --no-tags --menu "Entry #$title" 0 0 "$(menuheight ${#list[@]})" "${list[@]}" || break
 		action="$result"
@@ -150,21 +347,21 @@ show_entry()
 			delete)
 				read -r id < <(jq -r "$filter|.id" < "$entryfile")
 				bootctl unlink "$id" > "$tmpfile" 2>&1
-				d --textbox "$tmpfile" 0 0
+				[ -s "$tmpfile" ] && d --textbox "$tmpfile" 0 0
 				update_entries
 				break
 				;;
 			set-default)
 				read -r id < <(jq -r "$filter|.id" < "$entryfile")
 				bootctl set-default "$id" > "$tmpfile" 2>&1
-				d --textbox "$tmpfile" 0 0
+				[ -s "$tmpfile" ] && d --textbox "$tmpfile" 0 0
 				update_entries
 				break
 				;;
 			oneshot)
 				read -r id < <(jq -r "$filter|.id" < "$entryfile")
 				bootctl set-oneshot "$id" > "$tmpfile" 2>&1
-				d --textbox "$tmpfile" 0 0
+				[ -s "$tmpfile" ] && d --textbox "$tmpfile" 0 0
 				update_entries
 				break
 				;;
@@ -236,6 +433,8 @@ calc_chksum() {
     chksum="$1"
 }
 
+# map that uses expected path on the ESP for each kernel. The value indicates
+# whether that kernel is installed, stale or missing in the ESP
 declare -A system_kernels
 update_kernels()
 {
@@ -292,10 +491,20 @@ show_kernels()
 		n="$result"
 
 		local id="${system_kernels[${kernelfiles[$n]}]}"
-		[ "${id:0:1}" = '!' ] && id="${id:1}" # stale
-		list=(show "$id" entries "Other Entries")
+		list=()
+		if [ "$id" = "missing" ]; then
+			list+=(install "Install")
+		else
+			[ "${id:0:1}" = '!' ] && id="${id:1}" # stale
+			list+=(show "Entry")
+		fi
+		list+=(entries "Other Entries")
+
+		local kv="${kernelfiles[$n]%/*}"
+		kv="${kv##*/}"
+		local title="Kernel $kv"
 		while true; do
-			d --no-tags --no-hot-list --colors --ok-label "Ok" --cancel-label "Back" --menu "Kernel ${kernelfiles[$n]}" 0 0 "$(menuheight ${#list[@]})" "${list[@]}" || break
+			d --no-tags --no-hot-list --colors --ok-label "Ok" --cancel-label "Back" --menu "$title" 0 0 "$(menuheight ${#list[@]})" "${list[@]}" || break
 			action="$result"
 
 			case "$action" in
@@ -305,6 +514,11 @@ show_kernels()
 					;;
 				show)
 					show_entry ".[]|select(.id|match(\"$id\"))"
+					break # might have selected delete so refresh
+					;;
+				install)
+					install_kernel "$subvol" "$kv"
+					break
 					;;
 			esac
 		done
@@ -343,12 +557,33 @@ while true ; do
         esac
 done
 
-entry_token=$(bootctl|sed -ne 's/ *token: //p')
+case "$1" in
+	add-kernel|remove-kernel) ;;
+	*) interactive=1 ;;
+esac
+
+# XXX: bootctl should have json output for that too
+eval "$(bootctl 2>/dev/null | sed -ne 's/ *token: *\(\w\+\)/entry_token="\1"/p;s, *\$BOOT: *\([^ ]\+\).*,boot_root="\1",p')"
 root_uuid=$(findmnt / -r -n -o UUID)
 root_subvol=$(btrfs subvol show /|head -1)
+read -r machine_id < /etc/machine-id
 
+[ -n "$machine_id" ] || err "Empty machine id. Fix /etc/machine-id"
+[ -n "$boot_root" ] || err "No ESP detected. Legacy system?"
 [ -n "$entry_token" ] || err "No entry token. sd-boot not installed?"
 [ -n "$root_uuid" ] || err "Can't determine root UUID"
 [ -n "$root_subvol" ] || err "Can't determine root subvolume"
 
-main_menu
+if [ "$1" = "add-kernel" ]; then
+	install_kernel "${3:-$root_subvol}" "$2"
+elif [ "$1" = "remove-kernel" ]; then
+	remove_kernel "${3:-$root_subvol}" "$2"
+elif [ "$1" = "kernels" ]; then
+	show_kernels "$root_subvol"
+elif [ "$1" = "snapshots" ]; then
+	show_snapper
+elif [ "$1" = "entries" ]; then
+	show_entries
+else
+	main_menu
+fi
