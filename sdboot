@@ -10,6 +10,11 @@ dialog_backtitle="Systemd-boot"
 interactive=
 verbose=
 nl=$'\n'
+shimdir="/usr/share/efi/$(uname -m)"
+sdboot_vendor="systemd"
+sdboot_dst="/EFI/$sdboot_vendor"
+arg_esp_path=
+arg_entry_token=
 
 tmpdir=$(mktemp -d -t sdboot.XXXXXX)
 cleanup()
@@ -69,6 +74,18 @@ err()
 	fi
 	exit 1
 }
+
+warn()
+{
+	if [ "$interactive" = 1 ]; then
+		d --title 'Warning' --ok-label "Continue" --colors --aspect 60 --msgbox "\Z1Warning:\Zn $*" 0 0
+	else
+		echo "Warning: $*" >&2
+	fi
+	exit 1
+}
+
+
 
 run_command_live_output()
 {
@@ -192,17 +209,6 @@ install_kernel()
 		fi
 	fi
 
-	# XXX: pollutes namespace
-	if [ -f /etc/os-release ]; then
-	    # shellcheck source=/dev/null
-	    . /etc/os-release
-	elif [ -f /usr/lib/os-release ]; then
-	    # shellcheck source=/dev/null
-	    . /usr/lib/os-release
-	fi
-
-	[ -n "$PRETTY_NAME" ] || "Linux $kernel_version"
-
 	local boot_options=
 	for i in /etc/kernel/cmdline /usr/lib/kernel/cmdline /proc/cmdline; do
 		[ -f "$i" ] || continue
@@ -221,7 +227,7 @@ install_kernel()
 
 	cat > "$tmpdir/entry.conf" <<-EOF
 	# Boot Loader Specification type#1 entry
-	title      $PRETTY_NAME
+	title      ${os_release_PRETTY_NAME:-Linux $kernel_version}
 	version    $snapshot@$kernel_version${entry_machine_id:+${nl}machine-id $entry_machine_id}${sort_key:+${nl}sort-key   $sort_key}
 	options    $boot_options
 	linux      $dst
@@ -525,10 +531,102 @@ show_kernels()
 	done
 }
 
+sdboot_is_installed()
+{
+	[ -e "$boot_root$sdboot_dst/systemd-boot$firmware_arch.efi" ] && \
+		grep -q '#### LoaderInfo: systemd-boot' "$boot_root$sdboot_dst/systemd-boot$firmware_arch.efi"
+}
+
+# TODO: need to create a boot variable if it's not the first installation
+install_sdboot()
+{
+	# XXX: this is a hack in case we need to inject a signed
+	# systemd-boot from a separate package
+	local sdboot="/usr/lib/systemd-boot/systemd-boot$firmware_arch.efi"
+	[ -e "$sdboot" ] || sdboot="/usr/lib/systemd/boot/efi/systemd-boot$firmware_arch.efi"
+	[ -e "$sdboot" ] || err "missing $sdboot"
+
+	if [ -e "$shimdir/shim.efi" ]; then
+		entry="$sdboot_dst/shim.efi"
+		for i in MokManager shim; do
+			install -D "$shimdir/$i.efi" "$boot_root$sdboot_dst/$i.efi"
+		done
+		install -D "$sdboot" "$boot_root$sdboot_dst/grub.efi"
+		echo "shim.efi,openSUSE Boot Manager" | iconv -f ascii -t ucs2 > "$boot_root/$sdboot_dst/boot.csv"
+		# boot entry point
+		for i in MokManager fallback; do
+			install -D "$shimdir/$i.efi" "$boot_root/EFI/BOOT/$i.efi"
+		done
+		install -D "$shimdir/shim.efi" "$boot_root/EFI/BOOT/BOOT${firmware_arch^^}.EFI"
+	else
+		entry="$sdboot_dst/${sdboot##*/}"
+		install -D "$sdboot" "$boot_root$entry"
+		echo "${sdboot##*/},openSUSE Boot Manager" | iconv -f ascii -t ucs2 > "$boot_root/$sdboot_dst/boot.csv"
+	fi
+	mkdir -p "$boot_root/$entry_token"
+	[ -s /etc/kernel/entry-token ] || echo "$entry_token" > /etc/kernel/entry-token
+	update_random_seed
+}
+
+settle_entry_token()
+{
+	case "$arg_entry_token" in
+		"") return 0 ;;
+		auto)
+			if [ -s '/etc/kernel/entry-token' ]; then
+				read -r entry_token < '/etc/kernel/entry-token'
+			else
+				entry_token="$machine_id"
+				# bootctl has more here in case the machine id
+				# is random falls back to trying IMAGE_ID and
+				# ID, only them machine id. We assume there is
+				# a valid machine-id
+			fi
+			;;
+		machine-id) entry_token="$machine_id" ;;
+		os-id)
+			# shellcheck disable=SC2154
+			entry_token="$os_release_ID"
+			[ -n "$entry_token" ] || err "Missing ID"
+			;;
+		os-image)
+			# shellcheck disable=SC2154
+			entry_token="$os_release_IMAGE_ID"
+			[ -n "$entry_token" ] || err "Missing IMAGE_ID"
+			;;
+		*) entry_token="$arg_entry_token" ;;
+	esac
+	return 0
+}
+
+hex_to_binary()
+{
+	local s="$1"
+	local i
+	for ((i=0;i<${#s};i+=2)); do eval echo -n "\$'\x${s:$i:2}'"; done
+}
+
+update_random_seed()
+{
+	local s _p
+	read -r s _p < <({ dd if=/dev/urandom bs=32 count=1 status=noxfer; [ -e "$boot_root/loader/random-seed" ] && dd if="$boot_root/loader/random-seed" bs=32 count=1 status=noxfer; } | sha256sum)
+	[ "${#s}" = 64 ] || { warn "Invalid random seed"; return 0; }
+	hex_to_binary "$s" > "$boot_root/loader/random-seed.new"
+	mv "$boot_root/loader/random-seed.new" "$boot_root/loader/random-seed"
+}
+
+install_sdboot_interactive()
+{
+	d --aspect 60 --yesno "Are you sure you want to install systemd-boot into $boot_root?\n
+This will overwrite any existing bootloaders" 0 0 || return 0
+	install_sdboot
+	d --aspect 60 --msgbox "Installed into $boot_root" 0 0
+}
+
 main_menu()
 {
 	while true; do
-		list=(kernels Kernels snapper Snapshots sd-boot Entries)
+		list=(kernels Kernels snapper Snapshots sd-boot Entries install "Install/Update")
 		d --no-tags --cancel-label "Quit"  --menu "Main Menu" 0 0 "$(menuheight ${#list[@]})" "${list[@]}" || return 0
 		action="$result"
 
@@ -536,6 +634,7 @@ main_menu()
 			snapper) show_snapper ;;
 			sd-boot) update_entries cat; show_entries ;;
 			kernels) show_kernels "$root_subvol";;
+			install) install_sdboot_interactive ;;
 		esac
 	done
 }
@@ -544,7 +643,7 @@ main_menu()
 
 stty_size
 
-getopttmp=$(getopt -o hc:v --long help,flicker,verbose -n "${0##*/}" -- "$@")
+getopttmp=$(getopt -o hc:v --long help,flicker,verbose,esp-path:,entry-token: -n "${0##*/}" -- "$@")
 eval set -- "$getopttmp"
 
 while true ; do
@@ -552,29 +651,44 @@ while true ; do
                 -h|--help) helpandquit ;;
 		--flicker) dialog_altenate_screen=--keep-tite; shift ;;
 		-v|--verbose) verbose=$((++verbose)); shift ;;
+		--esp-path) arg_esp_path="$2"; shift 2 ;;
+		--entry-token) arg_entry_token="$2"; shift 2 ;;
                 --) shift ; break ;;
                 *) echo "Internal error!" ; exit 1 ;;
         esac
 done
 
 case "$1" in
-	add-kernel|remove-kernel) ;;
+	install|add-kernel|remove-kernel) ;;
 	*) interactive=1 ;;
 esac
 
+for i in /etc/os-release /usr/lib/os-release; do
+	[ -f "$i" ] || continue
+	eval $(sed -ne '/^[A-Z_]\+=/s/^/os_release_/p' < "$i")
+	break
+done
+
 # XXX: bootctl should have json output for that too
-eval "$(bootctl 2>/dev/null | sed -ne 's/ *token: *\(\w\+\)/entry_token="\1"/p;s, *\$BOOT: *\([^ ]\+\).*,boot_root="\1",p')"
+eval "$(bootctl 2>/dev/null | sed -ne 's/Firmware Arch: *\(\w\+\)/firmware_arch="\1"/p;s/ *token: *\(\w\+\)/entry_token="\1"/p;s, *\$BOOT: *\([^ ]\+\).*,boot_root="\1",p')"
 root_uuid=$(findmnt / -r -n -o UUID)
 root_subvol=$(btrfs subvol show /|head -1)
 read -r machine_id < /etc/machine-id
 
 [ -n "$machine_id" ] || err "Empty machine id. Fix /etc/machine-id"
+
+[ -n "$arg_esp_path" ] && boot_root="$arg_esp_path"
+settle_entry_token
+
 [ -n "$boot_root" ] || err "No ESP detected. Legacy system?"
-[ -n "$entry_token" ] || err "No entry token. sd-boot not installed?"
 [ -n "$root_uuid" ] || err "Can't determine root UUID"
 [ -n "$root_subvol" ] || err "Can't determine root subvolume"
+[ -n "$entry_token" ] || err "No entry token. sd-boot not installed?"
+[ -n "$firmware_arch" ] || err "Can't determine firmware arch"
 
-if [ "$1" = "add-kernel" ]; then
+if [ "$1" = "install" ]; then
+	install_sdboot
+elif [ "$1" = "add-kernel" ]; then
 	install_kernel "${3:-$root_subvol}" "$2"
 elif [ "$1" = "remove-kernel" ]; then
 	remove_kernel "${3:-$root_subvol}" "$2"
