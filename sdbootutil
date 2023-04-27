@@ -266,6 +266,20 @@ update_entries()
 	bootctl list --json=short | "${entry_filter[@]}" > "$entryfile"
 }
 
+update_entries_for_subvol()
+{
+	local subvol="$1"
+	update_entries jq "[.[]|select(has(\"options\"))|select(.options|match(\"root=UUID=$root_uuid .*rootflags=subvol=$subvol\"))]"
+}
+
+
+
+update_entries_for_snapshot()
+{
+	local n="$1"
+	update_entries_for_subvol "@/.snapshots/$n/snapshot"
+}
+
 show_entries()
 {
 	local dialogtitle="${1:-Entries}"
@@ -422,7 +436,7 @@ show_snapper()
 				entries)
 					#read -r MACHINE_ID < /etc/machine-id
 					#update_entries jq "[.[]|select(.machineId==\"$MACHINE_ID\")|select(has(\"options\"))|select(.options|match(\"@/.snapshots/$n/snapshot\"))]"
-					update_entries jq "[.[]|select(has(\"options\"))|select(.options|match(\"root=UUID=$root_uuid .*rootflags=subvol=@/.snapshots/$n/snapshot\"))]"
+					update_entries_for_snapshot "$n"
 					show_entries "Entries for Snapshot $n"
 					;;
 				kernels)
@@ -453,7 +467,7 @@ update_kernels()
 		calc_chksum "$fn"
 		system_kernels["/$entry_token/$kv/linux-$chksum"]=missing
 	done
-	update_entries jq "[.[]|select(has(\"options\"))|select(.options|match(\"root=UUID=$root_uuid .*rootflags=subvol=$subvol\"))]"
+	update_entries_for_subvol "$subvol"
 
 	while read -r k id; do
 		# kernel in ESP that is not installed
