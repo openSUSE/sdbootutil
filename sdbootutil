@@ -192,7 +192,7 @@ install_kernel()
 		detect_parent "$subvol"
 		parent_conf="$boot_root/loader/entries/$entry_token-$kernel_version-$parent_snapshot.conf"
 		if [ -n "$parent_subvol" ] && [ -e "$parent_conf" ]; then
-			subvol_is_ro "$parent_subvol" || err "Parent snapshot $parent_snapshot is not read-only, can't reuse initrd"
+			#subvol_is_ro "$parent_subvol" || err "Parent snapshot $parent_snapshot is not read-only, can't reuse initrd"
 			local k
 			local v
 			while read -r k v; do
@@ -253,10 +253,33 @@ install_kernel()
 		chown root:root "$boot_root$dstinitrd" 2>/dev/null || :
 		log_info "installed $loader_entry"
 	fi
+	rm -f "$tmpdir/initrd"
+	rm -f "$tmpdir/entry.conf"
 	if [ -n "$failed" ]; then
 		rm -f "$boot_root$dst" "$boot_root$dstinitrd"
 		err "Failed to install $failed"
 	fi
+}
+
+install_all_kernels()
+{
+	local subvol="@/.snapshots/${1:?}/snapshot"
+	find_kernels "$subvol"
+	for kv in "${!found_kernels[@]}"; do
+		log_info "installing $kv"
+		install_kernel "${subvol}" "$kv"
+	done
+
+}
+
+remove_all_kernels()
+{
+	local subvol="@/.snapshots/${1:?}/snapshot"
+	find_kernels "$subvol"
+	for kv in "${!found_kernels[@]}"; do
+		remove_kernel "${subvol}" "$kv"
+	done
+
 }
 
 entry_filter=("cat")
@@ -453,28 +476,41 @@ calc_chksum() {
     chksum="$1"
 }
 
-# map that uses expected path on the ESP for each kernel. The value indicates
-# whether that kernel is installed, stale or missing in the ESP
-declare -A system_kernels
-update_kernels()
+# map with kernel version as key and checksum as value
+declare -A found_kernels
+find_kernels()
 {
-	subvol="${1:?}"
-	system_kernels=()
-	# find installed kernels, mark them as unregisted until we find them in ESP too
+	local subvol="${1:?}"
+	found_kernels=()
+
 	for fn in "${subvol#@}"/usr/lib/modules/*/vmlinuz; do
 		kv="${fn%/*}"
 		kv="${kv##*/}"
 		calc_chksum "$fn"
-		system_kernels["/$entry_token/$kv/linux-$chksum"]=missing
+		found_kernels["$kv"]="$chksum"
+		log_info "found kernel $kv = $chksum"
+	done
+}
+
+# map that uses expected path on the ESP for each kernel. The value indicates
+# whether that kernel is installed, stale or missing in the ESP
+declare -A known_kernels
+update_kernels()
+{
+	local subvol="${1:?}"
+	known_kernels=()
+	find_kernels "$subvol"
+	for kv in "${!found_kernels[@]}"; do
+		known_kernels["/$entry_token/$kv/linux-${found_kernels[$kv]}"]=missing
 	done
 	update_entries_for_subvol "$subvol"
 
 	while read -r k id; do
 		# kernel in ESP that is not installed
-		if [ -z "${system_kernels[$k]}" ]; then
-			system_kernels["$k"]="!$id"
-		elif [ "${system_kernels[$k]}" = missing ]; then
-			system_kernels["$k"]="$id"
+		if [ -z "${known_kernels[$k]}" ]; then
+			known_kernels["$k"]="!$id"
+		elif [ "${known_kernels[$k]}" = missing ]; then
+			known_kernels["$k"]="$id"
 		fi
 	done < <(jq -r '.[]|select(has("linux"))|[.linux,.id]|join(" ")'< "$entryfile")
 }
@@ -487,10 +523,10 @@ show_kernels()
 		local list=()
 		local n=0
 		local default=
-		local kernelfiles=("${!system_kernels[@]}")
+		local kernelfiles=("${!known_kernels[@]}")
 		local states=()
 		for k in "${kernelfiles[@]}"; do
-			state="${system_kernels[$k]}"
+			state="${known_kernels[$k]}"
 			if [ "$state" != 'missing' ]; then
 				if [ "${state:0:1}" = '!' ]; then
 					state="stale"
@@ -510,7 +546,7 @@ show_kernels()
 		d --no-tags --no-hot-list --colors --ok-label "Options" --cancel-label "Back" --menu "Kernels associated with $subvol" 0 0 "$(menuheight ${#list[@]})" "${list[@]}" || return 0
 		n="$result"
 
-		local id="${system_kernels[${kernelfiles[$n]}]}"
+		local id="${known_kernels[${kernelfiles[$n]}]}"
 		list=()
 		if [ "$id" = "missing" ]; then
 			list+=(install "Install")
@@ -637,6 +673,27 @@ This will overwrite any existing bootloaders" 0 0 || return 0
 	d --aspect 60 --msgbox "Installed into $boot_root" 0 0
 }
 
+set_default_snapshot()
+{
+	local num="${1:?}"
+	local configs
+	update_entries_for_snapshot "$num"
+	mapfile configs < <(jq '.[]|[.id]|join(" ")' -r < "$entryfile")
+	configs=("${configs[@]%$nl}")
+	if [ -z "${configs[0]}" ]; then
+		log_info "snapshot $num has no configs, trying to create them..."
+		install_all_kernels "$num"
+		update_entries_for_snapshot "$num"
+		mapfile configs < <(jq '.[]|[.id]|join(" ")' -r < "$entryfile")
+		configs=("${configs[@]%$nl}")
+		if [ -z "${configs[0]}" ]; then
+			err "snapshot $num has no kernels"
+		fi
+	fi
+	log_info "setting default entry ${configs[0]}"
+	bootctl set-default "${configs[0]}"
+}
+
 main_menu()
 {
 	while true; do
@@ -673,7 +730,7 @@ while true ; do
 done
 
 case "$1" in
-	install|add-kernel|remove-kernel) ;;
+	install|add-kernel|remove-kernel|set-default-snapshot|add-all-kernels|remove-all-kernels) ;;
 	*) interactive=1 ;;
 esac
 
@@ -687,6 +744,8 @@ done
 eval "$(bootctl 2>/dev/null | sed -ne 's/Firmware Arch: *\(\w\+\)/firmware_arch="\1"/p;s/ *token: *\(\w\+\)/entry_token="\1"/p;s, *\$BOOT: *\([^ ]\+\).*,boot_root="\1",p')"
 root_uuid=$(findmnt / -r -n -o UUID)
 root_subvol=$(btrfs subvol show /|head -1)
+root_snapshot="${root_subvol#@/.snapshots/}"
+root_snapshot="${root_snapshot%/snapshot}"
 read -r machine_id < /etc/machine-id
 
 [ -n "$machine_id" ] || err "Empty machine id. Fix /etc/machine-id"
@@ -704,8 +763,14 @@ if [ "$1" = "install" ]; then
 	install_sdboot
 elif [ "$1" = "add-kernel" ]; then
 	install_kernel "${3:-$root_subvol}" "$2"
+elif [ "$1" = "add-all-kernels" ]; then
+	install_all_kernels "${2:-$root_snapshot}"
 elif [ "$1" = "remove-kernel" ]; then
 	remove_kernel "${3:-$root_subvol}" "$2"
+elif [ "$1" = "remove-all-kernels" ]; then
+	remove_all_kernels "${2:-$root_snapshot}"
+elif [ "$1" = "set-default-snapshot" ]; then
+	set_default_snapshot "$2"
 elif [ "$1" = "kernels" ]; then
 	show_kernels "$root_subvol"
 elif [ "$1" = "snapshots" ]; then

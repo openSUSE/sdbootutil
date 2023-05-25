@@ -1,0 +1,70 @@
+#!/bin/bash
+
+shopt -s extglob nullglob
+set -e
+
+is_transactional()
+{
+	# don't handle this here if called within transactional-update. We have
+	# to run after it's done doing it's thing.
+	[ "$(stat -f -c %T /etc)" = "overlayfs" ]
+}
+
+# when creating a snapshot we fetch all bls configs from previous snapshot dir,
+# mangle them to contain current snapshot number, then install to efi partition.
+create_snapshot()
+{
+	path="$1"
+	fs="$2"
+	num="$3"
+
+	[ "$fs" = btrfs ] || return 1
+
+	is_transactional && return 0
+
+	/usr/bin/sdbootutil add-all-kernels "$num"
+}
+
+delete_snapshot()
+{
+	local path="$1"
+	local fs="$2"
+	local num="$3"
+
+	[ "$fs" = btrfs ] || return 1
+
+	/usr/bin/sdbootutil remove-all-kernels "$num" || :
+}
+
+set_default_snapshot()
+{
+	local path="$1"
+	local fs="$2"
+	local num="$3"
+
+	[ "$fs" = btrfs ] || return 1
+
+	/usr/bin/sdbootutil set-default-snapshot "$num"
+}
+
+h()
+{
+	echo "Available commands:"
+	echo "${!commands[@]}"
+}
+
+declare -A commands
+
+commands['create-snapshot-post']=create_snapshot
+commands['delete-snapshot-pre']=delete_snapshot
+commands['set-default-snapshot-post']=set_default_snapshot
+commands['help']=h
+
+logger -t snapper "$0 $@"
+
+cmd="$1"
+shift
+[ -n "$cmd" ] || cmd=help
+if [ "${#commands[$cmd]}" -gt 0 ]; then
+	${commands[$cmd]} "$@"
+fi
