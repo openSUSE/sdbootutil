@@ -14,7 +14,8 @@ shimdir="/usr/share/efi/$(uname -m)"
 sdboot_vendor="systemd"
 sdboot_dst="/EFI/$sdboot_vendor"
 arg_esp_path=
-arg_entry_token=auto
+arg_entry_token=
+arg_arch=
 
 tmpdir=$(mktemp -d -t sdboot.XXXXXX)
 cleanup()
@@ -621,6 +622,7 @@ install_sdboot()
 settle_entry_token()
 {
 	case "$arg_entry_token" in
+		"") [ -n "$entry_token" ] || entry_token="$machine_id" ;;
 		auto)
 			if [ -s '/etc/kernel/entry-token' ]; then
 				read -r entry_token < '/etc/kernel/entry-token'
@@ -713,7 +715,7 @@ main_menu()
 
 stty_size
 
-getopttmp=$(getopt -o hc:v --long help,flicker,verbose,esp-path:,entry-token: -n "${0##*/}" -- "$@")
+getopttmp=$(getopt -o hc:v --long help,flicker,verbose,esp-path:,entry-token:,arch: -n "${0##*/}" -- "$@")
 eval set -- "$getopttmp"
 
 while true ; do
@@ -722,6 +724,7 @@ while true ; do
 		--flicker) dialog_altenate_screen=--keep-tite; shift ;;
 		-v|--verbose) verbose=$((++verbose)); shift ;;
 		--esp-path) arg_esp_path="$2"; shift 2 ;;
+		--arch) arg_arch="$2"; shift 2 ;;
 		--entry-token) arg_entry_token="$2"; shift 2 ;;
                 --) shift ; break ;;
                 *) echo "Internal error!" ; exit 1 ;;
@@ -748,6 +751,7 @@ root_snapshot="${root_snapshot%/snapshot}"
 [ -s /etc/machine-id ] && read -r machine_id < /etc/machine-id
 
 [ -n "$arg_esp_path" ] && boot_root="$arg_esp_path"
+[ -n "$arg_arch" ] && firmware_arch="$arg_arch"
 settle_entry_token
 
 [ -n "$boot_root" ] || err "No ESP detected. Legacy system?"
