@@ -617,6 +617,9 @@ install_sdboot()
 	mkdir -p "$boot_root/$entry_token"
 	[ -s /etc/kernel/entry-token ] || echo "$entry_token" > /etc/kernel/entry-token
 	update_random_seed
+
+	[ -s "$boot_root/loader/entries.srel" ] || echo type1 > "$boot_root/loader/entries.srel"
+	mkdir -p "$boot_root/loader/entries"
 }
 
 settle_entry_token()
