@@ -250,7 +250,7 @@ install_kernel()
 	fi
 	if [ -z "$failed" ]; then
 		loader_entry="$boot_root/loader/entries/$entry_token-$kernel_version-$snapshot.conf"
-		install -m 0644 "$tmpdir/entry.conf" "$loader_entry" || failed="bootloader entry"
+		install -D -m 0644 "$tmpdir/entry.conf" "$loader_entry" || failed="bootloader entry"
 		chown root:root "$boot_root$dstinitrd" 2>/dev/null || :
 		log_info "installed $loader_entry"
 	fi
@@ -597,6 +597,8 @@ install_sdboot()
 	[ -e "$sdboot" ] || sdboot="/usr/lib/systemd/boot/efi/systemd-boot$firmware_arch.efi"
 	[ -e "$sdboot" ] || err "missing $sdboot"
 
+	mkdir -p "$boot_root/loader/entries"
+
 	if [ -e "$shimdir/shim.efi" ]; then
 		entry="$sdboot_dst/shim.efi"
 		for i in MokManager shim; do
@@ -619,7 +621,6 @@ install_sdboot()
 	update_random_seed
 
 	[ -s "$boot_root/loader/entries.srel" ] || echo type1 > "$boot_root/loader/entries.srel"
-	mkdir -p "$boot_root/loader/entries"
 }
 
 settle_entry_token()
