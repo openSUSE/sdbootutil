@@ -36,6 +36,7 @@ Source:         kernelhooks.lua
 # skip for now as kernel scripts will do that anyway
 Source:         10-sdbootutil.snapper
 Source:         sdbootutil
+Source:         LICENSE
 # XXX systemd-boot is in udev
 Requires:       jq
 Requires:       sed
@@ -122,6 +123,7 @@ if pcall(require, 'kernelhooks') then
 end
 
 %files
+%license LICENSE
 %{_bindir}/sdbootutil
 
 %files filetriggers
