@@ -32,11 +32,7 @@ Release:        0
 Summary:        script to install shim with sd-boot
 License:        MIT
 URL:            https://en.opensuse.org/openSUSE:Usr_merge
-Source:         kernelhooks.lua
-# skip for now as kernel scripts will do that anyway
-Source:         10-sdbootutil.snapper
-Source:         sdbootutil
-Source:         LICENSE
+Source:         %{name}-%{version}.tar
 # XXX systemd-boot is in udev
 Requires:       jq
 Requires:       sed
@@ -73,13 +69,13 @@ Provides:       suse-kernel-rpm-scriptlets
 Empty scriptlets to satisfy kernel dependencies
 
 %prep
-%setup -qcT
+%setup -q
 
 %build
 
 %install
-install -D -m 644 %{SOURCE0} %{buildroot}%{_rpmconfigdir}/lua/kernelhooks.lua
-install -D -m 755 %{_sourcedir}/sdbootutil %{buildroot}%{_bindir}/sdbootutil
+install -D -m 644 kernelhooks.lua %{buildroot}%{_rpmconfigdir}/lua/kernelhooks.lua
+install -D -m 755 sdbootutil %{buildroot}%{_bindir}/sdbootutil
 
 mkdir -p %{buildroot}%{_prefix}/lib/module-init-tools/kernel-scriptlets
 for a in cert inkmp kmp rpm; do
@@ -91,7 +87,7 @@ done
 # snapper
 install -d -m755 %{buildroot}%{_prefix}/lib/snapper/plugins
 for i in 10-sdbootutil.snapper; do
-  install -m 755 %{_sourcedir}/$i %{buildroot}%{_prefix}/lib/snapper/plugins/$i
+  install -m 755 $i %{buildroot}%{_prefix}/lib/snapper/plugins/$i
 done
 
 %transfiletriggerin  -p <lua> -- %{_prefix}/lib/modules/
