@@ -47,7 +47,7 @@ Requires:       sdbootutil >= %{version}-%{release}
 Conflicts:      (suse-module-tools with suse-kernel-rpm-scriptlets)
 
 %description filetriggers
-File trigger scripts for install-kernel
+File trigger scripts for sdbootutil
 
 %package snapper
 Summary:        plugin script for snapper
@@ -90,7 +90,7 @@ for i in 10-sdbootutil.snapper; do
   install -m 755 $i %{buildroot}%{_prefix}/lib/snapper/plugins/$i
 done
 
-%transfiletriggerin  -p <lua> -- %{_prefix}/lib/modules/
+%transfiletriggerin filetriggers -p <lua> -- %{_prefix}/lib/modules/
 require("kernelhooks")
 if posix.getenv("VERBOSE_FILETRIGGERS") then
     kernelhooks.debug = "%{nvr}(in)"
@@ -103,7 +103,7 @@ end
 kernelhooks.add()
 io.flush()
 
-%transfiletriggerun  -p <lua> -- %{_prefix}/lib/modules/
+%transfiletriggerun filetriggers -p <lua> -- %{_prefix}/lib/modules/
 -- the module is already gone if we get called for ourselves
 if pcall(require, 'kernelhooks') then
     if posix.getenv("VERBOSE_FILETRIGGERS") then

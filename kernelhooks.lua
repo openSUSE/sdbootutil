@@ -51,7 +51,9 @@ function kernelhooks.add()
 			_log("not adding " .. kver .. " due to legacy /boot location")
 		else
 			_log("adding " .. kver)
-			os.execute("/usr/bin/sdbootutil add-kernel " .. kver)
+			rpm.execute("/usr/sbin/depmod", "-a", kver)
+			rpm.execute("/usr/bin/sdbootutil", "add-kernel", kver)
+			rpm.execute("/usr/bin/sdbootutil", "set-default-snapshot")
 		end
 	end
 end
@@ -62,7 +64,8 @@ function kernelhooks.remove()
 			_log("not removing " .. kver .. " due to legacy /boot location")
 		else
 			_log("removing " .. kver)
-			os.execute("/usr/bin/sdbootutil remove-kernel " .. kver)
+			rpm.execute("/usr/bin/sdbootutil", "remove-kernel", kver)
+			rpm.execute("/usr/bin/sdbootutil", "set-default-snapshot")
 		end
 	end
 end

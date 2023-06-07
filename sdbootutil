@@ -775,7 +775,7 @@ elif [ "$1" = "remove-kernel" ]; then
 elif [ "$1" = "remove-all-kernels" ]; then
 	remove_all_kernels "${2:-$root_snapshot}"
 elif [ "$1" = "set-default-snapshot" ]; then
-	set_default_snapshot "$2"
+	set_default_snapshot "${2:-$root_snapshot}"
 elif [ "$1" = "kernels" ]; then
 	show_kernels "$root_subvol"
 elif [ "$1" = "snapshots" ]; then
