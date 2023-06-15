@@ -50,12 +50,27 @@ helpandquit()
 
 		COMMAND:
 		add-kernel VERSION [SUBVOL]
-			   create boot entry for specified kernel
+			   Create boot entry for specified kernel
+
+		add-all-kernels [SUBVOL]
+			   Create boot entries for all kernels in SUBVOL
+
 		remove-kernel VERSION [SUBVOL]
-			   remove boot entry for specified kernel
-		kernels    open kernel menu
-		snapshots  open snapshots menu
-		entries    open entry menu
+			   Remove boot entry for specified kernel
+
+		remove-all-kernels [SUBVOL]
+			   Remove boot entries for all kernels in SUBVOL
+
+		set-default-snapshot [SUBVOL]
+			   Make SUBVOL the default for next boot.
+			   Also install all kernels if needed
+
+		install    Install systemd-boot and shim into ESP
+
+		UI commands:
+		kernels    Open kernel menu
+		snapshots  Open snapshots menu
+		entries    Open entry menu
 
 	EOF
 	exit 0
