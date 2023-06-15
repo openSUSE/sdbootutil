@@ -206,7 +206,8 @@ install_kernel()
 		elif [ "$subvol" != "$root_subvol" ]; then
 			err "Can't call dracut for snapshots that have no initrd yet"
 		else
-			run_command_live_output dracut --reproducible "$tmpdir/initrd" "$kernel_version"
+			log_info "generating new initrd"
+			run_command_live_output dracut --quiet --reproducible "$tmpdir/initrd" "$kernel_version"
 		fi
 	fi
 
