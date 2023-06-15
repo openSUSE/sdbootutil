@@ -172,6 +172,7 @@ install_kernel()
 {
 	local subvol="$1"
 	local kernel_version="$2"
+	local dstinitrd=""
 	local src="${subvol#@}/lib/modules/$kernel_version/vmlinuz"
 	test -e "$src" || err "Can't find $src"
 
