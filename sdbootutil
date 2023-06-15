@@ -17,9 +17,21 @@ arg_esp_path=
 arg_entry_token=
 arg_arch=
 
+rollback=()
+
 tmpdir=$(mktemp -d -t sdboot.XXXXXX)
 cleanup()
 {
+	local i
+	for i in "${rollback[@]}"; do
+		if [ -e "$i.bak" ]; then
+			log_info "restoring $i"
+			mv "$i.bak" "$i"
+		else
+			log_info "removing $i"
+			rm -f "$i"
+		fi
+	done
 	rm -rf "$tmpdir"
 }
 trap cleanup EXIT
@@ -168,6 +180,20 @@ remove_kernel()
 	run_command_output bootctl unlink "$id"
 }
 
+install_with_rollback()
+{
+	local src="${1:?}"
+	local dst="${2:?}"
+
+	if [ -e "$dst" ]; then
+		mv "$dst" "$dst.bak" || return "$?"
+	fi
+	rollback+=("$dst")
+	install -m 0644 "$src" "$dst" || return "$?"
+	chown root:root "$dst" 2>/dev/null || :
+	log_info "installed $dst"
+}
+
 install_kernel()
 {
 	local subvol="$1"
@@ -239,29 +265,21 @@ install_kernel()
 
 	local failed=
 	if [ ! -e "$boot_root$dst" ]; then
-		install -m 0644 "$src" "$boot_root$dst" || failed=kernel
-		chown root:root "$boot_root$dst" 2>/dev/null || :
-		log_info "installed $boot_root$dst"
+		install_with_rollback "$src" "$boot_root$dst" || failed=kernel
 	else
 		log_info "reusing $boot_root$dst"
 	fi
 	if [ -z "$failed" ] && [ -e "$tmpdir/initrd" ] && [ ! -e "$boot_root$dstinitrd" ]; then
-		install -m 0644 "$tmpdir/initrd" "$boot_root$dstinitrd" || failed=initrd
-		chown root:root "$boot_root$dstinitrd" 2>/dev/null || :
-		log_info "installed $boot_root$dstinitrd"
+		install_with_rollback "$tmpdir/initrd" "$boot_root$dstinitrd" || failed=initrd
 	fi
 	if [ -z "$failed" ]; then
 		loader_entry="$boot_root/loader/entries/$entry_token-$kernel_version-$snapshot.conf"
-		install -D -m 0644 "$tmpdir/entry.conf" "$loader_entry" || failed="bootloader entry"
-		chown root:root "$boot_root$dstinitrd" 2>/dev/null || :
-		log_info "installed $loader_entry"
+		install_with_rollback "$tmpdir/entry.conf" "$loader_entry" || failed="bootloader entry"
 	fi
 	rm -f "$tmpdir/initrd"
 	rm -f "$tmpdir/entry.conf"
-	if [ -n "$failed" ]; then
-		rm -f "$boot_root$dst" "$boot_root$dstinitrd"
-		err "Failed to install $failed"
-	fi
+	[ -z "$failed" ] || err "Failed to install $failed"
+	rollback=()
 }
 
 install_all_kernels()
