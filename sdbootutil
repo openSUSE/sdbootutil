@@ -182,7 +182,10 @@ detect_parent() {
 sedrootflags()
 {
 	local subvol="${1:?}"
-	sed -e "s/[ \t]\+/ /g;s/\<\(BOOT_IMAGE\|initrd\)=[^ ]* \?//;s,rootflags=subvol=[^ ]*,rootflags=subvol=$subvol,;tx; s,\$, rootflags=subvol=$subvol,;:x"
+	# - delete BOOT_IMAGE= and initrd=
+	# - make sure root= refers to uuid
+	# - replace or add rootflags to point at correct subvolume
+	sed -e "s/[ \t]\+/ /g;s/\<\(BOOT_IMAGE\|initrd\)=[^ ]* \?//;s/\<root=[^ ]*/root=UUID=$root_uuid/;tr;:r;s,\<rootflags=subvol=[^ ]*,rootflags=subvol=$subvol,;tx; s,\$, rootflags=subvol=$subvol,;:x"
 }
 
 remove_kernel()
