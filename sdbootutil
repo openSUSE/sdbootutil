@@ -142,7 +142,7 @@ menuheight() {
 }
 
 stty_size() {
-	set -- $(stty size)
+	set -- $(stty size 2>/dev/null)
 	LINES="$1"
 	COLUMNS="$2"
 	# stty size can return zero when not ready or
