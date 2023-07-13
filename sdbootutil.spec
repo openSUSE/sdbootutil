@@ -33,10 +33,10 @@ Summary:        script to install shim with sd-boot
 License:        MIT
 URL:            https://en.opensuse.org/openSUSE:Usr_merge
 Source:         %{name}-%{version}.tar
-# XXX systemd-boot is in udev
+Requires:       systemd-boot
 Requires:       jq
 Requires:       sed
-Supplements:    (udev and shim)
+Supplements:    (systemd-boot and shim)
 
 %description
 Hook scripts to install shim along with systemd-boot
@@ -62,8 +62,12 @@ Plugin scripts for snapper to handle BLS config files
 
 %package rpm-scriptlets
 Summary:        dummy scriptlets for the kernel
+# make sure to not replace scriptlets with nops on systems that
+# use grub2
+Conflicts:      grub2
 Conflicts:      suse-kernel-rpm-scriptlets
 Provides:       suse-kernel-rpm-scriptlets
+Requires:       %{name}-filetriggers
 
 %description rpm-scriptlets
 Empty scriptlets to satisfy kernel dependencies
