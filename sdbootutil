@@ -620,20 +620,52 @@ show_kernels()
 	done
 }
 
-sdboot_is_installed()
+sdboot_version()
 {
-	[ -e "$boot_root$sdboot_dst/systemd-boot$firmware_arch.efi" ] && \
-		grep -q '#### LoaderInfo: systemd-boot' "$boot_root$sdboot_dst/systemd-boot$firmware_arch.efi"
+	local fn="$1"
+	if [ -z "$1" ]; then
+		if [ -e "$shimdir/shim.efi" ]; then
+			fn="$boot_root$sdboot_dst/grub.efi"
+		else
+			local sdboot
+			sdboot="$(find_sdboot)"
+			fn="$boot_root$sdboot_dst/${sdboot##*/}"
+		fi
+	fi
+	[ -e "$fn" ] || return 1
+	read -r _ _ _ v _ < <(grep -ao '#### LoaderInfo: systemd-boot [^#]\+ ####' "$fn")
+	[ -n "$v" ] || return 1
+	echo "$v"
 }
 
-# TODO: need to create a boot variable if it's not the first installation
-install_sdboot()
+find_sdboot()
 {
 	# XXX: this is a hack in case we need to inject a signed
 	# systemd-boot from a separate package
 	local sdboot="/usr/lib/systemd-boot/systemd-boot$firmware_arch.efi"
 	[ -e "$sdboot" ] || sdboot="/usr/lib/systemd/boot/efi/systemd-boot$firmware_arch.efi"
 	[ -e "$sdboot" ] || err "missing $sdboot"
+	echo "$sdboot"
+}
+
+sdboot_needs_update()
+{
+	local v nv
+	v="$(sdboot_version)"
+	[ -n "$v" ] || return 1
+	log_info "deployed version $v"
+	nv="$(sdboot_version "$(find_sdboot)")"
+	[ -n "$v" ] || return 1
+	log_info "system version $nv"
+	systemd-analyze compare-versions "$v" lt "$nv" 2>/dev/null || return 1
+	log_info "systemd-boot needs to be updated"
+	return 0
+}
+
+# TODO: need to create a boot variable if it's not the first installation
+install_sdboot()
+{
+	local sdboot=$(find_sdboot)
 
 	mkdir -p "$boot_root/loader/entries"
 
@@ -711,8 +743,20 @@ update_random_seed()
 
 install_sdboot_interactive()
 {
-	d --aspect 60 --yesno "Are you sure you want to install systemd-boot into $boot_root?\n
-This will overwrite any existing bootloaders" 0 0 || return 0
+	local v
+	v="$(sdboot_version)"
+	if [ -n "$v" ]; then
+		if sdboot_needs_update; then
+			local nv
+			nv="$(sdboot_version "$(find_sdboot)")"
+			d --aspect 60 --yesno "Update systemd-boot from $v to $nv?" 0 0 || return 0
+		else
+			d --aspect 60 --yesno "systemd-boot already at current version $v. Install again?" 0 0 || return 0
+		fi
+	else
+		d --aspect 60 --yesno "Are you sure you want to install systemd-boot into $boot_root?\n
+			This will overwrite any existing bootloaders" 0 0 || return 0
+	fi
 	install_sdboot
 	d --aspect 60 --msgbox "Installed into $boot_root" 0 0
 }
@@ -773,8 +817,9 @@ while true ; do
 done
 
 case "$1" in
-	install|add-kernel|remove-kernel|set-default-snapshot|add-all-kernels|remove-all-kernels) ;;
-	*) stty_size; interactive=1 ;;
+	install|needs-update|update|add-kernel|remove-kernel|set-default-snapshot|add-all-kernels|remove-all-kernels|is-installed) ;;
+	kernels|snapshots|entries|"") stty_size; interactive=1 ;;
+	*) err "unknown command $1" ;;
 esac
 
 for i in /etc/os-release /usr/lib/os-release; do
@@ -786,9 +831,7 @@ done
 # XXX: bootctl should have json output for that too
 eval "$(bootctl 2>/dev/null | sed -ne 's/Firmware Arch: *\(\w\+\)/firmware_arch="\1"/p;s/ *token: *\(\w\+\)/entry_token="\1"/p;s, *\$BOOT: *\([^ ]\+\).*,boot_root="\1",p')"
 root_uuid=$(findmnt / -r -n -o UUID)
-root_subvol=$(btrfs subvol show /|head -1)
-root_snapshot="${root_subvol#@/.snapshots/}"
-root_snapshot="${root_snapshot%/snapshot}"
+root_subvol=$(btrfs subvol show / 2>/dev/null|head -1)
 [ -s /etc/machine-id ] && read -r machine_id < /etc/machine-id
 
 [ -n "$arg_esp_path" ] && boot_root="$arg_esp_path"
@@ -801,8 +844,15 @@ settle_entry_token
 [ -n "$entry_token" ] || err "No entry token. sd-boot not installed?"
 [ -n "$firmware_arch" ] || err "Can't determine firmware arch"
 
+root_snapshot="${root_subvol#@/.snapshots/}"
+root_snapshot="${root_snapshot%/snapshot}"
+
 if [ "$1" = "install" ]; then
 	install_sdboot
+elif [ "$1" = "needs-update" ]; then
+	sdboot_needs_update
+elif [ "$1" = "update" ]; then
+	sdboot_needs_update && install_sdboot
 elif [ "$1" = "add-kernel" ]; then
 	install_kernel "${3:-$root_subvol}" "$2"
 elif [ "$1" = "add-all-kernels" ]; then
@@ -813,6 +863,8 @@ elif [ "$1" = "remove-all-kernels" ]; then
 	remove_all_kernels "${2:-$root_snapshot}"
 elif [ "$1" = "set-default-snapshot" ]; then
 	set_default_snapshot "${2:-$root_snapshot}"
+elif [ "$1" = "is-installed" ]; then
+	sdboot_version > /dev/null
 elif [ "$1" = "kernels" ]; then
 	show_kernels "$root_subvol"
 elif [ "$1" = "snapshots" ]; then
