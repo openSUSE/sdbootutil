@@ -756,8 +756,6 @@ main_menu()
 
 ####### main #######
 
-stty_size
-
 getopttmp=$(getopt -o hc:v --long help,flicker,verbose,esp-path:,entry-token:,arch: -n "${0##*/}" -- "$@")
 eval set -- "$getopttmp"
 
@@ -776,7 +774,7 @@ done
 
 case "$1" in
 	install|add-kernel|remove-kernel|set-default-snapshot|add-all-kernels|remove-all-kernels) ;;
-	*) interactive=1 ;;
+	*) stty_size; interactive=1 ;;
 esac
 
 for i in /etc/os-release /usr/lib/os-release; do
