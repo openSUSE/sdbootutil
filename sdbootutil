@@ -684,6 +684,7 @@ install_sdboot()
 	else
 		entry="$sdboot_dst/${sdboot##*/}"
 		install -D "$sdboot" "$boot_root$entry"
+		install -D "$sdboot" "$boot_root/EFI/BOOT/BOOT${firmware_arch^^}.EFI"
 		echo "${sdboot##*/},openSUSE Boot Manager" | iconv -f ascii -t ucs2 > "$boot_root/$sdboot_dst/boot.csv"
 	fi
 	mkdir -p "$boot_root/$entry_token"
