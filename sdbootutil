@@ -268,7 +268,8 @@ install_kernel()
 		dstinitrd="${dst%/*}/initrd-$chksum"
 	fi
 
-	sort_key="$ID"
+	# shellcheck disable=SC2154
+	sort_key="$os_release_ID"
 	entry_machine_id=
 	[ "$entry_token" = "$machine_id" ] && entry_machine_id="$machine_id"
 
