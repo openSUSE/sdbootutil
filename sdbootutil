@@ -676,8 +676,8 @@ install_sdboot()
 		done
 		install -D "$sdboot" "$boot_root$sdboot_dst/grub.efi"
 		echo "shim.efi,openSUSE Boot Manager" | iconv -f ascii -t ucs2 > "$boot_root/$sdboot_dst/boot.csv"
-        efibootmgr --create --label "openSUSE Secure Boot" --loader "$sdboot_dst/shim.efi"
-        efibootmgr --create --label "openSUSE Boot Manager" --loader "$sdboot_dst/grub.efi"
+        efibootmgr -q --create --label "openSUSE Secure Boot" --loader "$sdboot_dst/shim.efi"
+        efibootmgr -q --create --label "openSUSE Boot Manager" --loader "$sdboot_dst/grub.efi"
 		# boot entry point
 		for i in MokManager fallback; do
 			install -D "$shimdir/$i.efi" "$boot_root/EFI/BOOT/$i.efi"
@@ -688,7 +688,7 @@ install_sdboot()
 		install -D "$sdboot" "$boot_root$entry"
 		install -D "$sdboot" "$boot_root/EFI/BOOT/BOOT${firmware_arch^^}.EFI"
 		echo "${sdboot##*/},openSUSE Boot Manager" | iconv -f ascii -t ucs2 > "$boot_root/$sdboot_dst/boot.csv"
-        efibootmgr --create --label "openSUSE Boot Manager" --loader "$entry"
+        efibootmgr -q --create --label "openSUSE Boot Manager" --loader "$entry"
 	fi
 	mkdir -p "$boot_root/$entry_token"
 	mkdir -p "/etc/kernel"
