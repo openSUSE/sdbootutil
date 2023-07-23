@@ -693,6 +693,10 @@ install_sdboot()
 	update_random_seed
 
 	[ -s "$boot_root/loader/entries.srel" ] || echo type1 > "$boot_root/loader/entries.srel"
+
+    if [[ ! -e $boot_root/loader/loader.conf ]]; then
+        echo -e "#timeout 3\n#console-mode keep\n" > $boot_root/loader/loader.conf
+    fi
 }
 
 settle_entry_token()
