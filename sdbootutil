@@ -19,7 +19,7 @@ arg_arch=
 
 rollback=()
 
-tmpdir=$(mktemp -d -t sdboot.XXXXXX)
+tmpdir=$(mktemp -d /var/tmp/sdboot.XXXXXX)
 cleanup()
 {
 	local i
