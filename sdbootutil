@@ -211,6 +211,10 @@ install_with_rollback()
 	local dst="${2:?}"
 
 	if [ -e "$dst" ]; then
+		if cmp -s "$src" "$dst"; then
+			log_info "$dst unchanged"
+			return 0
+		fi
 		mv "$dst" "$dst.bak" || return "$?"
 	fi
 	rollback+=("$dst")
