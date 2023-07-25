@@ -61,9 +61,16 @@ helpandquit()
 		remove-all-kernels [SUBVOL]
 			   Remove boot entries for all kernels in SUBVOL
 
+		list-kernels [SUBVOL]
+			   List all kernels related to SUBVOL
+
 		set-default-snapshot [SUBVOL]
 			   Make SUBVOL the default for next boot.
 			   Also install all kernels if needed
+
+		is-bootable [SUBVOL]
+			   Check whether SUBVOL has any kernels registered, ie
+			   is potentially bootable
 
 		install    Install systemd-boot and shim into ESP
 
@@ -474,6 +481,8 @@ show_snapper()
 				default="$n"
 				title="\\Zb\Zu$title\\Zn"
 			fi
+			update_kernels "@/.snapshots/$n/snapshot"
+			[ "$is_bootable" = 1 ] || title="!$title"
 			list+=("$n" "$title")
 		done < <(jq '.root|.[]|[.number, .default, .description]|join(" ")' -r < "$snapperfile")
 		if [ "${#list}" = 0 ]; then
@@ -503,7 +512,7 @@ show_snapper()
 					show_entries "Entries for Snapshot $n"
 					;;
 				kernels)
-					show_kernels "@/.snapshots/$n/snapshot"
+					show_kernels "$n"
 					;;
 			esac
 		done
@@ -535,10 +544,14 @@ find_kernels()
 # map that uses expected path on the ESP for each kernel. The value indicates
 # whether that kernel is installed, stale or missing in the ESP
 declare -A known_kernels
+is_bootable=
+has_stale=
 update_kernels()
 {
 	local subvol="${1:?}"
 	known_kernels=()
+	is_bootable=
+	has_stale=
 	find_kernels "$subvol"
 	for kv in "${!found_kernels[@]}"; do
 		known_kernels["/$entry_token/$kv/linux-${found_kernels[$kv]}"]=missing
@@ -549,15 +562,37 @@ update_kernels()
 		# kernel in ESP that is not installed
 		if [ -z "${known_kernels[$k]}" ]; then
 			known_kernels["$k"]="!$id"
+			has_stale=1
 		elif [ "${known_kernels[$k]}" = missing ]; then
 			known_kernels["$k"]="$id"
+			is_bootable=1	
 		fi
 	done < <(jq -r '.[]|select(has("linux"))|[.linux,.id]|join(" ")'< "$entryfile")
 }
 
+list_kernels()
+{
+	subvol="@/.snapshots/${1:?}/snapshot"
+	update_kernels "$subvol"
+	local kernelfiles=("${!known_kernels[@]}")
+	for k in "${kernelfiles[@]}"; do
+		state="${known_kernels[$k]}"
+		printf "%-10s %s\n" "$state" "$k"
+	done
+}
+
+is_bootable()
+{
+	subvol="@/.snapshots/${1:?}/snapshot"
+	update_kernels "$subvol"
+
+	[ "$is_bootable" = 1 ] || return 1
+	return 0
+}
+
 show_kernels()
 {
-	subvol="${1:?}"
+	subvol="@/.snapshots/${1:?}/snapshot"
 	while true; do
 		update_kernels "$subvol"
 		local list=()
@@ -794,7 +829,7 @@ main_menu()
 		case "$action" in
 			snapper) show_snapper ;;
 			sd-boot) update_entries cat; show_entries ;;
-			kernels) show_kernels "$root_subvol";;
+			kernels) show_kernels "$root_snapshot";;
 			install) install_sdboot_interactive ;;
 		esac
 	done
@@ -819,7 +854,7 @@ while true ; do
 done
 
 case "$1" in
-	install|needs-update|update|add-kernel|remove-kernel|set-default-snapshot|add-all-kernels|remove-all-kernels|is-installed) ;;
+	install|needs-update|update|add-kernel|remove-kernel|set-default-snapshot|add-all-kernels|remove-all-kernels|is-installed|list-kernels|is-bootable) ;;
 	kernels|snapshots|entries|"") stty_size; interactive=1 ;;
 	*) err "unknown command $1" ;;
 esac
@@ -867,8 +902,12 @@ elif [ "$1" = "set-default-snapshot" ]; then
 	set_default_snapshot "${2:-$root_snapshot}"
 elif [ "$1" = "is-installed" ]; then
 	sdboot_version > /dev/null
+elif [ "$1" = "list-kernels" ]; then
+	list_kernels "${2:-$root_snapshot}"
+elif [ "$1" = "is-bootable" ]; then
+	is_bootable "${2:-$root_snapshot}"
 elif [ "$1" = "kernels" ]; then
-	show_kernels "$root_subvol"
+	show_kernels "${2:-$root_snapshot}"
 elif [ "$1" = "snapshots" ]; then
 	show_snapper
 elif [ "$1" = "entries" ]; then
