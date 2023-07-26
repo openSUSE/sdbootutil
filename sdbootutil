@@ -669,6 +669,17 @@ install_sdboot()
 
 	mkdir -p "$boot_root/loader/entries"
 
+	esp_device=$(lsblk -o NAME,MOUNTPOINT -nl | grep '/boot/efi' | awk '{print $1}')
+
+	if [ -n "$esp_device" ]; then
+	    partition_number=${esp_device##*[!0-9]}
+	    drive_start_index=$(( ${#esp_device} - ${#partition_number} ))
+	    drive="/dev/${esp_device:0:drive_start_index}"
+	else
+	    echo "ESP not found"
+	    return 1
+	fi
+
 	if [ -e "$shimdir/shim.efi" ]; then
 		entry="$sdboot_dst/shim.efi"
 		for i in MokManager shim; do
@@ -676,8 +687,12 @@ install_sdboot()
 		done
 		install -D "$sdboot" "$boot_root$sdboot_dst/grub.efi"
 		echo "shim.efi,openSUSE Boot Manager" | iconv -f ascii -t ucs2 > "$boot_root/$sdboot_dst/boot.csv"
-        efibootmgr -q --create --label "openSUSE Secure Boot" --loader "$sdboot_dst/shim.efi"
-        efibootmgr -q --create --label "openSUSE Boot Manager" --loader "$sdboot_dst/grub.efi"
+
+        # Create boot menu entries if they do not exist
+        efibootmgr | grep -q 'Boot.*openSUSE Secure Boot' || efibootmgr -q --create --disk $drive --part $partition_number --label "openSUSE Secure Boot" --loader "$sdboot_dst/shim.efi"
+
+        efibootmgr | grep -q 'Boot.*openSUSE Boot Manager' || efibootmgr -q --create --disk $drive --part $partition_number --label "openSUSE Boot Manager" --loader "$sdboot_dst/grub.efi"
+
 		# boot entry point
 		for i in MokManager fallback; do
 			install -D "$shimdir/$i.efi" "$boot_root/EFI/BOOT/$i.efi"
@@ -688,7 +703,10 @@ install_sdboot()
 		install -D "$sdboot" "$boot_root$entry"
 		install -D "$sdboot" "$boot_root/EFI/BOOT/BOOT${firmware_arch^^}.EFI"
 		echo "${sdboot##*/},openSUSE Boot Manager" | iconv -f ascii -t ucs2 > "$boot_root/$sdboot_dst/boot.csv"
-        efibootmgr -q --create --label "openSUSE Boot Manager" --loader "$entry"
+
+        # Create boot menu entry if it does not exist
+        efibootmgr | grep -q 'Boot.*openSUSE Boot Manager' || efibootmgr -q --create --disk $drive --part $partition_number --label "openSUSE Boot Manager" --loader "$entry"
+
 	fi
 	mkdir -p "$boot_root/$entry_token"
 	mkdir -p "/etc/kernel"
