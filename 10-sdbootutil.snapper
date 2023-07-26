@@ -44,6 +44,8 @@ set_default_snapshot()
 
 	[ "$fs" = btrfs ] || return 1
 
+	is_transactional && /usr/bin/sdbootutil add-all-kernels "$num" || :
+
 	/usr/bin/sdbootutil set-default-snapshot "$num"
 }
 
