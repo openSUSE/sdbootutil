@@ -16,6 +16,7 @@ sdboot_dst="/EFI/$sdboot_vendor"
 arg_esp_path=
 arg_entry_token=
 arg_arch=
+image=vmlinuz
 
 rollback=()
 
@@ -236,7 +237,7 @@ install_kernel()
 	local subvol="$1"
 	local kernel_version="$2"
 	local dstinitrd=""
-	local src="${subvol#@}/lib/modules/$kernel_version/vmlinuz"
+	local src="${subvol#@}/lib/modules/$kernel_version/$image"
 	test -e "$src" || err "Can't find $src"
 
 	calc_chksum "$src"
@@ -544,7 +545,7 @@ find_kernels()
 	local subvol="${1:?}"
 	found_kernels=()
 
-	for fn in "${subvol#@}"/usr/lib/modules/*/vmlinuz; do
+	for fn in "${subvol#@}"/usr/lib/modules/*/"$image"; do
 		kv="${fn%/*}"
 		kv="${kv##*/}"
 		calc_chksum "$fn"
@@ -851,7 +852,7 @@ main_menu()
 
 ####### main #######
 
-getopttmp=$(getopt -o hc:v --long help,flicker,verbose,esp-path:,entry-token:,arch: -n "${0##*/}" -- "$@")
+getopttmp=$(getopt -o hc:v --long help,flicker,verbose,esp-path:,entry-token:,arch:,image: -n "${0##*/}" -- "$@")
 eval set -- "$getopttmp"
 
 while true ; do
@@ -862,6 +863,7 @@ while true ; do
 		--esp-path) arg_esp_path="$2"; shift 2 ;;
 		--arch) arg_arch="$2"; shift 2 ;;
 		--entry-token) arg_entry_token="$2"; shift 2 ;;
+		--image) image="$2"; shift 2 ;;
                 --) shift ; break ;;
                 *) echo "Internal error!" ; exit 1 ;;
         esac

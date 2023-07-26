@@ -41,14 +41,6 @@ Supplements:    (systemd-boot and shim)
 %description
 Hook scripts to install shim along with systemd-boot
 
-%package filetriggers
-Summary:        File triggers for sdbootutil
-Requires:       sdbootutil >= %{version}-%{release}
-Conflicts:      (suse-module-tools with suse-kernel-rpm-scriptlets)
-
-%description filetriggers
-File trigger scripts for sdbootutil
-
 %package snapper
 Summary:        plugin script for snapper
 Requires:       %{name} = %{version}
@@ -67,7 +59,7 @@ Summary:        dummy scriptlets for the kernel
 Conflicts:      grub2
 Conflicts:      suse-kernel-rpm-scriptlets
 Provides:       suse-kernel-rpm-scriptlets
-Requires:       %{name}-filetriggers
+Obsoletes:      %{name}-filetriggers < %{version}
 
 %description rpm-scriptlets
 Empty scriptlets to satisfy kernel dependencies
@@ -78,11 +70,16 @@ Empty scriptlets to satisfy kernel dependencies
 %build
 
 %install
-install -D -m 644 kernelhooks.lua %{buildroot}%{_rpmconfigdir}/lua/kernelhooks.lua
 install -D -m 755 sdbootutil %{buildroot}%{_bindir}/sdbootutil
 
 mkdir -p %{buildroot}%{_prefix}/lib/module-init-tools/kernel-scriptlets
-for a in cert inkmp kmp rpm; do
+for a in rpm; do
+    install -m 755 "$a-script" %{buildroot}%{_prefix}/lib/module-init-tools/kernel-scriptlets
+    for b in post posttrans postun pre preun; do
+       ln -s "$a-script" %{buildroot}%{_prefix}/lib/module-init-tools/kernel-scriptlets/$a-$b
+    done
+done
+for a in cert inkmp kmp; do
     for b in post posttrans postun pre preun; do
        ln -s /bin/true %{buildroot}%{_prefix}/lib/module-init-tools/kernel-scriptlets/$a-$b
     done
@@ -94,41 +91,9 @@ for i in 10-sdbootutil.snapper; do
   install -m 755 $i %{buildroot}%{_prefix}/lib/snapper/plugins/$i
 done
 
-%transfiletriggerin filetriggers -p <lua> -- %{_prefix}/lib/modules/
-require("kernelhooks")
-if posix.getenv("VERBOSE_FILETRIGGERS") then
-    kernelhooks.debug = "%{nvr}(in)"
-end
-file = rpm.next_file()
-while file do
-    kernelhooks.filter(file)
-    file = rpm.next_file()
-end
-kernelhooks.add()
-io.flush()
-
-%transfiletriggerun filetriggers -p <lua> -- %{_prefix}/lib/modules/
--- the module is already gone if we get called for ourselves
-if pcall(require, 'kernelhooks') then
-    if posix.getenv("VERBOSE_FILETRIGGERS") then
-        kernelhooks.debug = "%{nvr}(postun)"
-    end
-    file = rpm.next_file()
-    while file do
-        kernelhooks.filter(file)
-        file = rpm.next_file()
-    end
-    kernelhooks.remove()
-    io.flush()
-end
-
 %files
 %license LICENSE
 %{_bindir}/sdbootutil
-
-%files filetriggers
-%dir %{_rpmconfigdir}/lua
-%{_rpmconfigdir}/lua/kernelhooks.lua
 
 %files rpm-scriptlets
 %dir %{_prefix}/lib/module-init-tools
