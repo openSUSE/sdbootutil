@@ -120,7 +120,15 @@ warn()
 	exit 1
 }
 
-
+reset_rollback()
+{
+	for i in "${rollback[@]}"; do
+		[ -e "$i.bak" ] || continue
+		log_info "removing $i.bak"
+		rm -f "$i.bak"
+	done
+	rollback=()
+}
 
 run_command_live_output()
 {
@@ -309,7 +317,7 @@ install_kernel()
 	rm -f "$tmpdir/initrd"
 	rm -f "$tmpdir/entry.conf"
 	[ -z "$failed" ] || err "Failed to install $failed"
-	rollback=()
+	reset_rollback
 }
 
 install_all_kernels()
