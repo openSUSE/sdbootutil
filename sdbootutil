@@ -689,9 +689,7 @@ install_sdboot()
 		echo "shim.efi,openSUSE Boot Manager" | iconv -f ascii -t ucs2 > "$boot_root/$sdboot_dst/boot.csv"
 
         # Create boot menu entries if they do not exist
-        efibootmgr | grep -q 'Boot.*openSUSE Secure Boot' || efibootmgr -q --create --disk $drive --part $partition_number --label "openSUSE Secure Boot" --loader "$sdboot_dst/shim.efi"
-
-        efibootmgr | grep -q 'Boot.*openSUSE Boot Manager' || efibootmgr -q --create --disk $drive --part $partition_number --label "openSUSE Boot Manager" --loader "$sdboot_dst/grub.efi"
+        efibootmgr | grep -q 'Boot.*openSUSE Secure Boot' || efibootmgr -q --create --disk "$drive" --part "$partition_number" --label "openSUSE Secure Boot" --loader "$sdboot_dst/shim.efi"
 
 		# boot entry point
 		for i in MokManager fallback; do
@@ -705,7 +703,7 @@ install_sdboot()
 		echo "${sdboot##*/},openSUSE Boot Manager" | iconv -f ascii -t ucs2 > "$boot_root/$sdboot_dst/boot.csv"
 
         # Create boot menu entry if it does not exist
-        efibootmgr | grep -q 'Boot.*openSUSE Boot Manager' || efibootmgr -q --create --disk $drive --part $partition_number --label "openSUSE Boot Manager" --loader "$entry"
+        efibootmgr | grep -q 'Boot.*openSUSE Boot Manager' || efibootmgr -q --create --disk "$drive" --part "$partition_number" --label "openSUSE Boot Manager" --loader "$entry"
 
 	fi
 	mkdir -p "$boot_root/$entry_token"
