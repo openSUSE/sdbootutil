@@ -84,7 +84,7 @@ case $op in
 	;;
     postun)
 
-	if [ ! -e /.buildenv ] ; then
+	if [ ! -e /.buildenv ] && [ "$1" -eq 0 ] ; then
 	    /usr/bin/sdbootutil --image="$image" remove-kernel "$kernelrelease-$flavor"
 	fi
 	[ -z "$certs" ] || /usr/lib/module-init-tools/kernel-scriptlets/cert-"$op" --ca-check 1 --certs "$certs" "$@"
