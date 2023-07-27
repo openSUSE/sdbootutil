@@ -13,7 +13,7 @@ nl=$'\n'
 shimdir="/usr/share/efi/$(uname -m)"
 sdboot_vendor="systemd"
 sdboot_dst="/EFI/$sdboot_vendor"
-arg_esp_path=
+arg_esp_path="$SYSTEMD_ESP_PATH"
 arg_entry_token=
 arg_arch=
 image=vmlinuz
@@ -881,13 +881,17 @@ for i in /etc/os-release /usr/lib/os-release; do
 	break
 done
 
+[ -n "$arg_esp_path" ] && export SYSTEMD_ESP_PATH="$arg_esp_path"
+
 # XXX: bootctl should have json output for that too
 eval "$(bootctl 2>/dev/null | sed -ne 's/Firmware Arch: *\(\w\+\)/firmware_arch="\1"/p;s/ *token: *\(\w\+\)/entry_token="\1"/p;s, *\$BOOT: *\([^ ]\+\).*,boot_root="\1",p')"
 root_uuid=$(findmnt / -r -n -o UUID)
 root_subvol=$(btrfs subvol show / 2>/dev/null|head -1)
 [ -s /etc/machine-id ] && read -r machine_id < /etc/machine-id
 
-[ -n "$arg_esp_path" ] && boot_root="$arg_esp_path"
+if [ -n "$arg_esp_path" ] && [ "$boot_root" != "$arg_esp_path" ]; then
+	err "mismatch of esp path"
+fi
 [ -n "$arg_arch" ] && firmware_arch="$arg_arch"
 settle_entry_token
 
