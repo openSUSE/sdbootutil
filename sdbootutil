@@ -669,7 +669,7 @@ install_sdboot()
 
 	mkdir -p "$boot_root/loader/entries"
 
-	esp_device=$(lsblk -o NAME,MOUNTPOINT -nl | grep '/boot/efi' | awk '{print $1}')
+	esp_device=$(readlink -f $(bootctl status | awk -F': ' '/ESP:/ {print $2; exit}'))
 
 	if [ -n "$esp_device" ]; then
 	    partition_number=${esp_device##*[!0-9]}
