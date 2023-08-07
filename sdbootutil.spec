@@ -47,7 +47,7 @@ Requires:       %{name} = %{version}
 Requires:       btrfsprogs
 Requires:       sdbootutil >= %{version}-%{release}
 Requires:       snapper
-Supplements:    (snapper and btrfsprogs)
+Supplements:    (snapper and btrfsprogs and sdbootutil)
 
 %description snapper
 Plugin scripts for snapper to handle BLS config files
