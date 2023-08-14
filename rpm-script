@@ -76,6 +76,7 @@ case $op in
 	    /usr/bin/sdbootutil --image="$image" add-kernel "$kernelrelease-$flavor"
 	    # make sure to select the latest kernel
 	    [ -z "$TRANSACTIONAL_UPDATE" ] && /usr/bin/sdbootutil set-default-snapshot
+	    [ -e /usr/lib/systemd/system/purge-kernels.service ] && { :>/boot/do_purge_kernels || :; }
 	fi
 	[ -z "$certs" ] || /usr/lib/module-init-tools/kernel-scriptlets/cert-"$op" --ca-check 1 --certs "$certs" "$@" || script_rc=$?
 	;;
