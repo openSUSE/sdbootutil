@@ -83,11 +83,12 @@ case $op in
 	[ -z "$certs" ] || /usr/lib/module-init-tools/kernel-scriptlets/cert-"$op" --ca-check 1 --certs "$certs" "$@" || script_rc=$?
 	;;
     postun)
-
-	if [ ! -e /.buildenv ] && [ "$1" -eq 0 ] ; then
+	# can't check $1 as kernel is usually multiversion. So need to check if
+	# that particular kernel was actually removed from disk.
+	if [ ! -e /.buildenv ] && [ ! -e /lib/modules/"$kernelrelease-$flavor/$image" ] ; then
 	    /usr/bin/sdbootutil --image="$image" remove-kernel "$kernelrelease-$flavor"
+	    [ -z "$certs" ] || /usr/lib/module-init-tools/kernel-scriptlets/cert-"$op" --ca-check 1 --certs "$certs" "$@"
 	fi
-	[ -z "$certs" ] || /usr/lib/module-init-tools/kernel-scriptlets/cert-"$op" --ca-check 1 --certs "$certs" "$@"
 	;;
     posttrans)
 	;;
