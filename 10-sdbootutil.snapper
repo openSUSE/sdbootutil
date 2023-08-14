@@ -62,8 +62,6 @@ commands['delete-snapshot-pre']=delete_snapshot
 commands['set-default-snapshot-post']=set_default_snapshot
 commands['help']=h
 
-logger -t snapper "$0 $@"
-
 cmd="$1"
 shift
 [ -n "$cmd" ] || cmd=help
