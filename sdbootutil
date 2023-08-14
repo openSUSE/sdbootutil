@@ -718,12 +718,18 @@ install_sdboot()
 
 	mkdir -p "$boot_root/loader/entries"
 
-	esp_device=$(readlink -f $(bootctl status | awk -F': ' '/ESP:/ {print $2; exit}'))
-
-	if [ -n "$esp_device" ]; then
-	    partition_number=${esp_device##*[!0-9]}
-	    drive_start_index=$(( ${#esp_device} - ${#partition_number} ))
-	    drive="/dev/${esp_device:0:drive_start_index}"
+	if [ -d "$arg_esp_path" ] || [ -b "$arg_esp_path" ]; then
+	    if [ -b "$arg_esp_path" ]; then
+	        blkpart="$arg_esp_path"
+	    else
+	        mountpoint -q "$arg_esp_path" || { echo "$arg_esp_path is not a valid mountpoint"; return 1; }
+	        blkpart="$(findmnt -nvo SOURCE "$arg_esp_path")"
+	    fi
+	    [ -L "/sys/class/block/${blkpart##*/}" ] || { echo "$blkpart is not a partition"; return 1; }
+	    drive="$(readlink -f "/sys/class/block/${blkpart##*/}")"
+	    drive="${drive%/*}"
+	    drive="/dev/${drive##*/}"
+	    read -r partition_number < "/sys/class/block/${blkpart##*/}"/partition
 	else
 	    echo "ESP not found"
 	    return 1
