@@ -16,6 +16,7 @@ sdboot_dst="/EFI/$sdboot_vendor"
 arg_esp_path="$SYSTEMD_ESP_PATH"
 arg_entry_token=
 arg_arch=
+arg_no_variables=
 # for x in vmlinuz image vmlinux linux bzImage uImage Image zImage; do
 image=vmlinuz
 
@@ -711,7 +712,6 @@ sdboot_needs_update()
 	return 0
 }
 
-# TODO: need to create a boot variable if it's not the first installation
 install_sdboot()
 {
 	local sdboot blkpart drive partno
@@ -749,8 +749,6 @@ install_sdboot()
 	fi
 	# this is for shim to create the entry if missing
 	echo "${entry##*/},openSUSE Boot Manager" | iconv -f ascii -t ucs2 > "$boot_root/$sdboot_dst/boot.csv"
-	# Create boot menu entry if it does not exist
-	efibootmgr | grep -q 'Boot.*openSUSE Boot Manager' || efibootmgr -q --create --disk "$drive" --part "$partno" --label "openSUSE Boot Manager" --loader "$entry"
 
 	mkdir -p "$boot_root/$entry_token"
 	:> "$boot_root/$entry_token/installed_by_sdbootutil"
@@ -761,6 +759,10 @@ install_sdboot()
 	[ -s "$boot_root/loader/entries.srel" ] || echo type1 > "$boot_root/loader/entries.srel"
 
     	[ -e "$boot_root/loader/loader.conf" ] || echo -e "#timeout 3\n#console-mode keep\n" > "$boot_root/loader/loader.conf"
+
+	set -x
+	# Create boot menu entry if it does not exist
+	[ -n "$arg_no_variables" ] || efibootmgr | grep -q 'Boot.*openSUSE Boot Manager' || efibootmgr -q --create --disk "$drive" --part "$partno" --label "openSUSE Boot Manager" --loader "$entry" || true
 }
 
 settle_entry_token()
@@ -869,7 +871,7 @@ main_menu()
 
 ####### main #######
 
-getopttmp=$(getopt -o hc:v --long help,flicker,verbose,esp-path:,entry-token:,arch:,image: -n "${0##*/}" -- "$@")
+getopttmp=$(getopt -o hc:v --long help,flicker,verbose,esp-path:,entry-token:,arch:,image:,no-variables -n "${0##*/}" -- "$@")
 eval set -- "$getopttmp"
 
 while true ; do
@@ -881,6 +883,7 @@ while true ; do
 		--arch) arg_arch="$2"; shift 2 ;;
 		--entry-token) arg_entry_token="$2"; shift 2 ;;
 		--image) image="$2"; shift 2 ;;
+		--no-variables) arg_no_variables=1; shift ;;
                 --) shift ; break ;;
                 *) echo "Internal error!" ; exit 1 ;;
         esac
