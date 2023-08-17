@@ -118,7 +118,6 @@ warn()
 	else
 		echo "Warning: $*" >&2
 	fi
-	exit 1
 }
 
 reset_rollback()
