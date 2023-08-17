@@ -718,6 +718,23 @@ install_sdboot()
 
 	mkdir -p "$boot_root/loader/entries"
 
+	if [ -d "$arg_esp_path" ] || [ -b "$arg_esp_path" ]; then
+	    if [ -b "$arg_esp_path" ]; then
+	        blkpart="$arg_esp_path"
+	    else
+	        mountpoint -q "$arg_esp_path" || { echo "$arg_esp_path is not a valid mountpoint"; return 1; }
+	        blkpart="$(findmnt -nvo SOURCE "$arg_esp_path")"
+	    fi
+	    [ -L "/sys/class/block/${blkpart##*/}" ] || { echo "$blkpart is not a partition"; return 1; }
+	    drive="$(readlink -f "/sys/class/block/${blkpart##*/}")"
+	    drive="${drive%/*}"
+	    drive="/dev/${drive##*/}"
+	    read -r partition_number < "/sys/class/block/${blkpart##*/}"/partition
+	else
+	    echo "ESP not found"
+	    return 1
+	fi
+
 	if [ -e "$shimdir/shim.efi" ]; then
 		entry="$sdboot_dst/shim.efi"
 		for i in MokManager shim; do
@@ -725,6 +742,10 @@ install_sdboot()
 		done
 		install -D "$sdboot" "$boot_root$sdboot_dst/grub.efi"
 		echo "shim.efi,openSUSE Boot Manager" | iconv -f ascii -t ucs2 > "$boot_root/$sdboot_dst/boot.csv"
+
+        # Create boot menu entries if they do not exist
+        efibootmgr | grep -q 'Boot.*openSUSE Secure Boot' || efibootmgr -q --create --disk "$drive" --part "$partition_number" --label "openSUSE Secure Boot" --loader "$sdboot_dst/shim.efi"
+
 		# boot entry point
 		for i in MokManager fallback; do
 			install -D "$shimdir/$i.efi" "$boot_root/EFI/BOOT/$i.efi"
@@ -735,6 +756,10 @@ install_sdboot()
 		install -D "$sdboot" "$boot_root$entry"
 		install -D "$sdboot" "$boot_root/EFI/BOOT/BOOT${firmware_arch^^}.EFI"
 		echo "${sdboot##*/},openSUSE Boot Manager" | iconv -f ascii -t ucs2 > "$boot_root/$sdboot_dst/boot.csv"
+
+        # Create boot menu entry if it does not exist
+        efibootmgr | grep -q 'Boot.*openSUSE Boot Manager' || efibootmgr -q --create --disk "$drive" --part "$partition_number" --label "openSUSE Boot Manager" --loader "$entry"
+
 	fi
 	mkdir -p "$boot_root/$entry_token"
 	mkdir -p "/etc/kernel"
