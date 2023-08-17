@@ -713,37 +713,27 @@ sdboot_needs_update()
 # TODO: need to create a boot variable if it's not the first installation
 install_sdboot()
 {
-	local sdboot=$(find_sdboot)
+	local sdboot blkpart drive partno
+
+	sdboot=$(find_sdboot)
 
 	mkdir -p "$boot_root/loader/entries"
 
-	if [ -d "$arg_esp_path" ] || [ -b "$arg_esp_path" ]; then
-	    if [ -b "$arg_esp_path" ]; then
-	        blkpart="$arg_esp_path"
-	    else
-	        mountpoint -q "$arg_esp_path" || { echo "$arg_esp_path is not a valid mountpoint"; return 1; }
-	        blkpart="$(findmnt -nvo SOURCE "$arg_esp_path")"
-	    fi
-	    [ -L "/sys/class/block/${blkpart##*/}" ] || { echo "$blkpart is not a partition"; return 1; }
-	    drive="$(readlink -f "/sys/class/block/${blkpart##*/}")"
-	    drive="${drive%/*}"
-	    drive="/dev/${drive##*/}"
-	    read -r partition_number < "/sys/class/block/${blkpart##*/}"/partition
-	else
-	    echo "ESP not found"
-	    return 1
-	fi
+	mountpoint -q "$boot_root" || err "$boot_root is not a valid mountpoint"
+	blkpart="$(findmnt -nvo SOURCE "$boot_root")"
+	[ -L "/sys/class/block/${blkpart##*/}" ] || err "$blkpart is not a partition"
+	drive="$(readlink -f "/sys/class/block/${blkpart##*/}")"
+	drive="${drive%/*}"
+	drive="/dev/${drive##*/}"
+	read -r partno < "/sys/class/block/${blkpart##*/}"/partition
 
 	if [ -e "$shimdir/shim.efi" ]; then
+		log_info "Installing systemd-boot with shim into $boot_root"
 		entry="$sdboot_dst/shim.efi"
 		for i in MokManager shim; do
 			install -D "$shimdir/$i.efi" "$boot_root$sdboot_dst/$i.efi"
 		done
 		install -D "$sdboot" "$boot_root$sdboot_dst/grub.efi"
-		echo "shim.efi,openSUSE Boot Manager" | iconv -f ascii -t ucs2 > "$boot_root/$sdboot_dst/boot.csv"
-
-        # Create boot menu entries if they do not exist
-        efibootmgr | grep -q 'Boot.*openSUSE Secure Boot' || efibootmgr -q --create --disk "$drive" --part "$partition_number" --label "openSUSE Secure Boot" --loader "$sdboot_dst/shim.efi"
 
 		# boot entry point
 		for i in MokManager fallback; do
@@ -751,15 +741,16 @@ install_sdboot()
 		done
 		install -D "$shimdir/shim.efi" "$boot_root/EFI/BOOT/BOOT${firmware_arch^^}.EFI"
 	else
+		log_info "Installing systemd-boot into $boot_root"
 		entry="$sdboot_dst/${sdboot##*/}"
 		install -D "$sdboot" "$boot_root$entry"
 		install -D "$sdboot" "$boot_root/EFI/BOOT/BOOT${firmware_arch^^}.EFI"
-		echo "${sdboot##*/},openSUSE Boot Manager" | iconv -f ascii -t ucs2 > "$boot_root/$sdboot_dst/boot.csv"
-
-        # Create boot menu entry if it does not exist
-        efibootmgr | grep -q 'Boot.*openSUSE Boot Manager' || efibootmgr -q --create --disk "$drive" --part "$partition_number" --label "openSUSE Boot Manager" --loader "$entry"
-
 	fi
+	# this is for shim to create the entry if missing
+	echo "${entry##*/},openSUSE Boot Manager" | iconv -f ascii -t ucs2 > "$boot_root/$sdboot_dst/boot.csv"
+	# Create boot menu entry if it does not exist
+	efibootmgr | grep -q 'Boot.*openSUSE Boot Manager' || efibootmgr -q --create --disk "$drive" --part "$partno" --label "openSUSE Boot Manager" --loader "$entry"
+
 	mkdir -p "$boot_root/$entry_token"
 	mkdir -p "/etc/kernel"
 	[ -s /etc/kernel/entry-token ] || echo "$entry_token" > /etc/kernel/entry-token
