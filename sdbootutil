@@ -16,6 +16,7 @@ sdboot_dst="/EFI/$sdboot_vendor"
 arg_esp_path="$SYSTEMD_ESP_PATH"
 arg_entry_token=
 arg_arch=
+# for x in vmlinuz image vmlinux linux bzImage uImage Image zImage; do
 image=vmlinuz
 
 rollback=()
@@ -577,7 +578,7 @@ update_kernels()
 			has_stale=1
 		elif [ "${known_kernels[$k]}" = missing ]; then
 			known_kernels["$k"]="$id"
-			is_bootable=1	
+			is_bootable=1
 		fi
 	done < <(jq -r '.[]|select(has("linux"))|[.linux,.id]|join(" ")'< "$entryfile")
 }
@@ -752,6 +753,7 @@ install_sdboot()
 	efibootmgr | grep -q 'Boot.*openSUSE Boot Manager' || efibootmgr -q --create --disk "$drive" --part "$partno" --label "openSUSE Boot Manager" --loader "$entry"
 
 	mkdir -p "$boot_root/$entry_token"
+	:> "$boot_root/$entry_token/installed_by_sdbootutil"
 	mkdir -p "/etc/kernel"
 	[ -s /etc/kernel/entry-token ] || echo "$entry_token" > /etc/kernel/entry-token
 	update_random_seed
@@ -936,7 +938,13 @@ elif [ "$1" = "remove-all-kernels" ]; then
 elif [ "$1" = "set-default-snapshot" ]; then
 	set_default_snapshot "${2:-$root_snapshot}"
 elif [ "$1" = "is-installed" ]; then
-	sdboot_version > /dev/null
+	if sdboot_version > /dev/null && [ -e "$boot_root/$entry_token/installed_by_sdbootutil" ]; then
+		log_info "systemd-boot was installed using sdbootutil"
+		exit 0
+	else
+		log_info "not installed using this tool"
+		exit 1
+	fi
 elif [ "$1" = "list-kernels" ]; then
 	list_kernels "${2:-$root_snapshot}"
 elif [ "$1" = "is-bootable" ]; then
