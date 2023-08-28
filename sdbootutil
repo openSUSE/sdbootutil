@@ -122,6 +122,13 @@ warn()
 	fi
 }
 
+is_transactional()
+{
+	# don't handle this here if called within transactional-update. We have
+	# to run after it's done doing it's thing.
+	[ "$(stat -f -c %T /etc)" = "overlayfs" ]
+}
+
 reset_rollback()
 {
 	for i in "${rollback[@]}"; do
@@ -201,8 +208,13 @@ sedrootflags()
 	local subvol="${1:?}"
 	# - delete BOOT_IMAGE= and initrd=
 	# - make sure root= refers to uuid
-	# - replace or add rootflags to point at correct subvolume
-	sed -e "s/[ \t]\+/ /g;s/\<\(BOOT_IMAGE\|initrd\)=[^ ]* \?//;s/\<root=[^ ]*/root=UUID=$root_uuid/;tr;:r;s,\<rootflags=subvol=[^ ]*,rootflags=subvol=$subvol,;tx; s,\$, rootflags=subvol=$subvol,;:x"
+	# - replace or add rootflags to point at correct subvolume if
+	#   is in a transactional system
+	if is_transactional; then
+		sed -e "s/[ \t]\+/ /g;s/\<\(BOOT_IMAGE\|initrd\)=[^ ]* \?//;s/\<root=[^ ]*/root=UUID=$root_uuid/;tr;:r;s,\<rootflags=subvol=[^ ]*,rootflags=subvol=$subvol,;tx; s,\$, rootflags=subvol=$subvol,;:x"
+	else
+		sed -e "s/[ \t]\+/ /g;s/\<\(BOOT_IMAGE\|initrd\)=[^ ]* \?//;s/\<root=[^ ]*/root=UUID=$root_uuid/"
+	fi
 }
 
 remove_kernel()
