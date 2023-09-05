@@ -55,24 +55,24 @@ helpandquit()
 		add-kernel VERSION [SUBVOL]
 			   Create boot entry for specified kernel
 
-		add-all-kernels [SUBVOL]
-			   Create boot entries for all kernels in SUBVOL
+		add-all-kernels [SNAPSHOT]
+			   Create boot entries for all kernels in SNAPSHOT
 
 		remove-kernel VERSION [SUBVOL]
 			   Remove boot entry for specified kernel
 
-		remove-all-kernels [SUBVOL]
-			   Remove boot entries for all kernels in SUBVOL
+		remove-all-kernels [SNAPSHOT]
+			   Remove boot entries for all kernels in SNAPSHOT
 
-		list-kernels [SUBVOL]
-			   List all kernels related to SUBVOL
+		list-kernels [SNAPSHOT]
+			   List all kernels related to SNAPSHOT
 
-		set-default-snapshot [SUBVOL]
-			   Make SUBVOL the default for next boot.
+		set-default-snapshot [SNAPSHOT]
+			   Make SNAPSHOT the default for next boot.
 			   Also install all kernels if needed
 
-		is-bootable [SUBVOL]
-			   Check whether SUBVOL has any kernels registered, ie
+		is-bootable [SNAPSHOT]
+			   Check whether SNAPSHOT has any kernels registered, ie
 			   is potentially bootable
 
 		install    Install systemd-boot and shim into ESP
