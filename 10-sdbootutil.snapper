@@ -3,10 +3,9 @@
 shopt -s extglob nullglob
 set -e
 
+# check whether it's a transactional system
 is_transactional()
 {
-	# don't handle this here if called within transactional-update. We have
-	# to run after it's done doing it's thing.
 	[ "$(stat -f -c %T /etc)" = "overlayfs" ]
 }
 
