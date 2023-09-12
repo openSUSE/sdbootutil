@@ -211,8 +211,14 @@ remove_kernel()
 	local kernel_version="$2"
 	local snapshot="${subvol#@/.snapshots/}"
 	snapshot="${snapshot%/*}"
-	local id="$entry_token-$kernel_version-$snapshot.conf"
+	local id="snapper-$entry_token-$kernel_version-$snapshot.conf"
 	run_command_output bootctl unlink "$id"
+	if [ "$os_release_ID" == "opensuse-tumbleweed" ]; then
+		if [ "$subvol" == "$root_subvol" ]; then
+			id="$entry_token-$kernel_version.conf"
+			run_command_output bootctl unlink "$id"
+		fi
+	fi
 }
 
 install_with_rollback()
@@ -244,9 +250,9 @@ install_kernel()
 	calc_chksum "$src"
 	dst="/$entry_token/$kernel_version/linux-$chksum"
 
-    local s_dir="${subvol#@}"
-    s_dir="${s_dir%/*}"
-    local snap_path="${s_dir%/*}"
+	local s_dir="${subvol#@}"
+	s_dir="${s_dir%/*}"
+	local snap_path="${s_dir%/*}"
 	local snapshot="${s_dir#/.snapshots/}"
 
 	local initrd="${src%/*}/initrd"
@@ -259,7 +265,7 @@ install_kernel()
 		# check if we can reuse the initrd from the parent
 		# to avoid expensive regeneration
 		detect_parent "$subvol"
-		parent_conf="$boot_root/loader/entries/$entry_token-$kernel_version-$parent_snapshot.conf"
+		parent_conf="$boot_root/loader/entries/snapper-$entry_token-$kernel_version-$parent_snapshot.conf"
 		if [ -n "$parent_subvol" ] && [ -e "$parent_conf" ]; then
 			#subvol_is_ro "$parent_subvol" || err "Parent snapshot $parent_snapshot is not read-only, can't reuse initrd"
 			local k
@@ -291,49 +297,59 @@ install_kernel()
 		dstinitrd="${dst%/*}/initrd-$chksum"
 	fi
 
-    # bnc#864842 Important snapshots are not marked as such in grub2 menu
-    # the format is "important distribution version (kernel_version, timestamp, pre/post)"
-    local date=`xmllint --xpath '/snapshot/date/text()' "${s_dir}/info.xml" || echo ""`
-    date=`echo $date | sed 's/\(.*\) \(.*\):.*/\1T\2/'`
-    local important=`xmllint --xpath "/snapshot/userdata[key='important']/value/text()" "${s_dir}/info.xml" 2>/dev/null || echo ""`
-    local stype=`xmllint --xpath '/snapshot/type/text()' "${s_dir}/info.xml" || echo ""`
-    
-    # FATE#318101
-    # Show user defined comments in grub2 menu for snapshots
-    # Use userdata tag "bootloader=[user defined text]"
-    local full_desc=`xmllint --xpath "/snapshot/userdata[key='bootloader']/value/text()" "${s_dir}/info.xml" 2>/dev/null || echo ""`
-    test -z "$full_desc" && desc=`xmllint --xpath '/snapshot/description/text()' "${s_dir}/info.xml" 2>/dev/null || echo ""`
-    
-    # FATE#317972
-    # If we have a post entry and the description field is empty,
-    # we should use the "Pre" number and add that description to the post entry.
-    if test -z "$full_desc" -a -z "$desc" -a "$stype" = "post"; then
-        local pre_num=`xmllint --xpath '/snapshot/pre_num/text()' "${s_dir}/info.xml" 2>/dev/null || echo ""`
-        if test -n "$pre_num"; then
-            if test -f "${snap_path}/${pre_num}/info.xml" ; then
-                desc=`xmllint --xpath '/snapshot/description/text()' "${snap_path}/${pre_num}/info.xml" 2>/dev/null || echo ""`
-            fi
-        fi
-    fi
-    
-    test "$important" = "yes" && important="*" || important=" "
-    test "$stype" = "single" && stype=""
-    test -z "$stype" || stype=",$stype"
-    test -z "$desc" || desc=",$desc"
-    test -z "$full_desc" && full_desc="Linux-$kernel_version,$date$stype$desc"
-    
-    title="${important}${os_release_PRETTY_NAME} ${os_release_VERSION_ID} (${full_desc})"
+	# bnc#864842 Important snapshots are not marked as such in grub2 menu
+	# the format is "important distribution version (kernel_version, timestamp, pre/post)"
+	local date=`xmllint --xpath '/snapshot/date/text()' "${s_dir}/info.xml" || echo ""`
+	date=`echo $date | sed 's/\(.*\) \(.*\):.*/\1T\2/'`
+	local important=`xmllint --xpath "/snapshot/userdata[key='important']/value/text()" "${s_dir}/info.xml" 2>/dev/null || echo ""`
+	local stype=`xmllint --xpath '/snapshot/type/text()' "${s_dir}/info.xml" || echo ""`
+
+	# FATE#318101
+	# Show user defined comments in grub2 menu for snapshots
+	# Use userdata tag "bootloader=[user defined text]"
+	local full_desc=`xmllint --xpath "/snapshot/userdata[key='bootloader']/value/text()" "${s_dir}/info.xml" 2>/dev/null || echo ""`
+	test -z "$full_desc" && desc=`xmllint --xpath '/snapshot/description/text()' "${s_dir}/info.xml" 2>/dev/null || echo ""`
+
+	# FATE#317972
+	# If we have a post entry and the description field is empty,
+	# we should use the "Pre" number and add that description to the post entry.
+	if test -z "$full_desc" -a -z "$desc" -a "$stype" = "post"; then
+		local pre_num=`xmllint --xpath '/snapshot/pre_num/text()' "${s_dir}/info.xml" 2>/dev/null || echo ""`
+		if test -n "$pre_num"; then
+			if test -f "${snap_path}/${pre_num}/info.xml" ; then
+				desc=`xmllint --xpath '/snapshot/description/text()' "${snap_path}/${pre_num}/info.xml" 2>/dev/null || echo ""`
+			fi
+		fi
+	fi
+
+	test "$important" = "yes" && important="*" || important=" "
+	test "$stype" = "single" && stype=""
+	test -z "$stype" || stype=",$stype"
+	test -z "$desc" || desc=",$desc"
+	test -z "$full_desc" && full_desc="Linux-$kernel_version,$date$stype$desc"
+
+	title="${important}${os_release_PRETTY_NAME} ${os_release_VERSION_ID} (${full_desc})"
 
 	# shellcheck disable=SC2154
 	sort_key="$os_release_ID"
 
-    if [ "$os_release_ID" == "opensuse-tumbleweed" ]; then
-        sort_key="snapper-$sort_key"
-        title="Snapper: $title"
-    fi
-
 	entry_machine_id=
 	[ "$entry_token" = "$machine_id" ] && entry_machine_id="$machine_id"
+
+	if [ "$os_release_ID" == "opensuse-tumbleweed" ]; then
+		if [ "$subvol" == "$root_subvol" ]; then
+			cat > "$tmpdir/entry-tw.conf" <<-EOF
+			# Boot Loader Specification type#1 entry
+			title      ${os_release_PRETTY_NAME}
+			version    Linux-$kernel_version${entry_machine_id:+${nl}machine-id $entry_machine_id}${sort_key:+${nl}sort-key   $sort_key}
+			options    $boot_options
+			linux      $dst
+			initrd     $dstinitrd
+			EOF
+		fi
+		sort_key="snapper-$sort_key"
+		title="Snapper: $title"
+	fi
 
 	cat > "$tmpdir/entry.conf" <<-EOF
 	# Boot Loader Specification type#1 entry
@@ -354,11 +370,16 @@ install_kernel()
 		install_with_rollback "$tmpdir/initrd" "$boot_root$dstinitrd" || failed=initrd
 	fi
 	if [ -z "$failed" ]; then
-		loader_entry="$boot_root/loader/entries/$entry_token-$kernel_version-$snapshot.conf"
+		loader_entry="$boot_root/loader/entries/snapper-$entry_token-$kernel_version-$snapshot.conf"
 		install_with_rollback "$tmpdir/entry.conf" "$loader_entry" || failed="bootloader entry"
+		if [ -e "$tmpdir/entry-tw.conf" ]; then
+			loader_entry="$boot_root/loader/entries/$entry_token-$kernel_version.conf"
+			install_with_rollback "$tmpdir/entry-tw.conf" "$loader_entry" || failed="bootloader entry tw"
+		fi
 	fi
 	rm -f "$tmpdir/initrd"
 	rm -f "$tmpdir/entry.conf"
+	rm -f "$tmpdir/entry-tw.conf"
 	[ -z "$failed" ] || err "Failed to install $failed"
 	reset_rollback
 }
@@ -397,7 +418,10 @@ update_entries_for_subvol()
 	update_entries jq "[.[]|select(has(\"options\"))|select(.options|match(\"root=UUID=$root_uuid .*rootflags=subvol=$subvol\"))]"
 }
 
-
+update_entries_for_tw()
+{
+    bootctl list --json=short | jq -c 'map(select(.path | test(".*/'"${entry_token}"'.*")))' > "$entryfile"
+}
 
 update_entries_for_snapshot()
 {
@@ -878,18 +902,43 @@ set_default_snapshot()
 	local num="${1:?}"
 	local configs
 	update_entries_for_snapshot "$num"
-	mapfile configs < <(jq '.[]|[.id]|join(" ")' -r < "$entryfile")
-	configs=("${configs[@]%$nl}")
+	mapfile -t configs < <(jq '.[]|[.id]|join(" ")' -r < "$entryfile")
 	if [ -z "${configs[0]}" ]; then
 		log_info "snapshot $num has no configs, trying to create them..."
 		install_all_kernels "$num"
 		update_entries_for_snapshot "$num"
-		mapfile configs < <(jq '.[]|[.id]|join(" ")' -r < "$entryfile")
-		configs=("${configs[@]%$nl}")
+		mapfile -t configs < <(jq '.[]|[.id]|join(" ")' -r < "$entryfile")
 		if [ -z "${configs[0]}" ]; then
 			err "snapshot $num has no kernels"
 		fi
 	fi
+  
+	if [ "$os_release_ID" == "opensuse-tumbleweed" ]; then
+		rm -f "$boot_root/loader/entries/$entry_token"*.conf
+		mapfile -t paths < <(jq '.[]|[.path]|join(" ")' -r < "$entryfile")
+
+		for path in "${paths[@]}"; do
+			path="${path#/efi}"
+			full_src_path="$boot_root$path"
+			filename=$(basename "$path")
+			if [[ $filename == snapper-${entry_token}*-$num* ]]; then
+				dst_path="$boot_root/loader/entries/${filename/snapper-/}"
+				dst_path="${dst_path%-*}.conf"
+				cp "$full_src_path" "$dst_path"
+
+				# Extract kernel_version from the 'linux' line in the file
+				kernel_info=$(grep '^linux' "$dst_path")
+				kernel_version=$(echo "$kernel_info" | awk -F'/' '{print $(NF-1)}' | sed "s/$entry_token\///")
+
+				# Update the title and version lines in the file
+				sed -i "s/^title.*$/title      ${os_release_PRETTY_NAME}/" "$dst_path"
+				sed -i "s/^version.*$/version    Linux-$kernel_version/" "$dst_path"
+				sed -i "s/^sort-key.*$/sort-key    ${os_release_ID}/" "$dst_path"
+			fi
+		done
+		update_entries_for_tw
+		mapfile -t configs < <(jq '.[]|[.id]|join(" ")' -r < "$entryfile")
+	fi	
 	log_info "setting default entry ${configs[0]}"
 	bootctl set-default "${configs[0]}"
 }
