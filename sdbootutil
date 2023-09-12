@@ -244,8 +244,10 @@ install_kernel()
 	calc_chksum "$src"
 	dst="/$entry_token/$kernel_version/linux-$chksum"
 
-	local snapshot="${subvol#@/.snapshots/}"
-	snapshot="${snapshot%/*}"
+    local s_dir="${subvol#@}"
+    s_dir="${s_dir%/*}"
+    local snap_path="${s_dir%/*}"
+	local snapshot="${s_dir#/.snapshots/}"
 
 	local initrd="${src%/*}/initrd"
 
@@ -289,15 +291,54 @@ install_kernel()
 		dstinitrd="${dst%/*}/initrd-$chksum"
 	fi
 
+    # bnc#864842 Important snapshots are not marked as such in grub2 menu
+    # the format is "important distribution version (kernel_version, timestamp, pre/post)"
+    local date=`xmllint --xpath '/snapshot/date/text()' "${s_dir}/info.xml" || echo ""`
+    date=`echo $date | sed 's/\(.*\) \(.*\):.*/\1T\2/'`
+    local important=`xmllint --xpath "/snapshot/userdata[key='important']/value/text()" "${s_dir}/info.xml" 2>/dev/null || echo ""`
+    local stype=`xmllint --xpath '/snapshot/type/text()' "${s_dir}/info.xml" || echo ""`
+    
+    # FATE#318101
+    # Show user defined comments in grub2 menu for snapshots
+    # Use userdata tag "bootloader=[user defined text]"
+    local full_desc=`xmllint --xpath "/snapshot/userdata[key='bootloader']/value/text()" "${s_dir}/info.xml" 2>/dev/null || echo ""`
+    test -z "$full_desc" && desc=`xmllint --xpath '/snapshot/description/text()' "${s_dir}/info.xml" 2>/dev/null || echo ""`
+    
+    # FATE#317972
+    # If we have a post entry and the description field is empty,
+    # we should use the "Pre" number and add that description to the post entry.
+    if test -z "$full_desc" -a -z "$desc" -a "$stype" = "post"; then
+        local pre_num=`xmllint --xpath '/snapshot/pre_num/text()' "${s_dir}/info.xml" 2>/dev/null || echo ""`
+        if test -n "$pre_num"; then
+            if test -f "${snap_path}/${pre_num}/info.xml" ; then
+                desc=`xmllint --xpath '/snapshot/description/text()' "${snap_path}/${pre_num}/info.xml" 2>/dev/null || echo ""`
+            fi
+        fi
+    fi
+    
+    test "$important" = "yes" && important="*" || important=" "
+    test "$stype" = "single" && stype=""
+    test -z "$stype" || stype=",$stype"
+    test -z "$desc" || desc=",$desc"
+    test -z "$full_desc" && full_desc="Linux-$kernel_version,$date$stype$desc"
+    
+    title="${important}${os_release_PRETTY_NAME} ${os_release_VERSION_ID} (${full_desc})"
+
 	# shellcheck disable=SC2154
 	sort_key="$os_release_ID"
+
+    if [ "$os_release_ID" == "opensuse-tumbleweed" ]; then
+        sort_key="snapper-$sort_key"
+        title="Snapper: $title"
+    fi
+
 	entry_machine_id=
 	[ "$entry_token" = "$machine_id" ] && entry_machine_id="$machine_id"
 
 	cat > "$tmpdir/entry.conf" <<-EOF
 	# Boot Loader Specification type#1 entry
-	title      ${os_release_PRETTY_NAME:-Linux $kernel_version}
-	version    $snapshot@$kernel_version${entry_machine_id:+${nl}machine-id $entry_machine_id}${sort_key:+${nl}sort-key   $sort_key}
+	title      $title
+	version    $snapshot${entry_machine_id:+${nl}machine-id $entry_machine_id}${sort_key:+${nl}sort-key   $sort_key}
 	options    $boot_options
 	linux      $dst
 	initrd     $dstinitrd
