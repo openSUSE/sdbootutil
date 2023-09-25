@@ -291,37 +291,29 @@ install_kernel()
 		dstinitrd="${dst%/*}/initrd-$chksum"
 	fi
 
-	# bnc#864842 Important snapshots are not marked as such in grub2 menu
-	# the format is "important distribution version (kernel_version, timestamp, pre/post)"
-	local date=`xmllint --xpath '/snapshot/date/text()' "${s_dir}/info.xml" || echo ""`
-	date=`echo $date | sed 's/\(.*\) \(.*\):.*/\1T\2/'`
-	local important=`xmllint --xpath "/snapshot/userdata[key='important']/value/text()" "${s_dir}/info.xml" 2>/dev/null || echo ""`
-	local stype=`xmllint --xpath '/snapshot/type/text()' "${s_dir}/info.xml" || echo ""`
+	snapshot_info=$(snapper list --columns number,type,date,description,userdata,pre-number | awk -v num="$number" -F '|' '$1 ~ num { print $0 }' | sed 's/^[ \t]*//;s/[ \t]*$//')
 
-	# FATE#318101
-	# Show user defined comments in grub2 menu for snapshots
-	# Use userdata tag "bootloader=[user defined text]"
-	local full_desc=`xmllint --xpath "/snapshot/userdata[key='bootloader']/value/text()" "${s_dir}/info.xml" 2>/dev/null || echo ""`
-	test -z "$full_desc" && desc=`xmllint --xpath '/snapshot/description/text()' "${s_dir}/info.xml" 2>/dev/null || echo ""`
-
-	# FATE#317972
-	# If we have a post entry and the description field is empty,
-	# we should use the "Pre" number and add that description to the post entry.
+	# Parse the snapshot information
+	stype=$(echo "$snapshot_info" | awk -F '|' '{ gsub(/^[ \t]+|[ \t]+$/, "", $2); print $2 }')
+	date=$(echo "$snapshot_info" | awk -F '|' '{ gsub(/^[ \t]+|[ \t]+$/, "", $3); print $3 }')
+	important=$(echo "$snapshot_info" | awk -F '|' '{ gsub(/^[ \t]+|[ \t]+$/, "", $5); print $5 }' | grep -o 'important=[^ ,]*' | cut -d= -f2)
+	full_desc=$(echo "$snapshot_info" | awk -F '|' '{ gsub(/^[ \t]+|[ \t]+$/, "", $5); print $5 }' | grep -o 'bootloader=[^ ,]*' | cut -d= -f2)
+	desc=$(echo "$snapshot_info" | awk -F '|' '{ gsub(/^[ \t]+|[ \t]+$/, "", $4); print $4 }')
+	
 	if test -z "$full_desc" -a -z "$desc" -a "$stype" = "post"; then
-		local pre_num=`xmllint --xpath '/snapshot/pre_num/text()' "${s_dir}/info.xml" 2>/dev/null || echo ""`
-		if test -n "$pre_num"; then
-			if test -f "${snap_path}/${pre_num}/info.xml" ; then
-				desc=`xmllint --xpath '/snapshot/description/text()' "${snap_path}/${pre_num}/info.xml" 2>/dev/null || echo ""`
-			fi
-		fi
+	  pre_num=$(echo "$snapshot_info" | awk -F '|' '{ gsub(/^[ \t]+|[ \t]+$/, "", $6); print $6 }')
+	  if test -n "$pre_num"; then
+	    pre_snapshot_info=$(snapper list --columns number,type,date,description,userdata | awk -v num="$pre_num" -F '|' '$1 ~ num { print $0 }' | sed 's/^[ \t]*//;s/[ \t]*$//')
+	    desc=$(echo "$pre_snapshot_info" | awk -F '|' '{ gsub(/^[ \t]+|[ \t]+$/, "", $4); print $4 }')
+	  fi
 	fi
-
+	
 	test "$important" = "yes" && important="*" || important=" "
 	test "$stype" = "single" && stype=""
 	test -z "$stype" || stype=",$stype"
 	test -z "$desc" || desc=",$desc"
 	test -z "$full_desc" && full_desc="Linux-$kernel_version,$date$stype$desc"
-
+	
 	title="${important}${os_release_PRETTY_NAME} ${os_release_VERSION_ID} (${full_desc})"
 
 	# shellcheck disable=SC2154
