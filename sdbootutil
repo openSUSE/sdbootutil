@@ -173,6 +173,12 @@ stty_size() {
 	dh_text=$((LINES-5))
 }
 
+# check whether it's a transactional system
+is_transactional()
+{
+	[ "$(stat -f -c %T /etc)" = "overlayfs" ]
+}
+
 subvol_is_ro()
 {
 	local subvol="${1:?}"
@@ -299,7 +305,7 @@ install_kernel()
 	important=$(echo "$snapshot_info" | awk -F '|' '{ gsub(/^[ \t]+|[ \t]+$/, "", $5); print $5 }' | grep -o 'important=[^ ,]*' | cut -d= -f2)
 	full_desc=$(echo "$snapshot_info" | awk -F '|' '{ gsub(/^[ \t]+|[ \t]+$/, "", $5); print $5 }' | grep -o 'bootloader=[^ ,]*' | cut -d= -f2)
 	desc=$(echo "$snapshot_info" | awk -F '|' '{ gsub(/^[ \t]+|[ \t]+$/, "", $4); print $4 }')
-	
+
 	if test -z "$full_desc" -a -z "$desc" -a "$stype" = "post"; then
 	  pre_num=$(echo "$snapshot_info" | awk -F '|' '{ gsub(/^[ \t]+|[ \t]+$/, "", $6); print $6 }')
 	  if test -n "$pre_num"; then
@@ -307,13 +313,13 @@ install_kernel()
 	    desc=$(echo "$pre_snapshot_info" | awk -F '|' '{ gsub(/^[ \t]+|[ \t]+$/, "", $4); print $4 }')
 	  fi
 	fi
-	
+
 	test "$important" = "yes" && important="*" || important=" "
 	test "$stype" = "single" && stype=""
 	test -z "$stype" || stype=",$stype"
 	test -z "$desc" || desc=",$desc"
 	test -z "$full_desc" && full_desc="Linux-$kernel_version,$date$stype$desc"
-	
+
 	title="${important}${os_release_PRETTY_NAME} ${os_release_VERSION_ID} (${full_desc})"
 
 	# shellcheck disable=SC2154
@@ -322,7 +328,7 @@ install_kernel()
 	entry_machine_id=
 	[ "$entry_token" = "$machine_id" ] && entry_machine_id="$machine_id"
 
-	if [ "$os_release_ID" == "opensuse-tumbleweed" ]; then
+	if !is_transactional; then
 		sort_key="snapper-$sort_key"
 		title="Snapper: $title"
 	fi
