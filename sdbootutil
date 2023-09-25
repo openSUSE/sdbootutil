@@ -254,7 +254,7 @@ install_kernel()
 	test -e "$src" || err "Can't find $src"
 
 	calc_chksum "$src"
-	dst="/$entry_token/$kernel_version/linux-$chksum"
+	local dst="/$entry_token/$kernel_version/linux-$chksum"
 
 	local s_dir="${subvol#@}"
 	s_dir="${s_dir%/*}"
@@ -271,7 +271,7 @@ install_kernel()
 		# check if we can reuse the initrd from the parent
 		# to avoid expensive regeneration
 		detect_parent "$subvol"
-		parent_conf="$boot_root/loader/entries/snapper-$entry_token-$kernel_version-$parent_snapshot.conf"
+		local parent_conf="$boot_root/loader/entries/snapper-$entry_token-$kernel_version-$parent_snapshot.conf"
 		if [ -n "$parent_subvol" ] && [ -e "$parent_conf" ]; then
 			#subvol_is_ro "$parent_subvol" || err "Parent snapshot $parent_snapshot is not read-only, can't reuse initrd"
 			local k
@@ -303,19 +303,19 @@ install_kernel()
 		dstinitrd="${dst%/*}/initrd-$chksum"
 	fi
 
-	snapshot_info=$(snapper list --columns number,type,date,description,userdata,pre-number | awk -v num="$number" -F '|' '$1 ~ num { print $0 }' | sed 's/^[ \t]*//;s/[ \t]*$//')
+	local snapshot_info=$(snapper list --columns number,type,date,description,userdata,pre-number | awk -v num="$number" -F '|' '$1 ~ num { print $0 }' | sed 's/^[ \t]*//;s/[ \t]*$//')
 
 	# Parse the snapshot information
-	stype=$(echo "$snapshot_info" | awk -F '|' '{ gsub(/^[ \t]+|[ \t]+$/, "", $2); print $2 }')
-	date=$(echo "$snapshot_info" | awk -F '|' '{ gsub(/^[ \t]+|[ \t]+$/, "", $3); print $3 }')
-	important=$(echo "$snapshot_info" | awk -F '|' '{ gsub(/^[ \t]+|[ \t]+$/, "", $5); print $5 }' | grep -o 'important=[^ ,]*' | cut -d= -f2)
-	full_desc=$(echo "$snapshot_info" | awk -F '|' '{ gsub(/^[ \t]+|[ \t]+$/, "", $5); print $5 }' | grep -o 'bootloader=[^ ,]*' | cut -d= -f2)
-	desc=$(echo "$snapshot_info" | awk -F '|' '{ gsub(/^[ \t]+|[ \t]+$/, "", $4); print $4 }')
+	local stype=$(echo "$snapshot_info" | awk -F '|' '{ gsub(/^[ \t]+|[ \t]+$/, "", $2); print $2 }')
+	local date=$(echo "$snapshot_info" | awk -F '|' '{ gsub(/^[ \t]+|[ \t]+$/, "", $3); print $3 }')
+	local important=$(echo "$snapshot_info" | awk -F '|' '{ gsub(/^[ \t]+|[ \t]+$/, "", $5); print $5 }' | grep -o 'important=[^ ,]*' | cut -d= -f2)
+	local full_desc=$(echo "$snapshot_info" | awk -F '|' '{ gsub(/^[ \t]+|[ \t]+$/, "", $5); print $5 }' | grep -o 'bootloader=[^ ,]*' | cut -d= -f2)
+	local desc=$(echo "$snapshot_info" | awk -F '|' '{ gsub(/^[ \t]+|[ \t]+$/, "", $4); print $4 }')
 
 	if test -z "$full_desc" -a -z "$desc" -a "$stype" = "post"; then
-	  pre_num=$(echo "$snapshot_info" | awk -F '|' '{ gsub(/^[ \t]+|[ \t]+$/, "", $6); print $6 }')
+	  local pre_num=$(echo "$snapshot_info" | awk -F '|' '{ gsub(/^[ \t]+|[ \t]+$/, "", $6); print $6 }')
 	  if test -n "$pre_num"; then
-	    pre_snapshot_info=$(snapper list --columns number,type,date,description,userdata | awk -v num="$pre_num" -F '|' '$1 ~ num { print $0 }' | sed 's/^[ \t]*//;s/[ \t]*$//')
+	    local pre_snapshot_info=$(snapper list --columns number,type,date,description,userdata | awk -v num="$pre_num" -F '|' '$1 ~ num { print $0 }' | sed 's/^[ \t]*//;s/[ \t]*$//')
 	    desc=$(echo "$pre_snapshot_info" | awk -F '|' '{ gsub(/^[ \t]+|[ \t]+$/, "", $4); print $4 }')
 	  fi
 	fi
@@ -326,12 +326,12 @@ install_kernel()
 	test -z "$desc" || desc=",$desc"
 	test -z "$full_desc" && full_desc="Linux-$kernel_version,$date$stype$desc"
 
-	title="${important}${os_release_PRETTY_NAME} ${os_release_VERSION_ID} (${full_desc})"
+	local title="${important}${os_release_PRETTY_NAME} ${os_release_VERSION_ID} (${full_desc})"
 
 	# shellcheck disable=SC2154
-	sort_key="$os_release_ID"
+	local sort_key="$os_release_ID"
 
-	entry_machine_id=
+	local entry_machine_id=
 	[ "$entry_token" = "$machine_id" ] && entry_machine_id="$machine_id"
 
 	if !is_transactional; then
