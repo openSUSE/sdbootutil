@@ -475,7 +475,7 @@ show_entry()
 
 update_snapper()
 {
-	 snapper --jsonout list > "$snapperfile"
+	 snapper --jsonout --no-dbus list --disable-used-space > "$snapperfile"
 }
 
 show_snapper()
