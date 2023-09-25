@@ -173,6 +173,12 @@ stty_size() {
 	dh_text=$((LINES-5))
 }
 
+# check whether it's a transactional system
+is_transactional()
+{
+	[ "$(stat -f -c %T /etc)" = "overlayfs" ]
+}
+
 subvol_is_ro()
 {
 	local subvol="${1:?}"
@@ -213,7 +219,7 @@ remove_kernel()
 	snapshot="${snapshot%/*}"
 	local id="snapper-$entry_token-$kernel_version-$snapshot.conf"
 	run_command_output bootctl unlink "$id"
-	if [ "$os_release_ID" == "opensuse-tumbleweed" ]; then
+	if !is_transactional; then
 		if [ "$subvol" == "$root_subvol" ]; then
 			id="$entry_token-$kernel_version.conf"
 			run_command_output bootctl unlink "$id"
@@ -297,29 +303,21 @@ install_kernel()
 		dstinitrd="${dst%/*}/initrd-$chksum"
 	fi
 
-	# bnc#864842 Important snapshots are not marked as such in grub2 menu
-	# the format is "important distribution version (kernel_version, timestamp, pre/post)"
-	local date=`xmllint --xpath '/snapshot/date/text()' "${s_dir}/info.xml" || echo ""`
-	date=`echo $date | sed 's/\(.*\) \(.*\):.*/\1T\2/'`
-	local important=`xmllint --xpath "/snapshot/userdata[key='important']/value/text()" "${s_dir}/info.xml" 2>/dev/null || echo ""`
-	local stype=`xmllint --xpath '/snapshot/type/text()' "${s_dir}/info.xml" || echo ""`
+	snapshot_info=$(snapper list --columns number,type,date,description,userdata,pre-number | awk -v num="$number" -F '|' '$1 ~ num { print $0 }' | sed 's/^[ \t]*//;s/[ \t]*$//')
 
-	# FATE#318101
-	# Show user defined comments in grub2 menu for snapshots
-	# Use userdata tag "bootloader=[user defined text]"
-	local full_desc=`xmllint --xpath "/snapshot/userdata[key='bootloader']/value/text()" "${s_dir}/info.xml" 2>/dev/null || echo ""`
-	test -z "$full_desc" && desc=`xmllint --xpath '/snapshot/description/text()' "${s_dir}/info.xml" 2>/dev/null || echo ""`
+	# Parse the snapshot information
+	stype=$(echo "$snapshot_info" | awk -F '|' '{ gsub(/^[ \t]+|[ \t]+$/, "", $2); print $2 }')
+	date=$(echo "$snapshot_info" | awk -F '|' '{ gsub(/^[ \t]+|[ \t]+$/, "", $3); print $3 }')
+	important=$(echo "$snapshot_info" | awk -F '|' '{ gsub(/^[ \t]+|[ \t]+$/, "", $5); print $5 }' | grep -o 'important=[^ ,]*' | cut -d= -f2)
+	full_desc=$(echo "$snapshot_info" | awk -F '|' '{ gsub(/^[ \t]+|[ \t]+$/, "", $5); print $5 }' | grep -o 'bootloader=[^ ,]*' | cut -d= -f2)
+	desc=$(echo "$snapshot_info" | awk -F '|' '{ gsub(/^[ \t]+|[ \t]+$/, "", $4); print $4 }')
 
-	# FATE#317972
-	# If we have a post entry and the description field is empty,
-	# we should use the "Pre" number and add that description to the post entry.
 	if test -z "$full_desc" -a -z "$desc" -a "$stype" = "post"; then
-		local pre_num=`xmllint --xpath '/snapshot/pre_num/text()' "${s_dir}/info.xml" 2>/dev/null || echo ""`
-		if test -n "$pre_num"; then
-			if test -f "${snap_path}/${pre_num}/info.xml" ; then
-				desc=`xmllint --xpath '/snapshot/description/text()' "${snap_path}/${pre_num}/info.xml" 2>/dev/null || echo ""`
-			fi
-		fi
+	  pre_num=$(echo "$snapshot_info" | awk -F '|' '{ gsub(/^[ \t]+|[ \t]+$/, "", $6); print $6 }')
+	  if test -n "$pre_num"; then
+	    pre_snapshot_info=$(snapper list --columns number,type,date,description,userdata | awk -v num="$pre_num" -F '|' '$1 ~ num { print $0 }' | sed 's/^[ \t]*//;s/[ \t]*$//')
+	    desc=$(echo "$pre_snapshot_info" | awk -F '|' '{ gsub(/^[ \t]+|[ \t]+$/, "", $4); print $4 }')
+	  fi
 	fi
 
 	test "$important" = "yes" && important="*" || important=" "
@@ -336,7 +334,7 @@ install_kernel()
 	entry_machine_id=
 	[ "$entry_token" = "$machine_id" ] && entry_machine_id="$machine_id"
 
-	if [ "$os_release_ID" == "opensuse-tumbleweed" ]; then
+	if !is_transactional; then
 		if [ "$subvol" == "$root_subvol" ]; then
 			cat > "$tmpdir/entry-tw.conf" <<-EOF
 			# Boot Loader Specification type#1 entry
@@ -913,7 +911,7 @@ set_default_snapshot()
 		fi
 	fi
   
-	if [ "$os_release_ID" == "opensuse-tumbleweed" ]; then
+	if !is_transactional; then
 		rm -f "$boot_root/loader/entries/$entry_token"*.conf
 		mapfile -t paths < <(jq '.[]|[.path]|join(" ")' -r < "$entryfile")
 
