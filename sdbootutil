@@ -41,6 +41,7 @@ trap cleanup EXIT
 
 entryfile="$tmpdir/entries.json"
 snapperfile="$tmpdir/snapper.json"
+title_sort_file="$tmpdir/title_sort.txt"
 tmpfile="$tmpdir/tmp"
 
 helpandquit()
@@ -249,6 +250,42 @@ update_snapper()
     snapper --jsonout list --columns "$columns" > "$snapperfile"
 }
 
+set_title_and_sortkey()
+{
+	if [ -z "$1" ]; then
+		echo "No snapshot number supplied. Exiting."
+		exit 1
+	fi
+
+	snapshot=$1
+	update_snapper "number,type,date,description,userdata,pre-number"
+
+	IFS="|" read -r stype date desc important full_desc pre_num <<< $(jq -r --arg snapshot "$snapshot" '.["root"][] | select(.number == ( $snapshot | tonumber )) | "\(.type)|\(.date)|\(.description)|\(.userdata.important)|\(.userdata.bootloader // "")|\(."pre-number" // "")"' < "$snapperfile")
+
+	if test -z "$full_desc" -a -z "$desc" -a "$stype" = "post"; then
+		if test -n "$pre_num"; then
+			IFS="|" read -r desc <<< $(jq -r --arg snapshot "$pre_num" '.["root"][] | select(.number == ( $snapshot | tonumber )) | "\(.description)"' < "$snapperfile")
+		fi
+	fi
+
+	test "$important" = "yes" && important="*" || important=" "
+	test "$stype" = "single" && stype=""
+	test -z "$stype" || stype=",$stype"
+	test -z "$desc" || desc=",$desc"
+	test -z "$full_desc" && full_desc="Linux-$kernel_version,$date$stype$desc"
+
+	# shellcheck disable=SC2154
+	echo "${important}${os_release_PRETTY_NAME} ${os_release_VERSION_ID} (${full_desc})|$os_release_ID" > $title_sort_file
+
+	is_transactional || adjust_title_and_sorting
+}
+
+adjust_title_and_sorting()
+{
+	IFS="|" read -r title sort_key < $title_sort_file
+	echo "Snapper: $title|snapper-$sort_key" > $title_sort_file
+}
+
 install_kernel()
 {
 	local subvol="$1"
@@ -307,34 +344,12 @@ install_kernel()
 		dstinitrd="${dst%/*}/initrd-$chksum"
 	fi
 
-	update_snapper "number,type,date,description,userdata,pre-number"
+	set_title_and_sortkey "$snapshot"
 
-	IFS="|" read -r stype date desc important full_desc pre_num <<< $(jq -r --arg snapshot "$snapshot" '.["root"][] | select(.number == ( $snapshot | tonumber )) | "\(.type)|\(.date)|\(.description)|\(.userdata.important)|\(.userdata.bootloader // "")|\(."pre-number" // "")"' < "$snapperfile")
-
-	if test -z "$full_desc" -a -z "$desc" -a "$stype" = "post"; then
-	  if test -n "$pre_num"; then
-			IFS="|" read -r desc <<< $(jq -r --arg snapshot "$pre_num" '.["root"][] | select(.number == ( $snapshot | tonumber )) | "\(.description)"' < "$snapperfile")
-	  fi
-	fi
-
-	test "$important" = "yes" && important="*" || important=" "
-	test "$stype" = "single" && stype=""
-	test -z "$stype" || stype=",$stype"
-	test -z "$desc" || desc=",$desc"
-	test -z "$full_desc" && full_desc="Linux-$kernel_version,$date$stype$desc"
-
-	local title="${important}${os_release_PRETTY_NAME} ${os_release_VERSION_ID} (${full_desc})"
-
-	# shellcheck disable=SC2154
-	local sort_key="$os_release_ID"
+	IFS="|" read -r title sort_key < $title_sort_file
 
 	local entry_machine_id=
 	[ "$entry_token" = "$machine_id" ] && entry_machine_id="$machine_id"
-
-	if ! is_transactional; then
-		sort_key="snapper-$sort_key"
-		title="Snapper: $title"
-	fi
 
 	cat > "$tmpdir/entry.conf" <<-EOF
 	# Boot Loader Specification type#1 entry
