@@ -239,6 +239,16 @@ install_with_rollback()
 	log_info "installed $dst"
 }
 
+update_snapper()
+{
+    local columns="$1"
+    if [ -z "$columns" ]; then
+        columns="subvolume,number,default,active,type,pre-number,date,user,cleanup,description,userdata"
+    fi
+
+    snapper --jsonout list --columns "$columns" > "$snapperfile"
+}
+
 install_kernel()
 {
 	local subvol="$1"
@@ -297,20 +307,13 @@ install_kernel()
 		dstinitrd="${dst%/*}/initrd-$chksum"
 	fi
 
-	local snapshot_info=$(snapper list --columns number,type,date,description,userdata,pre-number | awk -v num="$number" -F '|' '$1 ~ num { print $0 }' | sed 's/^[ \t]*//;s/[ \t]*$//')
+	update_snapper "number,type,date,description,userdata,pre-number"
 
-	# Parse the snapshot information
-	local stype=$(echo "$snapshot_info" | awk -F '|' '{ gsub(/^[ \t]+|[ \t]+$/, "", $2); print $2 }')
-	local date=$(echo "$snapshot_info" | awk -F '|' '{ gsub(/^[ \t]+|[ \t]+$/, "", $3); print $3 }')
-	local important=$(echo "$snapshot_info" | awk -F '|' '{ gsub(/^[ \t]+|[ \t]+$/, "", $5); print $5 }' | grep -o 'important=[^ ,]*' | cut -d= -f2)
-	local full_desc=$(echo "$snapshot_info" | awk -F '|' '{ gsub(/^[ \t]+|[ \t]+$/, "", $5); print $5 }' | grep -o 'bootloader=[^ ,]*' | cut -d= -f2)
-	local desc=$(echo "$snapshot_info" | awk -F '|' '{ gsub(/^[ \t]+|[ \t]+$/, "", $4); print $4 }')
+	IFS="|" read -r stype date desc important full_desc pre_num <<< $(jq -r --arg snapshot "$snapshot" '.["root"][] | select(.number == ( $snapshot | tonumber )) | "\(.type)|\(.date)|\(.description)|\(.userdata.important)|\(.userdata.bootloader // "")|\(."pre-number" // "")"' < "$snapperfile")
 
 	if test -z "$full_desc" -a -z "$desc" -a "$stype" = "post"; then
-	  local pre_num=$(echo "$snapshot_info" | awk -F '|' '{ gsub(/^[ \t]+|[ \t]+$/, "", $6); print $6 }')
 	  if test -n "$pre_num"; then
-	    local pre_snapshot_info=$(snapper list --columns number,type,date,description,userdata | awk -v num="$pre_num" -F '|' '$1 ~ num { print $0 }' | sed 's/^[ \t]*//;s/[ \t]*$//')
-	    desc=$(echo "$pre_snapshot_info" | awk -F '|' '{ gsub(/^[ \t]+|[ \t]+$/, "", $4); print $4 }')
+			IFS="|" read -r desc <<< $(jq -r --arg snapshot "$pre_num" '.["root"][] | select(.number == ( $snapshot | tonumber )) | "\(.description)"' < "$snapperfile")
 	  fi
 	fi
 
@@ -328,7 +331,7 @@ install_kernel()
 	local entry_machine_id=
 	[ "$entry_token" = "$machine_id" ] && entry_machine_id="$machine_id"
 
-	if !is_transactional; then
+	if ! is_transactional; then
 		sort_key="snapper-$sort_key"
 		title="Snapper: $title"
 	fi
@@ -512,14 +515,9 @@ show_entry()
 	done
 }
 
-update_snapper()
-{
-	 snapper --jsonout list > "$snapperfile"
-}
-
 show_snapper()
 {
-	if ! update_snapper 2>"$tmpfile"; then
+	if ! update_snapper "number,default,description" 2>"$tmpfile"; then
 		d --title "Error" --textbox "$tmpfile" 0 0
 		exit 1
 	fi
