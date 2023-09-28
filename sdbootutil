@@ -242,48 +242,33 @@ install_with_rollback()
 
 update_snapper()
 {
-    local columns="$1"
-    if [ -z "$columns" ]; then
-        columns="subvolume,number,default,active,type,pre-number,date,user,cleanup,description,userdata"
-    fi
-
-    snapper --jsonout --no-dbus list --disable-used-space --columns "$columns" > "$snapperfile"
+    snapper --jsonout --no-dbus list --disable-used-space > "$snapperfile"
 }
 
-set_title_and_sortkey()
+set_snapper_title_and_sortkey()
 {
-	if [ -z "$1" ]; then
-		echo "No snapshot number supplied. Exiting."
-		exit 1
+	snapshot="${1:?}"
+	local type date desc important pre_num
+	local snapshot_info
+
+	update_snapper
+
+	IFS="|" read -r type date desc important pre_num <<< \
+		$(jq -r --arg snapshot "$snapshot" \
+		'.["root"][]|select(.number==( $snapshot|tonumber))|[.type,.date,(.description|gsub("\\|";"_")),.userdata.important,."pre-number"//""]|join("|")'\
+		< "$snapperfile")
+
+	if [ -z "$desc" ] && [ "$type" = "post" ] && [ -n "$pre_num" ]; then
+		read -r desc <<< $(jq -r --arg snapshot "$pre_num" '.["root"][]|select(.number==($snapshot|tonumber))|.description' < "$snapperfile")
 	fi
 
-	snapshot=$1
-	update_snapper "number,type,date,description,userdata,pre-number"
-
-	IFS="|" read -r stype date desc important full_desc pre_num <<< $(jq -r --arg snapshot "$snapshot" '.["root"][] | select(.number == ( $snapshot | tonumber )) | "\(.type)|\(.date)|\(.description)|\(.userdata.important)|\(.userdata.bootloader // "")|\(."pre-number" // "")"' < "$snapperfile")
-
-	if test -z "$full_desc" -a -z "$desc" -a "$stype" = "post"; then
-		if test -n "$pre_num"; then
-			IFS="|" read -r desc <<< $(jq -r --arg snapshot "$pre_num" '.["root"][] | select(.number == ( $snapshot | tonumber )) | "\(.description)"' < "$snapperfile")
-		fi
-	fi
-
-	test "$important" = "yes" && important="*" || important=" "
-	test "$stype" = "single" && stype=""
-	test -z "$stype" || stype=",$stype"
-	test -z "$desc" || desc=",$desc"
-	test -z "$full_desc" && full_desc="Linux-$kernel_version,$date$stype$desc"
+	if [ "$important" = "yes" ]; then important="*"; else important=""; fi
+	[ "$type" = "single" ] && type=""
+	snapshot_info="$snapshot,$kernel_version,$date${type:+, $type}${desc:+, $desc}"
 
 	# shellcheck disable=SC2154
-	echo "${important}${os_release_PRETTY_NAME} ${os_release_VERSION_ID} (${full_desc})|$os_release_ID" > $title_sort_file
-
-	is_transactional || adjust_title_and_sorting
-}
-
-adjust_title_and_sorting()
-{
-	IFS="|" read -r title sort_key < $title_sort_file
-	echo "Snapper: $title|snapper-$sort_key" > $title_sort_file
+	title="Snapper: ${important}$title ($snapshot_info)"
+	sort_key="snapper-$sort_key"
 }
 
 install_kernel()
@@ -297,10 +282,9 @@ install_kernel()
 	calc_chksum "$src"
 	local dst="/$entry_token/$kernel_version/linux-$chksum"
 
-	local s_dir="${subvol#@}"
-	s_dir="${s_dir%/*}"
-	local snap_path="${s_dir%/*}"
-	local snapshot="${s_dir#/.snapshots/}"
+	# XXX: fix calling with snapshot instead of subvol
+	local snapshot="${subvol#@/.snapshots/}"
+	snapshot="${snapshot%/snapshot}"
 
 	local initrd="${src%/*}/initrd"
 
@@ -344,9 +328,15 @@ install_kernel()
 		dstinitrd="${dst%/*}/initrd-$chksum"
 	fi
 
-	set_title_and_sortkey "$snapshot"
+	title="${os_release_PRETTY_NAME:-Linux $kernel_version}"
+	# TW pretty name does not include the version
+	[ -n "$os_release_VERSION" ] || title="$title $os_release_VERSION_ID"
+	# shellcheck disable=SC2154
+	sort_key="$os_release_ID"
 
-	IFS="|" read -r title sort_key < $title_sort_file
+	if ! is_transactional  && subvol_is_ro "$subvol"; then
+		set_snapper_title_and_sortkey "$snapshot"
+	fi
 
 	local entry_machine_id=
 	[ "$entry_token" = "$machine_id" ] && entry_machine_id="$machine_id"
@@ -354,7 +344,7 @@ install_kernel()
 	cat > "$tmpdir/entry.conf" <<-EOF
 	# Boot Loader Specification type#1 entry
 	title      $title
-	version    $snapshot${entry_machine_id:+${nl}machine-id $entry_machine_id}${sort_key:+${nl}sort-key   $sort_key}
+	version    $snapshot@$kernel_version${entry_machine_id:+${nl}machine-id $entry_machine_id}${sort_key:+${nl}sort-key   $sort_key}
 	options    $boot_options
 	linux      $dst
 	initrd     $dstinitrd
@@ -532,7 +522,7 @@ show_entry()
 
 show_snapper()
 {
-	if ! update_snapper "number,default,description" 2>"$tmpfile"; then
+	if ! update_snapper 2>"$tmpfile"; then
 		d --title "Error" --textbox "$tmpfile" 0 0
 		exit 1
 	fi
