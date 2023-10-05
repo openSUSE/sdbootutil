@@ -17,6 +17,7 @@ arg_esp_path="$SYSTEMD_ESP_PATH"
 arg_entry_token=
 arg_arch=
 arg_no_variables=
+arg_no_reuse_initrd=
 # for x in vmlinuz image vmlinux linux bzImage uImage Image zImage; do
 image=vmlinuz
 
@@ -271,6 +272,45 @@ set_snapper_title_and_sortkey()
 	sort_key="snapper-$sort_key"
 }
 
+reuse_initrd() {
+	local snapshot="${1:?}"
+	local subvol="${2:?}"
+
+	[ -z "$arg_no_reuse_initrd" ] || return 1
+
+	local conf="$boot_root/loader/entries/$entry_token-$kernel_version-$snapshot.conf"
+	if [ -e "$conf" ]; then
+		local k
+		local v
+		while read -r k v; do
+			[ "$k" = 'initrd' ] || continue
+			log_info "found existing initrd $v"
+			dstinitrd="$v"
+			break
+		done < "$conf"
+		[ -z "$dstinitrd" ] || return 0
+	fi
+
+	# check if we can reuse the initrd from the parent
+	# to avoid expensive regeneration
+	detect_parent "$subvol"
+	local parent_conf="$boot_root/loader/entries/$entry_token-$kernel_version-$parent_snapshot.conf"
+	if [ -n "$parent_subvol" ] && [ -e "$parent_conf" ]; then
+		#subvol_is_ro "$parent_subvol" || err "Parent snapshot $parent_snapshot is not read-only, can't reuse initrd"
+		local k
+		local v
+		while read -r k v; do
+			[ "$k" = 'initrd' ] || continue
+			log_info "found parent initrd $v"
+			dstinitrd="$v"
+			break
+		done < "$parent_conf"
+		[ -z "$dstinitrd" ] || return 0
+	fi
+
+	return 1
+}
+
 install_kernel()
 {
 	local subvol="$1"
@@ -292,28 +332,12 @@ install_kernel()
 
 	if [ -e "$initrd" ]; then
 		ln -s "$initrd" "$tmpdir/initrd"
-	else
-		# check if we can reuse the initrd from the parent
-		# to avoid expensive regeneration
-		detect_parent "$subvol"
-		local parent_conf="$boot_root/loader/entries/$entry_token-$kernel_version-$parent_snapshot.conf"
-		if [ -n "$parent_subvol" ] && [ -e "$parent_conf" ]; then
-			#subvol_is_ro "$parent_subvol" || err "Parent snapshot $parent_snapshot is not read-only, can't reuse initrd"
-			local k
-			local v
-			while read -r k v; do
-				[ "$k" = 'initrd' ] || continue
-				log_info "found previous initrd $v"
-				dstinitrd="$v"
-				break
-			done < "$parent_conf"
-			[ -n "$dstinitrd" ] || err "no initrd for kernel $kernel_version in parent snapshot $parent_snapshot found"
-		elif [ "$subvol" != "$root_subvol" ]; then
+	elif ! reuse_initrd "$snapshot" "$subvol"; then
+		if [ "$subvol" != "$root_subvol" ]; then
 			err "Can't call dracut for snapshots that have no initrd yet"
-		else
-			log_info "generating new initrd"
-			run_command_live_output dracut --quiet --reproducible "$tmpdir/initrd" "$kernel_version"
 		fi
+		log_info "generating new initrd"
+		run_command_live_output dracut --quiet --reproducible "$tmpdir/initrd" "$kernel_version"
 	fi
 
 	local boot_options=
@@ -912,7 +936,7 @@ main_menu()
 
 ####### main #######
 
-getopttmp=$(getopt -o hc:v --long help,flicker,verbose,esp-path:,entry-token:,arch:,image:,no-variables -n "${0##*/}" -- "$@")
+getopttmp=$(getopt -o hc:v --long help,flicker,verbose,esp-path:,entry-token:,arch:,image:,no-variables,no-reuse-initrd -n "${0##*/}" -- "$@")
 eval set -- "$getopttmp"
 
 while true ; do
@@ -925,6 +949,7 @@ while true ; do
 		--entry-token) arg_entry_token="$2"; shift 2 ;;
 		--image) image="$2"; shift 2 ;;
 		--no-variables) arg_no_variables=1; shift ;;
+		--no-reuse-initrd) arg_no_reuse_initrd=1; shift ;;
                 --) shift ; break ;;
                 *) echo "Internal error!" ; exit 1 ;;
         esac
