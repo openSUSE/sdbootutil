@@ -33,6 +33,7 @@ Summary:        script to install shim with sd-boot
 License:        MIT
 URL:            https://en.opensuse.org/openSUSE:Usr_merge
 Source:         %{name}-%{version}.tar
+Requires:       efibootmgr
 Requires:       systemd-boot
 Requires:       jq
 Requires:       sed
