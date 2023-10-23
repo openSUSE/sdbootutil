@@ -33,10 +33,12 @@ Summary:        script to install shim with sd-boot
 License:        MIT
 URL:            https://en.opensuse.org/openSUSE:Usr_merge
 Source:         %{name}-%{version}.tar
+Requires:       efibootmgr
 Requires:       systemd-boot
 Requires:       jq
 Requires:       sed
 Supplements:    (systemd-boot and shim)
+Requires:       (%{name}-snapper if (snapper and btrfsprogs))
 
 %description
 Hook scripts to install shim along with systemd-boot
@@ -47,7 +49,6 @@ Requires:       %{name} = %{version}
 Requires:       btrfsprogs
 Requires:       sdbootutil >= %{version}-%{release}
 Requires:       snapper
-Supplements:    (snapper and btrfsprogs and sdbootutil)
 
 %description snapper
 Plugin scripts for snapper to handle BLS config files
