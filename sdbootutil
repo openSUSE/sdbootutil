@@ -333,11 +333,12 @@ install_kernel()
 	if [ -e "$initrd" ]; then
 		ln -s "$initrd" "$tmpdir/initrd"
 	elif ! reuse_initrd "$snapshot" "$subvol"; then
+		local dracut_args=()
 		if [ "$subvol" != "$root_subvol" ]; then
-			err "Can't call dracut for snapshots that have no initrd yet"
+			dracut_args=('--sysroot' '/.snapshots/$snapshot/snapshot' '--tmpdir' '/var/tmp')
 		fi
 		log_info "generating new initrd"
-		run_command_live_output dracut --quiet --reproducible "$tmpdir/initrd" "$kernel_version"
+		run_command_live_output dracut --quiet --reproducible "${dracut_args[@]}" "$tmpdir/initrd" "$kernel_version"
 	fi
 
 	local boot_options=
