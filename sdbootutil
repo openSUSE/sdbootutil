@@ -818,7 +818,7 @@ install_sdboot()
 	echo "${entry##*/},openSUSE Boot Manager" | iconv -f ascii -t ucs2 > "$boot_root/$sdboot_dst/boot.csv"
 
 	mkdir -p "$boot_root/$entry_token"
-	:> "$boot_root/$entry_token/installed_by_sdbootutil"
+	echo "$entry_token" > "$boot_root/$sdboot_dst/installed_by_sdbootutil"
 	mkdir -p "/etc/kernel"
 	[ -s /etc/kernel/entry-token ] || echo "$entry_token" > /etc/kernel/entry-token
 	update_random_seed
@@ -1008,7 +1008,7 @@ elif [ "$1" = "remove-all-kernels" ]; then
 elif [ "$1" = "set-default-snapshot" ]; then
 	set_default_snapshot "${2:-$root_snapshot}"
 elif [ "$1" = "is-installed" ]; then
-	if sdboot_version > /dev/null && [ -e "$boot_root/$entry_token/installed_by_sdbootutil" ]; then
+	if sdboot_version > /dev/null && [ -e "$boot_root/$sdboot_dst/installed_by_sdbootutil" ]; then
 		log_info "systemd-boot was installed using sdbootutil"
 		exit 0
 	else
