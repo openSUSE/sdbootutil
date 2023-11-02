@@ -73,10 +73,12 @@ case $op in
     post)
 	if [ ! -e /.buildenv ] ; then
 	    /usr/sbin/depmod -a "$kernelrelease-$flavor"
-	    /usr/bin/sdbootutil --image="$image" add-kernel "$kernelrelease-$flavor"
-	    # make sure to select the latest kernel
-	    [ -z "$TRANSACTIONAL_UPDATE" ] && /usr/bin/sdbootutil set-default-snapshot
-	    [ -e /usr/lib/systemd/system/purge-kernels.service ] && { :>/boot/do_purge_kernels || :; }
+	    if [ -z "$TRANSACTIONAL_UPDATE" ]; then
+		/usr/bin/sdbootutil --image="$image" add-kernel "$kernelrelease-$flavor"
+		# make sure to select the latest kernel
+		/usr/bin/sdbootutil set-default-snapshot
+		[ -e /usr/lib/systemd/system/purge-kernels.service ] && { :>/boot/do_purge_kernels || :; }
+	    fi
 	fi
 	[ -z "$certs" ] || /usr/lib/module-init-tools/kernel-scriptlets/cert-"$op" --ca-check 1 --certs "$certs" "$@" || script_rc=$?
 	;;
@@ -87,7 +89,7 @@ case $op in
 	# can't check $1 as kernel is usually multiversion. So need to check if
 	# that particular kernel was actually removed from disk.
 	if [ ! -e /.buildenv ] && [ ! -e /lib/modules/"$kernelrelease-$flavor/$image" ] ; then
-	    /usr/bin/sdbootutil --image="$image" remove-kernel "$kernelrelease-$flavor"
+	    [ -z "$TRANSACTIONAL_UPDATE" ] && /usr/bin/sdbootutil --image="$image" remove-kernel "$kernelrelease-$flavor"
 	    [ -z "$certs" ] || /usr/lib/module-init-tools/kernel-scriptlets/cert-"$op" --ca-check 1 --certs "$certs" "$@"
 	fi
 	;;
