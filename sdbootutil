@@ -755,23 +755,31 @@ sdboot_version()
 	echo "$v"
 }
 
+is_installed()
+{
+	sdboot_version > /dev/null && [ -e "$boot_root/$sdboot_dst/installed_by_sdbootutil" ]
+}
+
 find_sdboot()
 {
+	local prefix="/.snapshots/${1-$root_snapshot}/snapshot"
 	# XXX: this is a hack in case we need to inject a signed
 	# systemd-boot from a separate package
-	local sdboot="/usr/lib/systemd-boot/systemd-boot$firmware_arch.efi"
-	[ -e "$sdboot" ] || sdboot="/usr/lib/systemd/boot/efi/systemd-boot$firmware_arch.efi"
+	local sdboot="$prefix/usr/lib/systemd-boot/systemd-boot$firmware_arch.efi"
+	[ -e "$sdboot" ] || sdboot="$prefix/usr/lib/systemd/boot/efi/systemd-boot$firmware_arch.efi"
 	[ -e "$sdboot" ] || err "missing $sdboot"
 	echo "$sdboot"
 }
 
 sdboot_needs_update()
 {
+	local snapshot="${1-$root_snapshot}"
+	local prefix="/.snapshots/${snapshot}/snapshot"
 	local v nv
 	v="$(sdboot_version)"
 	[ -n "$v" ] || return 1
 	log_info "deployed version $v"
-	nv="$(sdboot_version "$(find_sdboot)")"
+	nv="$(sdboot_version "$(find_sdboot "$snapshot")")"
 	[ -n "$v" ] || return 1
 	log_info "system version $nv"
 	systemd-analyze compare-versions "$v" lt "$nv" 2>/dev/null || return 1
@@ -781,9 +789,11 @@ sdboot_needs_update()
 
 install_sdboot()
 {
+	local snapshot="${1:-$root_snapshot}"
+	local prefix="/.snapshots/${root_snapshot}/snapshot"
 	local sdboot blkpart drive partno
 
-	sdboot=$(find_sdboot)
+	sdboot=$(find_sdboot "$1")
 
 	mkdir -p "$boot_root/loader/entries"
 
@@ -795,19 +805,19 @@ install_sdboot()
 	drive="/dev/${drive##*/}"
 	read -r partno < "/sys/class/block/${blkpart##*/}"/partition
 
-	if [ -e "$shimdir/shim.efi" ]; then
+	if [ -e "$prefix$shimdir/shim.efi" ]; then
 		log_info "Installing systemd-boot with shim into $boot_root"
 		entry="$sdboot_dst/shim.efi"
 		for i in MokManager shim; do
-			install -D "$shimdir/$i.efi" "$boot_root$sdboot_dst/$i.efi"
+			install -D "$prefix$shimdir/$i.efi" "$boot_root$sdboot_dst/$i.efi"
 		done
 		install -D "$sdboot" "$boot_root$sdboot_dst/grub.efi"
 
 		# boot entry point
 		for i in MokManager fallback; do
-			install -D "$shimdir/$i.efi" "$boot_root/EFI/BOOT/$i.efi"
+			install -D "$prefix$shimdir/$i.efi" "$boot_root/EFI/BOOT/$i.efi"
 		done
-		install -D "$shimdir/shim.efi" "$boot_root/EFI/BOOT/BOOT${firmware_arch^^}.EFI"
+		install -D "$prefix$shimdir/shim.efi" "$boot_root/EFI/BOOT/BOOT${firmware_arch^^}.EFI"
 	else
 		log_info "Installing systemd-boot into $boot_root"
 		entry="$sdboot_dst/${sdboot##*/}"
@@ -957,7 +967,7 @@ while true ; do
 done
 
 case "$1" in
-	install|needs-update|update|add-kernel|remove-kernel|set-default-snapshot|add-all-kernels|remove-all-kernels|is-installed|list-kernels|is-bootable) ;;
+	install|needs-update|update|force-update|add-kernel|remove-kernel|set-default-snapshot|add-all-kernels|remove-all-kernels|is-installed|list-kernels|is-bootable) ;;
 	kernels|snapshots|entries|"") stty_size; interactive=1 ;;
 	*) err "unknown command $1" ;;
 esac
@@ -992,11 +1002,13 @@ root_snapshot="${root_subvol#@/.snapshots/}"
 root_snapshot="${root_snapshot%/snapshot}"
 
 if [ "$1" = "install" ]; then
-	install_sdboot
+	install_sdboot "${2:-$root_snapshot}"
 elif [ "$1" = "needs-update" ]; then
-	sdboot_needs_update
+	sdboot_needs_update "${2:-$root_snapshot}"
 elif [ "$1" = "update" ]; then
-	sdboot_needs_update && install_sdboot
+	sdboot_needs_update "${2:-$root_snapshot}" && install_sdboot "${2:-$root_snapshot}"
+elif [ "$1" = "force-update" ]; then
+	is_installed && install_sdboot "${2:-$root_snapshot}"
 elif [ "$1" = "add-kernel" ]; then
 	install_kernel "${3:-$root_subvol}" "$2"
 elif [ "$1" = "add-all-kernels" ]; then
@@ -1008,7 +1020,7 @@ elif [ "$1" = "remove-all-kernels" ]; then
 elif [ "$1" = "set-default-snapshot" ]; then
 	set_default_snapshot "${2:-$root_snapshot}"
 elif [ "$1" = "is-installed" ]; then
-	if sdboot_version > /dev/null && [ -e "$boot_root/$sdboot_dst/installed_by_sdbootutil" ]; then
+	if is_installed; then
 		log_info "systemd-boot was installed using sdbootutil"
 		exit 0
 	else
