@@ -335,7 +335,7 @@ install_kernel()
 	elif ! reuse_initrd "$snapshot" "$subvol"; then
 		local dracut_args=()
 		if [ "$subvol" != "$root_subvol" ]; then
-			dracut_args=('--sysroot' '/.snapshots/$snapshot/snapshot' '--tmpdir' '/var/tmp')
+			dracut_args=('--sysroot' "/.snapshots/$snapshot/snapshot" '--tmpdir' '/var/tmp')
 		fi
 		log_info "generating new initrd"
 		run_command_live_output dracut --quiet --reproducible "${dracut_args[@]}" "$tmpdir/initrd" "$kernel_version"
