@@ -34,9 +34,9 @@ License:        MIT
 URL:            https://en.opensuse.org/openSUSE:Usr_merge
 Source:         %{name}-%{version}.tar
 Requires:       efibootmgr
-Requires:       systemd-boot
 Requires:       jq
 Requires:       sed
+Requires:       systemd-boot
 Supplements:    (systemd-boot and shim)
 Requires:       (%{name}-snapper if (snapper and btrfsprogs))
 
@@ -66,6 +66,15 @@ Obsoletes:      %{name}-filetriggers < %{version}
 %description rpm-scriptlets
 Scriptlets that call sdbootutil to create boot entries when
 kernels are installed or removed
+
+%package systemd-boot-update
+Summary:        Update the EFI binaries when there is a new version
+Requires:       sdbootutil >= %{version}-%{release}
+BuildRequires:  systemd-rpm-macros
+
+%description systemd-boot-update
+Update systemd-bootx64.efi, BOOTX64.EFI and grub.efi if there is a
+new systemd-boot version
 
 %prep
 %setup -q
@@ -97,6 +106,26 @@ for i in 10-sdbootutil.snapper; do
   install -m 755 $i %{buildroot}%{_prefix}/lib/snapper/plugins/$i
 done
 
+# systemd-boot-update
+install -D -m 644 systemd-boot-update-grub.service %{buildroot}%{_unitdir}/systemd-boot-update-grub.service
+install -d -m755 %{buildroot}%{_unitdir}/multi-user.target.wants
+ln -sr %{buildroot}%{_unitdir}/systemd-boot-update-grub.service %{buildroot}%{_unitdir}/multi-user.target.wants
+# Create an empty file before doing the link
+touch %{buildroot}%{_unitdir}/systemd-boot-update.service
+ln -sr %{buildroot}%{_unitdir}/systemd-boot-update.service %{buildroot}%{_unitdir}/multi-user.target.wants
+
+%pre systemd-boot-update
+%service_add_pre systemd-boot-update-grub.service
+
+%post systemd-boot-update
+%service_add_post systemd-boot-update-grub.service
+
+%preun systemd-boot-update
+%service_del_preun systemd-boot-update-grub.service
+
+%postun systemd-boot-update
+%service_del_postun systemd-boot-update-grub.service
+
 %files
 %license LICENSE
 %{_bindir}/sdbootutil
@@ -109,5 +138,12 @@ done
 %dir %{_prefix}/lib/snapper
 %dir %{_prefix}/lib/snapper/plugins
 %{_prefix}/lib/snapper/plugins/*
+
+%files systemd-boot-update
+%dir %{_unitdir}/multi-user.target.wants
+%{_unitdir}/multi-user.target.wants/systemd-boot-update.service
+%{_unitdir}/multi-user.target.wants/systemd-boot-update-grub.service
+%ghost %{_unitdir}/systemd-boot-update.service
+%{_unitdir}/systemd-boot-update-grub.service
 
 %changelog

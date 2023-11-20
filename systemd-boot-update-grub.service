@@ -1,0 +1,17 @@
+[Unit]
+Description=Automatic Boot Loader Update (grub.efi)
+ConditionPathExists=!/etc/initrd-release
+
+DefaultDependencies=no
+After=local-fs.target systemd-update-boot.service
+Before=sysinit.target systemd-update-done.service
+Conflicts=shutdown.target
+Before=shutdown.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=-cp -a -u /boot/efi/EFI/systemd/systemd-boot%%ARCH%%.efi /boot/efi/EFI/systemd/grub.efi
+
+[Install]
+WantedBy=sysinit.target
