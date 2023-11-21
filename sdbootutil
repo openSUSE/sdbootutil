@@ -50,8 +50,14 @@ helpandquit()
 	cat <<-EOF
 		Usage: $0 [OPTIONS] [COMMAND]
 		OPTIONS:
-		  --verbose  verbose
-		  -h         help screen
+		  --esp-path		Manually specify path to ESP
+		  --arch		Manually set architecture
+		  --entry-token		Override entry token
+		  --image		Specify Linux kernel file name
+		  --no-variables	Do not update UEFI variables
+		  --no-reuse-initrd	Always regenerate initrd
+		  -v, --verbose		More verbose output
+		  -h, --help		This screen
 
 		COMMAND:
 		add-kernel VERSION [SUBVOL]
@@ -78,6 +84,12 @@ helpandquit()
 			   is potentially bootable
 
 		install    Install systemd-boot and shim into ESP
+		needs-update
+			   Check whether the bootloader in ESP needs updating
+		update
+			    Update the bootloader if it's old
+		force-update
+			    Update the bootloader in any case
 
 		UI commands:
 		kernels    Open kernel menu
