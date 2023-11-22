@@ -97,6 +97,9 @@ for i in 10-sdbootutil.snapper; do
   install -m 755 $i %{buildroot}%{_prefix}/lib/snapper/plugins/$i
 done
 
+%transfiletriggerin -- /usr/lib/systemd/boot/efi
+sdbootutil update
+
 %files
 %license LICENSE
 %{_bindir}/sdbootutil
