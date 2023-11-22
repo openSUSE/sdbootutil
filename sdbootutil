@@ -21,6 +21,15 @@ arg_no_reuse_initrd=
 # for x in vmlinuz image vmlinux linux bzImage uImage Image zImage; do
 image=vmlinuz
 
+update_predictions=
+# TODO: The kernel is measured in PCR4 and initrd in PCR9.  When the
+# json gets stored in ESP. For how initr is named (with a hash) PCR12
+# (cmdline) cannot be used now until PCR9 (cmdline, initrd) can be
+# used via a dract module that extend initrd in memory.
+# TODO: Move it into a configuration file. Also replicated in
+# jeos-firstboot-enroll
+pcrs="0,2,4,7"
+
 rollback=()
 
 tmpdir=$(mktemp -d -t sdboot.XXXXXX)
@@ -233,6 +242,9 @@ remove_kernel()
 	snapshot="${snapshot%/*}"
 	local id="$entry_token-$kernel_version-$snapshot.conf"
 	run_command_output bootctl unlink "$id"
+
+	# This action will require to update the PCR predictions
+	update_predictions=1
 }
 
 install_with_rollback()
@@ -404,6 +416,9 @@ install_kernel()
 	rm -f "$tmpdir/entry.conf"
 	[ -z "$failed" ] || err "Failed to install $failed"
 	reset_rollback
+
+	# This action will require to update the PCR predictions
+	update_predictions=1
 }
 
 install_all_kernels()
@@ -851,6 +866,9 @@ install_sdboot()
 
 	# Create boot menu entry if it does not exist
 	[ -n "$arg_no_variables" ] || efibootmgr | grep -q 'Boot.*openSUSE Boot Manager' || efibootmgr -q --create --disk "$drive" --part "$partno" --label "openSUSE Boot Manager" --loader "$entry" || true
+
+	# This action will require to update the PCR predictions
+	update_predictions=1
 }
 
 settle_entry_token()
@@ -939,6 +957,26 @@ set_default_snapshot()
 	fi
 	log_info "setting default entry ${configs[0]}"
 	bootctl set-default "${configs[0]}"
+}
+
+# TODO: Maybe share this code outside
+generate_tpm2_predictions()
+{
+	[ -e /etc/crypttab ] || return 0
+	grep -q "tpm2-device" /etc/crypttab || return 0
+	[ -e /etc/systemd/tpm2-pcr-signature.json ] ||  return 0
+	[ -e /etc/systemd/tpm2-pcr-public-key.pem ] ||  return 0
+	[ -e /etc/systemd/tpm2-pcr-private-key.pem ] ||  return 0
+
+	# TODO: until pcr-oracle measure all different entries, we can
+	# only do one prediction
+	if ! pcr-oracle --private-key /etc/systemd/tpm2-pcr-private-key.pem \
+		   --from eventlog \
+		   --output /etc/systemd/tpm2-pcr-signature.json \
+		   --policy-format systemd \
+		   sign "$pcrs"; then
+	    err "Failed to install TPM predictions"
+	fi
 }
 
 main_menu()
@@ -1052,3 +1090,5 @@ elif [ "$1" = "entries" ]; then
 else
 	main_menu
 fi
+
+[ "$update_predictions" = 1 ] && generate_tpm2_predictions

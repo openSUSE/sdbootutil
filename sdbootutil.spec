@@ -37,6 +37,7 @@ Requires:       efibootmgr
 Requires:       systemd-boot
 Requires:       jq
 Requires:       sed
+Requires:       pcr-oracle
 Supplements:    (systemd-boot and shim)
 Requires:       (%{name}-snapper if (snapper and btrfsprogs))
 
