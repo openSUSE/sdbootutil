@@ -97,7 +97,10 @@ for i in 10-sdbootutil.snapper; do
   install -m 755 $i %{buildroot}%{_prefix}/lib/snapper/plugins/$i
 done
 
-%transfiletriggerin -- /usr/lib/systemd/boot/efi
+%transfiletriggerin -- /usr/lib/systemd/boot/efi /usr/share/efi/%_build_arch
+cat > /dev/null || :
+[ -z "$TRANSACTIONAL_UPDATE" ] || exit 0
+[ -z "$VERBOSE_FILETRIGGERS" ] || echo "%{name}-%{version}-%{release}: updating bootloader"
 sdbootutil update
 
 %files
