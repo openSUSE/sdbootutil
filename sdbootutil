@@ -1018,9 +1018,9 @@ if [ "$1" = "install" ]; then
 elif [ "$1" = "needs-update" ]; then
 	sdboot_needs_update "${2:-$root_snapshot}"
 elif [ "$1" = "update" ]; then
-	sdboot_needs_update "${2:-$root_snapshot}" && install_sdboot "${2:-$root_snapshot}"
+	if sdboot_needs_update "${2:-$root_snapshot}"; then install_sdboot "${2:-$root_snapshot}"; else :; fi
 elif [ "$1" = "force-update" ]; then
-	is_installed && install_sdboot "${2:-$root_snapshot}"
+	if is_installed; then install_sdboot "${2:-$root_snapshot}"; else :; fi
 elif [ "$1" = "add-kernel" ]; then
 	install_kernel "${3:-$root_subvol}" "$2"
 elif [ "$1" = "add-all-kernels" ]; then
