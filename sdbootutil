@@ -362,6 +362,9 @@ install_kernel()
 			dracut_args=('--sysroot' "/.snapshots/$snapshot/snapshot" '--tmpdir' '/var/tmp')
 		fi
 		log_info "generating new initrd"
+
+		# XXX: predictions need to be included in initrd at this point o_O
+		generate_tpm2_predictions
 		run_command_live_output dracut --quiet --reproducible "${dracut_args[@]}" "$tmpdir/initrd" "$kernel_version"
 	fi
 
