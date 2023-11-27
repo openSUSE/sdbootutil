@@ -961,19 +961,21 @@ set_default_snapshot()
 # TODO: Maybe share this code outside
 generate_tpm2_predictions()
 {
-	[ -e /etc/crypttab ] ||  return
-	grep -q "tpm2-device" /etc/crypttab || return
-	[ -e /etc/systemd/tpm2-pcr-signature.json ] ||  return
-	[ -e /etc/systemd/tpm2-pcr-public-key.pem ] ||  return
-	[ -e /etc/systemd/tpm2-pcr-private-key.pem ] ||  return
+	[ -e /etc/crypttab ] || return 0
+	grep -q "tpm2-device" /etc/crypttab || return 0
+	[ -e /etc/systemd/tpm2-pcr-signature.json ] ||  return 0
+	[ -e /etc/systemd/tpm2-pcr-public-key.pem ] ||  return 0
+	[ -e /etc/systemd/tpm2-pcr-private-key.pem ] ||  return 0
 
 	# TODO: until pcr-oracle measure all different entries, we can
-	# do only one prediction
-	pcr-oracle --private-key /etc/systemd/tpm2-pcr-private-key.pem \
+	# only do one prediction
+	if ! pcr-oracle --private-key /etc/systemd/tpm2-pcr-private-key.pem \
 		   --from eventlog \
 		   --output /etc/systemd/tpm2-pcr-signature.json \
 		   --policy-format systemd \
-		   sign "$pcrs"
+		   sign "$pcrs"; then
+	    err "Failed to install TPM predictions"
+	fi
 }
 
 main_menu()
