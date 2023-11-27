@@ -964,7 +964,6 @@ generate_tpm2_predictions()
 {
 	[ -e /etc/crypttab ] || return 0
 	grep -q "tpm2-device" /etc/crypttab || return 0
-	[ -e /etc/systemd/tpm2-pcr-signature.json ] ||  return 0
 	[ -e /etc/systemd/tpm2-pcr-public-key.pem ] ||  return 0
 	[ -e /etc/systemd/tpm2-pcr-private-key.pem ] ||  return 0
 
