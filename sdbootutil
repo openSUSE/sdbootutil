@@ -979,6 +979,7 @@ generate_tpm2_predictions()
 		   sign "$pcrs"; then
 	    err "Failed to install TPM predictions"
 	fi
+	tpm2_pcrread sha256:$pcrs > /etc/systemd/tpm2-pcr-signature.state || :
 }
 
 main_menu()
