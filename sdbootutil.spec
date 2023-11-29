@@ -37,6 +37,7 @@ Requires:       efibootmgr
 Requires:       systemd-boot
 Requires:       jq
 Requires:       sed
+Requires:       pcr-oracle
 Supplements:    (systemd-boot and shim)
 Requires:       (%{name}-snapper if (snapper and btrfsprogs))
 
@@ -99,6 +100,8 @@ done
 
 %transfiletriggerin -- /usr/lib/systemd/boot/efi /usr/share/efi/%_build_arch
 cat > /dev/null || :
+[ "$YAST_IS_RUNNING" != 'instsys' ] || exit 0
+[ -e /sys/firmware/efi/efivars ] || exit 0
 [ -z "$TRANSACTIONAL_UPDATE" ] || exit 0
 [ -z "$VERBOSE_FILETRIGGERS" ] || echo "%{name}-%{version}-%{release}: updating bootloader"
 sdbootutil update
