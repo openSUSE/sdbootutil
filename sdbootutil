@@ -22,13 +22,6 @@ arg_no_reuse_initrd=
 image=vmlinuz
 
 update_predictions=
-# TODO: The kernel is measured in PCR4 and initrd in PCR9.  When the
-# json gets stored in ESP. For how initr is named (with a hash) PCR12
-# (cmdline) cannot be used now until PCR9 (cmdline, initrd) can be
-# used via a dract module that extend initrd in memory.
-# TODO: Move it into a configuration file. Also replicated in
-# jeos-firstboot-enroll
-pcrs="0,2,4,7"
 
 rollback=()
 
@@ -363,8 +356,6 @@ install_kernel()
 		fi
 		log_info "generating new initrd"
 
-		# XXX: predictions need to be included in initrd at this point o_O
-		generate_tpm2_predictions
 		run_command_live_output dracut --quiet --reproducible "${dracut_args[@]}" "$tmpdir/initrd" "$kernel_version"
 	fi
 
@@ -963,23 +954,53 @@ set_default_snapshot()
 }
 
 # TODO: Maybe share this code outside
+get_pcrs() {
+	local pcrs
+	local jq_pcr='.tokens[]|select(.type == "systemd-tpm2")|."tpm2_pubkey_pcrs"|join(",")'
+	# We can have multiple devices, each one of them with
+	# different PCRs
+	while read -r dev; do
+		pcrs=$(cryptsetup luksDump --dump-json-metadata "$dev" | jq -r "$jq_pcr")
+		[ -n "$pcrs" ] && echo "$pcrs"
+	done <<<$(blkid -t TYPE=crypto_LUKS -o device)
+}
+
+# TODO: Maybe share this code outside
 generate_tpm2_predictions()
 {
+	local all_pcrs
+
 	[ -e /etc/crypttab ] || return 0
 	grep -q "tpm2-device" /etc/crypttab || return 0
 	[ -e /etc/systemd/tpm2-pcr-public-key.pem ] ||  return 0
 	[ -e /etc/systemd/tpm2-pcr-private-key.pem ] ||  return 0
 
-	# TODO: until pcr-oracle measure all different entries, we can
-	# only do one prediction
-	if ! pcr-oracle --private-key /etc/systemd/tpm2-pcr-private-key.pem \
-		   --from eventlog \
-		   --output /etc/systemd/tpm2-pcr-signature.json \
-		   --policy-format systemd \
-		   sign "$pcrs"; then
-	    err "Failed to install TPM predictions"
-	fi
-	tpm2_pcrread sha256:$pcrs > /etc/systemd/tpm2-pcr-signature.state || :
+	all_pcrs=$(get_pcrs)
+	[ -z "$all_pcrs" ] || rm -f /etc/systemd/tpm2-pcr-signature.json
+
+	# We make as many predictions as |all_pcrs| * |entries| to
+	# cover all the combinations.  pcr-oracle is smart to include
+	# the entry only one time, so we will not have duplications.
+	# This is a step for multi device configurations.
+	for pcrs in $all_pcrs; do
+		for entry in "${boot_root}"/loader/entries/*.conf; do
+			entry_id="$(basename "$entry")"
+			if ! pcr-oracle \
+			     --private-key /etc/systemd/tpm2-pcr-private-key.pem \
+			     --from eventlog \
+			     --output /etc/systemd/tpm2-pcr-signature.json \
+			     --target-platform=systemd \
+			     --boot-entry "$entry_id" \
+			     sign "$pcrs"; then
+				err "Failed to install TPM predictions for $entry_id"
+			fi
+		done
+	done
+
+	# Publish the assets in the ESP, so can be imported by
+	# dracut-pcr-signature
+	cp /etc/systemd/tpm2-pcr-public-key.pem /boot/efi/EFI/systemd
+	[ -e /etc/systemd/tpm2-pcr-signature.json ] && cp /etc/systemd/tpm2-pcr-signature.json /boot/efi/EFI/systemd
 }
 
 main_menu()
