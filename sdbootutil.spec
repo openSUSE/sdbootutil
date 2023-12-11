@@ -40,6 +40,7 @@ Requires:       sed
 Requires:       pcr-oracle
 Supplements:    (systemd-boot and shim)
 Requires:       (%{name}-snapper if (snapper and btrfsprogs))
+ExclusiveArch:  aarch64 ppc64le riscv64 x86_64
 
 %description
 Hook scripts to install shim along with systemd-boot
