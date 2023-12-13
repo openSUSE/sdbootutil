@@ -92,6 +92,8 @@ helpandquit()
 			    Update the bootloader if it's old
 		force-update
 			    Update the bootloader in any case
+		update-predictions
+			    Update TPM2 predictions
 
 		UI commands:
 		kernels    Open kernel menu
@@ -1041,7 +1043,7 @@ while true ; do
 done
 
 case "$1" in
-	install|needs-update|update|force-update|add-kernel|remove-kernel|set-default-snapshot|add-all-kernels|remove-all-kernels|is-installed|list-kernels|is-bootable) ;;
+	install|needs-update|update|force-update|add-kernel|remove-kernel|set-default-snapshot|add-all-kernels|remove-all-kernels|is-installed|list-kernels|is-bootable|update-predictions) ;;
 	kernels|snapshots|entries|"") stty_size; interactive=1 ;;
 	*) err "unknown command $1" ;;
 esac
@@ -1105,6 +1107,8 @@ elif [ "$1" = "list-kernels" ]; then
 	list_kernels "${2:-$root_snapshot}"
 elif [ "$1" = "is-bootable" ]; then
 	is_bootable "${2:-$root_snapshot}"
+elif [ "$1" = "update-predictions" ]; then
+	update_predictions=1
 elif [ "$1" = "kernels" ]; then
 	show_kernels "${2:-$root_snapshot}"
 elif [ "$1" = "snapshots" ]; then
