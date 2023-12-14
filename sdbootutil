@@ -1119,4 +1119,4 @@ else
 	main_menu
 fi
 
-[ "$update_predictions" = 1 ] && generate_tpm2_predictions
+[ -z "$update_predictions" ] || generate_tpm2_predictions

@@ -99,9 +99,6 @@ for i in 10-sdbootutil.snapper; do
   install -m 755 $i %{buildroot}%{_prefix}/lib/snapper/plugins/$i
 done
 
-# XXX: temporary for dracut
-install -D -m 644 90-dracut-tpm-pcm-signature.conf %{buildroot}/usr/lib/dracut/dracut.conf.d/90-dracut-tpm-pcm-signature.conf
-
 %transfiletriggerin -- /usr/lib/systemd/boot/efi /usr/share/efi/%_build_arch
 cat > /dev/null || :
 [ "$YAST_IS_RUNNING" != 'instsys' ] || exit 0
@@ -113,10 +110,6 @@ sdbootutil update
 %files
 %license LICENSE
 %{_bindir}/sdbootutil
-# XXX: temporary
-%dir /usr/lib/dracut
-%dir /usr/lib/dracut/dracut.conf.d
-/usr/lib/dracut/dracut.conf.d/90-dracut-tpm-pcm-signature.conf
 
 %files rpm-scriptlets
 %dir %{_prefix}/lib/module-init-tools
