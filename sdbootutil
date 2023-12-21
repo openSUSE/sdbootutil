@@ -963,7 +963,7 @@ get_pcrs() {
 	# different PCRs
 	while read -r dev; do
 		pcrs=$(cryptsetup luksDump --dump-json-metadata "$dev" | jq -r "$jq_pcr")
-		[ -n "$pcrs" ] && echo "$pcrs"
+		[ -z "$pcrs" ] || echo "$pcrs"
 	done <<<$(blkid -t TYPE=crypto_LUKS -o device)
 }
 
