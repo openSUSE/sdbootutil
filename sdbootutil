@@ -615,8 +615,7 @@ show_entry()
 				;;
 			set-default)
 				read -r id < <(jq -r "$filter|.id" < "$entryfile")
-				bootctl set-default "$id" > "$tmpfile" 2>&1
-				[ -s "$tmpfile" ] && d --textbox "$tmpfile" 0 0
+				set_default_entry "$id"
 				update_entries
 				break
 				;;
@@ -1016,6 +1015,23 @@ install_sdboot_interactive()
 	d --aspect 60 --msgbox "Installed into $boot_root" 0 0
 }
 
+set_default_entry()
+{
+	local id="${1:?}"
+	log_info "setting default entry ${id}"
+	if ! bootctl set-default "$id" > "$tmpfile" 2>&1; then
+		if grep -q "Failed to update EFI variable .*LoaderEntryDefault.* Read-only file system" "$tmpfile"; then
+			if grep -q "^default " "$boot_root/loader/loader.conf"; then
+				sed -i -e "s/^default .*/default $id/" "$boot_root/loader/loader.conf"
+			else
+				echo "default $id" >> "$boot_root/loader/loader.conf"
+			fi
+		else
+			err "$(cat "$tmpfile")"
+		fi
+	fi
+}
+
 set_default_snapshot()
 {
 	local num="${1:?}"
@@ -1033,8 +1049,7 @@ set_default_snapshot()
 			err "snapshot $num has no kernels"
 		fi
 	fi
-	log_info "setting default entry ${configs[0]}"
-	bootctl set-default "${configs[0]}"
+	set_default_entry "${configs[0]}"
 }
 
 # TODO: Maybe share this code outside
