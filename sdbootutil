@@ -77,6 +77,9 @@ helpandquit()
 		list-kernels [SNAPSHOT]
 			   List all kernels related to SNAPSHOT
 
+		list-entries [SNAPSHOT]
+			   List all entries related to SNAPSHOT
+
 		set-default-snapshot [SNAPSHOT]
 			   Make SNAPSHOT the default for next boot.
 			   Also install all kernels if needed
@@ -489,6 +492,31 @@ update_entries_for_snapshot()
 {
 	local n="$1"
 	update_entries_for_subvol "@/.snapshots/$n/snapshot"
+}
+
+list_entries()
+{
+	if [ ! -s "$entryfile" ]; then
+		if [ -n "$1" ]; then
+			update_entries_for_snapshot "$1"
+		else
+			update_entries
+		fi
+	fi
+
+	while read -r isdefault isreported type id title; do
+		color=
+		if [ "$isdefault" = "true" ]; then
+			color="\e[1;4m"
+		fi
+		if [ "$isreported" = "false" ]; then
+			color="$color\e[32m"
+		fi
+		if [ "$type" = "loader" ]; then
+			color="$color\e[33m"
+		fi
+		echo -e "$color$id${verbose:+: $title}\e[m"
+	done < <(jq '.[]|[.isDefault, if has("isReported") then .isReported else 0 end, if has("type") then .type else "unknown" end, .id, .showTitle]|join(" ")' -r < "$entryfile")
 }
 
 show_entries()
@@ -1075,7 +1103,7 @@ while true ; do
 done
 
 case "$1" in
-	install|needs-update|update|force-update|add-kernel|remove-kernel|set-default-snapshot|add-all-kernels|remove-all-kernels|is-installed|list-kernels|is-bootable|update-predictions) ;;
+	install|needs-update|update|force-update|add-kernel|remove-kernel|set-default-snapshot|add-all-kernels|remove-all-kernels|is-installed|list-entries|list-kernels|is-bootable|update-predictions) ;;
 	kernels|snapshots|entries|"") stty_size; interactive=1 ;;
 	*) err "unknown command $1" ;;
 esac
@@ -1137,6 +1165,8 @@ elif [ "$1" = "is-installed" ]; then
 	fi
 elif [ "$1" = "list-kernels" ]; then
 	list_kernels "${2:-$root_snapshot}"
+elif [ "$1" = "list-entries" ]; then
+	list_entries "${2:-}"
 elif [ "$1" = "is-bootable" ]; then
 	is_bootable "${2:-$root_snapshot}"
 elif [ "$1" = "update-predictions" ]; then
