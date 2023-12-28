@@ -19,7 +19,7 @@ arg_arch=
 arg_no_variables=
 arg_no_reuse_initrd=
 # for x in vmlinuz image vmlinux linux bzImage uImage Image zImage; do
-image=vmlinuz
+image=
 
 update_predictions=
 
@@ -1155,6 +1155,11 @@ settle_entry_token
 [ -n "$root_subvol" ] || err "Can't determine root subvolume"
 [ -n "$entry_token" ] || err "No entry token. sd-boot not installed?"
 [ -n "$firmware_arch" ] || err "Can't determine firmware arch"
+case "$firmware_arch" in
+	x64) image=vmlinuz ;;
+	aa64) image=Image ;;
+	*) err "Unsupported architecture $firmware_arch" ;;
+esac
 
 root_snapshot="${root_subvol#@/.snapshots/}"
 root_snapshot="${root_snapshot%/snapshot}"

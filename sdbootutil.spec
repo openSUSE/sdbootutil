@@ -76,9 +76,6 @@ kernels are installed or removed
 
 %install
 install -D -m 755 sdbootutil %{buildroot}%{_bindir}/sdbootutil
-%ifarch aarch64
-    sed -i -e 's/^image=vmlinuz/image=Image/' %{buildroot}%{_bindir}/sdbootutil
-%endif
 
 mkdir -p %{buildroot}%{_prefix}/lib/module-init-tools/kernel-scriptlets
 for a in rpm; do
