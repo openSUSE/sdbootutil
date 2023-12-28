@@ -80,6 +80,9 @@ helpandquit()
 		list-entries [SNAPSHOT]
 			   List all entries related to SNAPSHOT
 
+		list-snapshots
+			   List all snapshots
+
 		set-default-snapshot [SNAPSHOT]
 			   Make SNAPSHOT the default for next boot.
 			   Also install all kernels if needed
@@ -628,6 +631,23 @@ show_entry()
 	done
 }
 
+list_snapshots()
+{
+	update_snapper 2>"$tmpfile" || err "$(cat "$tmpfile")"
+
+	local n=0
+	while read -r n isdefault title; do
+		[ "$n" != "0" ] || continue
+		local id="$n"
+		if [ "$isdefault" = "true" ]; then
+			id="\e[1;4m$id\e[m"
+		fi
+		update_kernels "@/.snapshots/$n/snapshot"
+		[ "$is_bootable" = 1 ] || id="!$id"
+		echo -e "$id $title"
+	done < <(jq '.root|.[]|[.number, .default, .description]|join(" ")' -r < "$snapperfile")
+}
+
 show_snapper()
 {
 	if ! update_snapper 2>"$tmpfile"; then
@@ -694,6 +714,7 @@ declare -A found_kernels
 find_kernels()
 {
 	local subvol="${1:?}"
+	local fn kv
 	found_kernels=()
 
 	for fn in "${subvol#@}"/usr/lib/modules/*/"$image"; do
@@ -713,6 +734,7 @@ has_stale=
 update_kernels()
 {
 	local subvol="${1:?}"
+	local k id
 	known_kernels=()
 	is_bootable=
 	has_stale=
@@ -1103,7 +1125,7 @@ while true ; do
 done
 
 case "$1" in
-	install|needs-update|update|force-update|add-kernel|remove-kernel|set-default-snapshot|add-all-kernels|remove-all-kernels|is-installed|list-entries|list-kernels|is-bootable|update-predictions) ;;
+	install|needs-update|update|force-update|add-kernel|remove-kernel|set-default-snapshot|add-all-kernels|remove-all-kernels|is-installed|list-snapshots|list-entries|list-kernels|is-bootable|update-predictions) ;;
 	kernels|snapshots|entries|"") stty_size; interactive=1 ;;
 	*) err "unknown command $1" ;;
 esac
@@ -1167,6 +1189,8 @@ elif [ "$1" = "list-kernels" ]; then
 	list_kernels "${2:-$root_snapshot}"
 elif [ "$1" = "list-entries" ]; then
 	list_entries "${2:-}"
+elif [ "$1" = "list-snapshots" ]; then
+	list_snapshots
 elif [ "$1" = "is-bootable" ]; then
 	is_bootable "${2:-$root_snapshot}"
 elif [ "$1" = "update-predictions" ]; then
