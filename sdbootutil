@@ -330,6 +330,30 @@ reuse_initrd() {
 	return 1
 }
 
+mount_etc()
+{
+	local snapshot_dir="$1"
+
+	IFS=',' read -ra fields <<< \
+	   $(findmnt --tab-file "${snapshot_dir}/etc/fstab" --noheadings --nofsroot --output OPTIONS /etc | sed 's#/sysroot##g' | sed 's#:/etc,#:'${snapshot_dir}'/etc,#g')
+
+	local lower=""
+	local upper=""
+	for element in "${fields[@]}"; do
+		IFS='=' read -r key value <<< "$element"
+		[ "$key" = "lowerdir" ] && lower="$value"
+		[ "$key" = "upperdir" ] && upper="$value"
+	done
+
+	mount overlay -t overlay -o ro,"lowerdir=${upper}:${lower}" "${snapshot_dir}/etc"
+}
+
+umount_etc()
+{
+	local snapshot_dir="$1"
+	umount "${snapshot_dir}/etc"
+}
+
 install_kernel()
 {
 	local subvol="$1"
@@ -352,13 +376,21 @@ install_kernel()
 	if [ -e "$initrd" ]; then
 		ln -s "$initrd" "$tmpdir/initrd"
 	elif ! reuse_initrd "$snapshot" "$subvol"; then
+		local snapshot_dir="/.snapshots/$snapshot/snapshot"
 		local dracut_args=()
 		if [ "$subvol" != "$root_subvol" ]; then
-			dracut_args=('--sysroot' "/.snapshots/$snapshot/snapshot" '--tmpdir' '/var/tmp')
+			dracut_args=('--sysroot' "${snapshot_dir}" '--tmpdir' '/var/tmp')
 		fi
 		log_info "generating new initrd"
 
+		# In MicroOS we need to be sure to have the same /etc
+		# inside the snapshot.  For example, /etc/crypttab can
+		# have modifications in the overlay that will be
+		# visible once the snapshot is active, but the version
+		# in /.snashots is still the unmodified base
+		is_transactional && mount_etc "${snapshot_dir}"
 		run_command_live_output dracut --quiet --reproducible "${dracut_args[@]}" "$tmpdir/initrd" "$kernel_version"
+		is_transactional && umount_etc "${snapshot_dir}"
 	fi
 
 	local boot_options=
