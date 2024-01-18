@@ -514,7 +514,8 @@ list_entries()
 		fi
 	fi
 
-	while read -r isdefault isreported type id title; do
+	local isdefault isreported type id root conf title
+	while read -r isdefault isreported type id root conf title; do
 		color=
 		if [ "$isdefault" = "true" ]; then
 			color="\e[1;4m"
@@ -525,8 +526,30 @@ list_entries()
 		if [ "$type" = "loader" ]; then
 			color="$color\e[33m"
 		fi
+		local errors=()
+		if [ -n "$conf" ] && [  -e "$conf" ]; then
+			local k
+			local v
+			while read -r k v; do
+				if [ "$k" = 'linux' ] || [ "$k" = 'initrd' ] ; then
+					if [ ! -e "$root$v" ]; then
+						errors+=("$root/$v does not exist")
+					fi
+				fi
+				if [ "$k" = 'options' ]; then
+					local snapshot
+					read -r snapshot <<<"$(echo "$v" | sed -e 's,.*rootflags=subvol=@/.snapshots/\([0-9]\+\)/snapshot.*,\1,')"
+					if [ ! -d "/.snapshots/$snapshot/snapshot" ]; then
+						errors+=("/.snapshot/$snapshot/snapshot does not exist")
+					fi
+				fi
+			done < "$conf"
+		fi
+		if [ -n "$errors" ]; then
+			echo -e "  \e[31m${errors[*]}\e[m" >&2
+		fi
 		echo -e "$color$id${verbose:+: $title}\e[m"
-	done < <(jq '.[]|[.isDefault, if has("isReported") then .isReported else 0 end, if has("type") then .type else "unknown" end, .id, .showTitle]|join(" ")' -r < "$entryfile")
+	done < <(jq '.[]|[.isDefault, if has("isReported") then .isReported else 0 end, if has("type") then .type else "unknown" end, .id, .root, .path, .showTitle]|join(" ")' -r < "$entryfile")
 }
 
 show_entries()
