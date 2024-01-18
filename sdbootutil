@@ -16,6 +16,7 @@ sdboot_dst="/EFI/$sdboot_vendor"
 arg_esp_path="$SYSTEMD_ESP_PATH"
 arg_entry_token=
 arg_arch=
+arg_all_entries=
 arg_no_variables=
 arg_no_reuse_initrd=
 # for x in vmlinuz image vmlinux linux bzImage uImage Image zImage; do
@@ -489,21 +490,27 @@ update_entries_for_subvol()
 	update_entries jq "[.[]|select(has(\"options\"))|select(.options|match(\"root=UUID=$root_uuid .*rootflags=subvol=$subvol\"))]"
 }
 
-
-
 update_entries_for_snapshot()
 {
 	local n="$1"
 	update_entries_for_subvol "@/.snapshots/$n/snapshot"
 }
 
+update_entries_for_this_system()
+{
+	update_entries jq "[.[]|select(has(\"options\"))|select(.options|match(\"root=UUID=$root_uuid\"))]"
+}
+
+
 list_entries()
 {
 	if [ ! -s "$entryfile" ]; then
 		if [ -n "$1" ]; then
 			update_entries_for_snapshot "$1"
-		else
+		elif [ -n "$arg_all_entries" ]; then
 			update_entries
+		else
+			update_entries_for_this_system
 		fi
 	fi
 
@@ -526,7 +533,7 @@ show_entries()
 {
 	local dialogtitle="${1:-Entries}"
 
-	[ -s "$entryfile" ] || update_entries
+	[ -s "$entryfile" ] || update_entries_for_this_system
 
 	while true; do
 		local list=()
@@ -551,7 +558,16 @@ show_entries()
 			d --msgbox "No entries" 0 0
 			return 0
 		fi
-		d --no-hot-list --colors --ok-label "Options" --cancel-label "Back" --menu "$dialogtitle" 0 0 "$(menuheight ${#list[@]})" "${list[@]}" || return 0
+		local d_args=(--no-hot-list --colors --ok-label "Options" --cancel-label "Back")
+		[ -n "$arg_all_entries" ] || d_args+=(--extra-button --extra-label "All")
+		d "${d_args[@]}" --menu "$dialogtitle" 0 0 "$(menuheight ${#list[@]})" "${list[@]}"  || {
+			if [ "$?" = 3 ]; then
+				arg_all_entries=1
+				update_entries cat
+				continue
+			fi
+			return 0
+		}
 		n="$result"
 
 		show_entry ".[$n]"
@@ -1120,7 +1136,7 @@ main_menu()
 
 ####### main #######
 
-getopttmp=$(getopt -o hc:v --long help,flicker,verbose,esp-path:,entry-token:,arch:,image:,no-variables,no-reuse-initrd -n "${0##*/}" -- "$@")
+getopttmp=$(getopt -o hc:v --long help,flicker,verbose,esp-path:,entry-token:,arch:,image:,no-variables,no-reuse-initrd,all -n "${0##*/}" -- "$@")
 eval set -- "$getopttmp"
 
 while true ; do
@@ -1134,6 +1150,7 @@ while true ; do
 		--image) image="$2"; shift 2 ;;
 		--no-variables) arg_no_variables=1; shift ;;
 		--no-reuse-initrd) arg_no_reuse_initrd=1; shift ;;
+		--all) arg_all_entries=1; shift ;;
                 --) shift ; break ;;
                 *) echo "Internal error!" ; exit 1 ;;
         esac
