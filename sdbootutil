@@ -527,7 +527,7 @@ list_entries()
 			color="$color\e[33m"
 		fi
 		local errors=()
-		if [ -n "$conf" ] && [  -e "$conf" ]; then
+		if [ -n "$verbose" ] && [ -n "$conf" ] && [  -e "$conf" ]; then
 			local k
 			local v
 			while read -r k v; do
@@ -764,32 +764,33 @@ find_kernels()
 	done
 }
 
-# map that uses expected path on the ESP for each kernel. The value indicates
-# whether that kernel is installed, stale or missing in the ESP
-declare -A known_kernels
+# map that uses expected path on the ESP for each installed kernel as key. The
+# value is the entry id if an entry exists.
+declare -A installed_kernels
+# map of ESP path to id of kernels that are not in the subvol
+declare -A stale_kernels
 is_bootable=
-has_stale=
 update_kernels()
 {
 	local subvol="${1:?}"
-	local k id
-	known_kernels=()
+	local path id
+	installed_kernels=()
+	stale_kernels=()
 	is_bootable=
-	has_stale=
 	find_kernels "$subvol"
 	for kv in "${!found_kernels[@]}"; do
-		known_kernels["/$entry_token/$kv/linux-${found_kernels[$kv]}"]=missing
+		installed_kernels["/$entry_token/$kv/linux-${found_kernels[$kv]}"]=''
 	done
 	update_entries_for_subvol "$subvol"
 
-	while read -r k id; do
-		# kernel in ESP that is not installed
-		if [ -z "${known_kernels[$k]}" ]; then
-			known_kernels["$k"]="!$id"
-			has_stale=1
-		elif [ "${known_kernels[$k]}" = missing ]; then
-			known_kernels["$k"]="$id"
+	# XXX: maybe we should parse the actual path in the entry
+	while read -r path id; do
+		if [ "${installed_kernels[$path]+none}" = 'none' ]; then
+			installed_kernels["$path"]="$id"
 			is_bootable=1
+		else
+			# kernel in ESP that is not installed
+			stale_kernels["$path"]="$id"
 		fi
 	done < <(jq -r '.[]|select(has("linux"))|[.linux,.id]|join(" ")'< "$entryfile")
 }
@@ -798,10 +799,21 @@ list_kernels()
 {
 	subvol="@/.snapshots/${1:?}/snapshot"
 	update_kernels "$subvol"
-	local kernelfiles=("${!known_kernels[@]}")
+	local kernelfiles=("${!installed_kernels[@]}")
 	for k in "${kernelfiles[@]}"; do
-		state="${known_kernels[$k]}"
-		printf "%-10s %s\n" "$state" "$k"
+		local id="${installed_kernels[$k]}"
+		local kv="${k%/*}"
+		kv="${kv##*/}"
+		if [ -z "$id" ]; then
+			echo -e "\e[33mmissing /lib/modules/$kv/$image\e[m"
+		else
+			echo "ok /lib/modules/$kv/$image -> $id"
+		fi
+	done
+	kernelfiles=("${!stale_kernels[@]}")
+	for k in "${kernelfiles[@]}"; do
+		local id="${stale_kernels[$k]}"
+		printf "\e[31mstale %s\e[m\n" "$id"
 	done
 }
 
@@ -822,18 +834,22 @@ show_kernels()
 		local list=()
 		local n=0
 		local default=
-		local kernelfiles=("${!known_kernels[@]}")
-		local states=()
+		local id
+		local kernelfiles=("${!installed_kernels[@]}" "${!stale_kernels[@]}")
+		local ids=()
 		for k in "${kernelfiles[@]}"; do
-			state="${known_kernels[$k]}"
-			if [ "$state" != 'missing' ]; then
-				if [ "${state:0:1}" = '!' ]; then
-					state="stale"
+			if [  "${installed_kernels[$k]+yup}" = yup ]; then
+				id="${installed_kernels[$k]}"
+				if [ -z "$id" ]; then
+					state="missing"
 				else
 					state="ok"
 				fi
+			else
+				id="${stale_kernels[$k]}"
+				state='stale'
 			fi
-			states+=("$state")
+			ids+=("$id")
 			s="${k#/*/}"
 			list+=("$n" "$(printf "%-10s %s" "$state" "$s")")
 			n=$((++n))
@@ -845,12 +861,11 @@ show_kernels()
 		d --no-tags --no-hot-list --colors --ok-label "Options" --cancel-label "Back" --menu "Kernels associated with $subvol" 0 0 "$(menuheight ${#list[@]})" "${list[@]}" || return 0
 		n="$result"
 
-		local id="${known_kernels[${kernelfiles[$n]}]}"
 		list=()
-		if [ "$id" = "missing" ]; then
+		id="${ids[$n]}"
+		if [ -z "$id" ]; then
 			list+=(install "Install")
 		else
-			[ "${id:0:1}" = '!' ] && id="${id:1}" # stale
 			list+=(show "Entry")
 		fi
 		list+=(entries "Other Entries")
