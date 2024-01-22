@@ -1,0 +1,36 @@
+#!/bin/bash
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: Copyright 2024 SUSE LLC
+
+set -e
+
+COMMAND="${1:?}"
+KERNEL_VERSION="${2:?}"
+# shellcheck disable=SC2034
+ENTRY_DIR_ABS="${3:?}"
+# shellcheck disable=SC2034
+KERNEL_IMAGE="$4"
+
+[ "$KERNEL_INSTALL_LAYOUT" = "bls" ] || exit 0
+
+MACHINE_ID="${KERNEL_INSTALL_MACHINE_ID:?}"
+
+args=()
+[ "$KERNEL_INSTALL_VERBOSE" -lt 1 ] || args+=("-v")
+args+=("--esp-path=$KERNEL_INSTALL_BOOT_ROOT" "--entry-token=$KERNEL_INSTALL_ENTRY_TOKEN")
+
+case "$COMMAND" in
+	remove)
+		exec /usr/bin/sdbootutil "${args[@]}" remove-kernel "$KERNEL_VERSION"
+		;;
+	add)
+		if [ "${KERNEL_IMAGE#/usr/lib/modules/$KERNEL_VERSION}" = "$KERNEL_IMAGE" ]; then
+			echo "Unupported kernel location $KERNEL_IMAGE" >&2
+			exit 1
+		fi
+		exec /usr/bin/sdbootutil "${args[@]}" 'add-kernel' "$KERNEL_VERSION"
+		;;
+	*)
+		exit 0
+		;;
+esac

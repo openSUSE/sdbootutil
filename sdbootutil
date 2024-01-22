@@ -16,10 +16,11 @@ sdboot_dst="/EFI/$sdboot_vendor"
 arg_esp_path="$SYSTEMD_ESP_PATH"
 arg_entry_token=
 arg_arch=
+arg_all_entries=
 arg_no_variables=
 arg_no_reuse_initrd=
 # for x in vmlinuz image vmlinux linux bzImage uImage Image zImage; do
-image=vmlinuz
+image=
 
 update_predictions=
 
@@ -76,6 +77,12 @@ helpandquit()
 
 		list-kernels [SNAPSHOT]
 			   List all kernels related to SNAPSHOT
+
+		list-entries [SNAPSHOT]
+			   List all entries related to SNAPSHOT
+
+		list-snapshots
+			   List all snapshots
 
 		set-default-snapshot [SNAPSHOT]
 			   Make SNAPSHOT the default for next boot.
@@ -483,19 +490,73 @@ update_entries_for_subvol()
 	update_entries jq "[.[]|select(has(\"options\"))|select(.options|match(\"root=UUID=$root_uuid .*rootflags=subvol=$subvol\"))]"
 }
 
-
-
 update_entries_for_snapshot()
 {
 	local n="$1"
 	update_entries_for_subvol "@/.snapshots/$n/snapshot"
 }
 
+update_entries_for_this_system()
+{
+	update_entries jq "[.[]|select(has(\"options\"))|select(.options|match(\"root=UUID=$root_uuid\"))]"
+}
+
+
+list_entries()
+{
+	if [ ! -s "$entryfile" ]; then
+		if [ -n "$1" ]; then
+			update_entries_for_snapshot "$1"
+		elif [ -n "$arg_all_entries" ]; then
+			update_entries
+		else
+			update_entries_for_this_system
+		fi
+	fi
+
+	local isdefault isreported type id root conf title
+	while read -r isdefault isreported type id root conf title; do
+		color=
+		if [ "$isdefault" = "true" ]; then
+			color="\e[1;4m"
+		fi
+		if [ "$isreported" = "false" ]; then
+			color="$color\e[32m"
+		fi
+		if [ "$type" = "loader" ]; then
+			color="$color\e[33m"
+		fi
+		local errors=()
+		if [ -n "$verbose" ] && [ -n "$conf" ] && [  -e "$conf" ]; then
+			local k
+			local v
+			while read -r k v; do
+				if [ "$k" = 'linux' ] || [ "$k" = 'initrd' ] ; then
+					if [ ! -e "$root$v" ]; then
+						errors+=("$root/$v does not exist")
+					fi
+				fi
+				if [ "$k" = 'options' ]; then
+					local snapshot
+					read -r snapshot <<<"$(echo "$v" | sed -e 's,.*rootflags=subvol=@/.snapshots/\([0-9]\+\)/snapshot.*,\1,')"
+					if [ ! -d "/.snapshots/$snapshot/snapshot" ]; then
+						errors+=("/.snapshot/$snapshot/snapshot does not exist")
+					fi
+				fi
+			done < "$conf"
+		fi
+		if [ -n "$errors" ]; then
+			echo -e "  \e[31m${errors[*]}\e[m" >&2
+		fi
+		echo -e "$color$id${verbose:+: $title}\e[m"
+	done < <(jq '.[]|[.isDefault, if has("isReported") then .isReported else 0 end, if has("type") then .type else "unknown" end, .id, .root, .path, .showTitle]|join(" ")' -r < "$entryfile")
+}
+
 show_entries()
 {
 	local dialogtitle="${1:-Entries}"
 
-	[ -s "$entryfile" ] || update_entries
+	[ -s "$entryfile" ] || update_entries_for_this_system
 
 	while true; do
 		local list=()
@@ -520,7 +581,16 @@ show_entries()
 			d --msgbox "No entries" 0 0
 			return 0
 		fi
-		d --no-hot-list --colors --ok-label "Options" --cancel-label "Back" --menu "$dialogtitle" 0 0 "$(menuheight ${#list[@]})" "${list[@]}" || return 0
+		local d_args=(--no-hot-list --colors --ok-label "Options" --cancel-label "Back")
+		[ -n "$arg_all_entries" ] || d_args+=(--extra-button --extra-label "All")
+		d "${d_args[@]}" --menu "$dialogtitle" 0 0 "$(menuheight ${#list[@]})" "${list[@]}"  || {
+			if [ "$?" = 3 ]; then
+				arg_all_entries=1
+				update_entries cat
+				continue
+			fi
+			return 0
+		}
 		n="$result"
 
 		show_entry ".[$n]"
@@ -584,8 +654,7 @@ show_entry()
 				;;
 			set-default)
 				read -r id < <(jq -r "$filter|.id" < "$entryfile")
-				bootctl set-default "$id" > "$tmpfile" 2>&1
-				[ -s "$tmpfile" ] && d --textbox "$tmpfile" 0 0
+				set_default_entry "$id"
 				update_entries
 				break
 				;;
@@ -598,6 +667,23 @@ show_entry()
 				;;
 		esac
 	done
+}
+
+list_snapshots()
+{
+	update_snapper 2>"$tmpfile" || err "$(cat "$tmpfile")"
+
+	local n=0
+	while read -r n isdefault title; do
+		[ "$n" != "0" ] || continue
+		local id="$n"
+		if [ "$isdefault" = "true" ]; then
+			id="\e[1;4m$id\e[m"
+		fi
+		update_kernels "@/.snapshots/$n/snapshot"
+		[ "$is_bootable" = 1 ] || id="!$id"
+		echo -e "$id $title"
+	done < <(jq '.root|.[]|[.number, .default, .description]|join(" ")' -r < "$snapperfile")
 }
 
 show_snapper()
@@ -666,6 +752,7 @@ declare -A found_kernels
 find_kernels()
 {
 	local subvol="${1:?}"
+	local fn kv
 	found_kernels=()
 
 	for fn in "${subvol#@}"/usr/lib/modules/*/"$image"; do
@@ -677,31 +764,33 @@ find_kernels()
 	done
 }
 
-# map that uses expected path on the ESP for each kernel. The value indicates
-# whether that kernel is installed, stale or missing in the ESP
-declare -A known_kernels
+# map that uses expected path on the ESP for each installed kernel as key. The
+# value is the entry id if an entry exists.
+declare -A installed_kernels
+# map of ESP path to id of kernels that are not in the subvol
+declare -A stale_kernels
 is_bootable=
-has_stale=
 update_kernels()
 {
 	local subvol="${1:?}"
-	known_kernels=()
+	local path id
+	installed_kernels=()
+	stale_kernels=()
 	is_bootable=
-	has_stale=
 	find_kernels "$subvol"
 	for kv in "${!found_kernels[@]}"; do
-		known_kernels["/$entry_token/$kv/linux-${found_kernels[$kv]}"]=missing
+		installed_kernels["/$entry_token/$kv/linux-${found_kernels[$kv]}"]=''
 	done
 	update_entries_for_subvol "$subvol"
 
-	while read -r k id; do
-		# kernel in ESP that is not installed
-		if [ -z "${known_kernels[$k]}" ]; then
-			known_kernels["$k"]="!$id"
-			has_stale=1
-		elif [ "${known_kernels[$k]}" = missing ]; then
-			known_kernels["$k"]="$id"
+	# XXX: maybe we should parse the actual path in the entry
+	while read -r path id; do
+		if [ "${installed_kernels[$path]+none}" = 'none' ]; then
+			installed_kernels["$path"]="$id"
 			is_bootable=1
+		else
+			# kernel in ESP that is not installed
+			stale_kernels["$path"]="$id"
 		fi
 	done < <(jq -r '.[]|select(has("linux"))|[.linux,.id]|join(" ")'< "$entryfile")
 }
@@ -710,10 +799,21 @@ list_kernels()
 {
 	subvol="@/.snapshots/${1:?}/snapshot"
 	update_kernels "$subvol"
-	local kernelfiles=("${!known_kernels[@]}")
+	local kernelfiles=("${!installed_kernels[@]}")
 	for k in "${kernelfiles[@]}"; do
-		state="${known_kernels[$k]}"
-		printf "%-10s %s\n" "$state" "$k"
+		local id="${installed_kernels[$k]}"
+		local kv="${k%/*}"
+		kv="${kv##*/}"
+		if [ -z "$id" ]; then
+			echo -e "\e[33mmissing /lib/modules/$kv/$image\e[m"
+		else
+			echo "ok /lib/modules/$kv/$image -> $id"
+		fi
+	done
+	kernelfiles=("${!stale_kernels[@]}")
+	for k in "${kernelfiles[@]}"; do
+		local id="${stale_kernels[$k]}"
+		printf "\e[31mstale %s\e[m\n" "$id"
 	done
 }
 
@@ -734,18 +834,22 @@ show_kernels()
 		local list=()
 		local n=0
 		local default=
-		local kernelfiles=("${!known_kernels[@]}")
-		local states=()
+		local id
+		local kernelfiles=("${!installed_kernels[@]}" "${!stale_kernels[@]}")
+		local ids=()
 		for k in "${kernelfiles[@]}"; do
-			state="${known_kernels[$k]}"
-			if [ "$state" != 'missing' ]; then
-				if [ "${state:0:1}" = '!' ]; then
-					state="stale"
+			if [  "${installed_kernels[$k]+yup}" = yup ]; then
+				id="${installed_kernels[$k]}"
+				if [ -z "$id" ]; then
+					state="missing"
 				else
 					state="ok"
 				fi
+			else
+				id="${stale_kernels[$k]}"
+				state='stale'
 			fi
-			states+=("$state")
+			ids+=("$id")
 			s="${k#/*/}"
 			list+=("$n" "$(printf "%-10s %s" "$state" "$s")")
 			n=$((++n))
@@ -757,12 +861,11 @@ show_kernels()
 		d --no-tags --no-hot-list --colors --ok-label "Options" --cancel-label "Back" --menu "Kernels associated with $subvol" 0 0 "$(menuheight ${#list[@]})" "${list[@]}" || return 0
 		n="$result"
 
-		local id="${known_kernels[${kernelfiles[$n]}]}"
 		list=()
-		if [ "$id" = "missing" ]; then
+		id="${ids[$n]}"
+		if [ -z "$id" ]; then
 			list+=(install "Install")
 		else
-			[ "${id:0:1}" = '!' ] && id="${id:1}" # stale
 			list+=(show "Entry")
 		fi
 		list+=(entries "Other Entries")
@@ -966,6 +1069,23 @@ install_sdboot_interactive()
 	d --aspect 60 --msgbox "Installed into $boot_root" 0 0
 }
 
+set_default_entry()
+{
+	local id="${1:?}"
+	log_info "setting default entry ${id}"
+	if ! bootctl set-default "$id" > "$tmpfile" 2>&1; then
+		if grep -q "Failed to update EFI variable .*LoaderEntryDefault.* Read-only file system" "$tmpfile"; then
+			if grep -q "^default " "$boot_root/loader/loader.conf"; then
+				sed -i -e "s/^default .*/default $id/" "$boot_root/loader/loader.conf"
+			else
+				echo "default $id" >> "$boot_root/loader/loader.conf"
+			fi
+		else
+			err "$(cat "$tmpfile")"
+		fi
+	fi
+}
+
 set_default_snapshot()
 {
 	local num="${1:?}"
@@ -983,8 +1103,7 @@ set_default_snapshot()
 			err "snapshot $num has no kernels"
 		fi
 	fi
-	log_info "setting default entry ${configs[0]}"
-	bootctl set-default "${configs[0]}"
+	set_default_entry "${configs[0]}"
 }
 
 # TODO: Maybe share this code outside
@@ -1055,7 +1174,7 @@ main_menu()
 
 ####### main #######
 
-getopttmp=$(getopt -o hc:v --long help,flicker,verbose,esp-path:,entry-token:,arch:,image:,no-variables,no-reuse-initrd -n "${0##*/}" -- "$@")
+getopttmp=$(getopt -o hc:v --long help,flicker,verbose,esp-path:,entry-token:,arch:,image:,no-variables,no-reuse-initrd,all -n "${0##*/}" -- "$@")
 eval set -- "$getopttmp"
 
 while true ; do
@@ -1069,13 +1188,14 @@ while true ; do
 		--image) image="$2"; shift 2 ;;
 		--no-variables) arg_no_variables=1; shift ;;
 		--no-reuse-initrd) arg_no_reuse_initrd=1; shift ;;
+		--all) arg_all_entries=1; shift ;;
                 --) shift ; break ;;
                 *) echo "Internal error!" ; exit 1 ;;
         esac
 done
 
 case "$1" in
-	install|needs-update|update|force-update|add-kernel|remove-kernel|set-default-snapshot|add-all-kernels|remove-all-kernels|is-installed|list-kernels|is-bootable|update-predictions) ;;
+	install|needs-update|update|force-update|add-kernel|remove-kernel|set-default-snapshot|add-all-kernels|remove-all-kernels|is-installed|list-snapshots|list-entries|list-kernels|is-bootable|update-predictions) ;;
 	kernels|snapshots|entries|"") stty_size; interactive=1 ;;
 	*) err "unknown command $1" ;;
 esac
@@ -1105,6 +1225,11 @@ settle_entry_token
 [ -n "$root_subvol" ] || err "Can't determine root subvolume"
 [ -n "$entry_token" ] || err "No entry token. sd-boot not installed?"
 [ -n "$firmware_arch" ] || err "Can't determine firmware arch"
+case "$firmware_arch" in
+	x64) image=vmlinuz ;;
+	aa64) image=Image ;;
+	*) err "Unsupported architecture $firmware_arch" ;;
+esac
 
 root_snapshot="${root_subvol#@/.snapshots/}"
 root_snapshot="${root_snapshot%/snapshot}"
@@ -1137,6 +1262,10 @@ elif [ "$1" = "is-installed" ]; then
 	fi
 elif [ "$1" = "list-kernels" ]; then
 	list_kernels "${2:-$root_snapshot}"
+elif [ "$1" = "list-entries" ]; then
+	list_entries "${2:-}"
+elif [ "$1" = "list-snapshots" ]; then
+	list_snapshots
 elif [ "$1" = "is-bootable" ]; then
 	is_bootable "${2:-$root_snapshot}"
 elif [ "$1" = "update-predictions" ]; then

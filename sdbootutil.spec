@@ -27,7 +27,7 @@ BuildRequires:  git-core
 %define git_version %{nil}
 %endif
 Name:           sdbootutil
-Version:        0%{git_version}
+Version:        1%{git_version}
 Release:        0
 Summary:        script to install shim with sd-boot
 License:        MIT
@@ -69,6 +69,15 @@ Obsoletes:      %{name}-filetriggers < %{version}
 Scriptlets that call sdbootutil to create boot entries when
 kernels are installed or removed
 
+%package kernel-install
+Summary:        Hook script for kernel-install
+Requires:       sdbootutil >= %{version}-%{release}
+Requires:       /usr/bin/kernel-install
+
+%description kernel-install
+Plugin script for kernel-install. Note: installation of this
+package may disable other plugin scripts that are incompatible.
+
 %prep
 %setup -q
 
@@ -76,9 +85,6 @@ kernels are installed or removed
 
 %install
 install -D -m 755 sdbootutil %{buildroot}%{_bindir}/sdbootutil
-%ifarch aarch64
-    sed -i -e 's/^image=vmlinuz/image=Image/' %{buildroot}%{_bindir}/sdbootutil
-%endif
 
 mkdir -p %{buildroot}%{_prefix}/lib/module-init-tools/kernel-scriptlets
 for a in rpm; do
@@ -99,6 +105,19 @@ for i in 10-sdbootutil.snapper; do
   install -m 755 $i %{buildroot}%{_prefix}/lib/snapper/plugins/$i
 done
 
+# kernel-install
+install -d -m755 %{buildroot}%{_prefix}/lib/kernel/install.d
+for i in 50-sdbootutil.install; do
+  install -m 755 $i %{buildroot}%{_prefix}/lib/kernel/install.d/$i
+done
+
+# tmpfiles
+install -d -m755 %{buildroot}%{_prefix}/lib/tmpfiles.d
+for i in kernel-install-sdbootutil.conf; do
+  install -m 755 $i %{buildroot}%{_prefix}/lib/tmpfiles.d/$i
+done
+mkdir -p %{buildroot}/etc/kernel/install.d
+
 %transfiletriggerin -- /usr/lib/systemd/boot/efi /usr/share/efi/%_build_arch
 cat > /dev/null || :
 [ "$YAST_IS_RUNNING" != 'instsys' ] || exit 0
@@ -106,6 +125,9 @@ cat > /dev/null || :
 [ -z "$TRANSACTIONAL_UPDATE" ] || exit 0
 [ -z "$VERBOSE_FILETRIGGERS" ] || echo "%{name}-%{version}-%{release}: updating bootloader"
 sdbootutil update
+
+%posttrans kernel-install
+%tmpfiles_create kernel-install-sdbootutil.conf
 
 %files
 %license LICENSE
@@ -119,5 +141,17 @@ sdbootutil update
 %dir %{_prefix}/lib/snapper
 %dir %{_prefix}/lib/snapper/plugins
 %{_prefix}/lib/snapper/plugins/*
+
+%files kernel-install
+%dir %{_prefix}/lib/kernel
+%dir %{_prefix}/lib/kernel/install.d
+%{_prefix}/lib/kernel/install.d/*
+%{_prefix}/lib/tmpfiles.d/kernel-install-sdbootutil.conf
+%dir /etc/kernel
+%dir /etc/kernel/install.d
+%ghost %config(noreplace,missingok) /etc/kernel/install.d/50-depmod.install
+%ghost %config(noreplace,missingok) /etc/kernel/install.d/50-dracut.install
+%ghost %config(noreplace,missingok) /etc/kernel/install.d/51-dracut-rescue.install
+%ghost %config(noreplace,missingok) /etc/kernel/install.d/90-loaderentry.install
 
 %changelog
