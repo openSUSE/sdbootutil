@@ -22,6 +22,9 @@ arg_no_reuse_initrd=
 # for x in vmlinuz image vmlinux linux bzImage uImage Image zImage; do
 image=
 
+# State file for transactional systems
+state_file="/var/lib/misc/transactional-update.state"
+
 update_predictions=
 
 rollback=()
@@ -520,7 +523,6 @@ update_entries_for_this_system()
 {
 	update_entries jq "[.[]|select(has(\"options\"))|select(.options|match(\"root=UUID=$root_uuid\"))]"
 }
-
 
 list_entries()
 {
@@ -1127,53 +1129,210 @@ set_default_snapshot()
 }
 
 # TODO: Maybe share this code outside
-get_pcrs() {
-	local pcrs
-	local jq_pcr='.tokens[]|select(.type == "systemd-tpm2")|."tpm2_pubkey_pcrs"|join(",")'
-	# We can have multiple devices, each one of them with
-	# different PCRs
-	while read -r dev; do
-		pcrs=$(cryptsetup luksDump --dump-json-metadata "$dev" | jq -r "$jq_pcr")
-		[ -z "$pcrs" ] || echo "$pcrs"
-	done <<<$(blkid -t TYPE=crypto_LUKS -o device)
+run_log()
+{
+	"$@" 2>&1 | logger -t sdbootutil
 }
+
+# TODO: Maybe share this code outside
+info_log()
+{
+	logger -t sdbootutil "$@"
+}
+
+# TODO: Maybe share this code outside
+is_pcrlock() {
+	[ -e /usr/lib/systemd/systemd-pcrlock ]
+}
+
+# TODO: Maybe share this code outside
+is_pcr_oracle() {
+	[ -e /etc/systemd/tpm2-pcr-public-key.pem ] && \
+	    [ -e /etc/systemd/tpm2-pcr-private-key.pem ] && \
+	    [ -e /usr/bin/pcr-oracle ]
+}
+
+# TODO: Maybe share this code outside
+prepare_entries()
+{
+	# Get the numbers for the last three snapshots
+	[ -s "$snapperfile" ] || update_snapper
+
+	# Select the default and the active snapshots
+	local snapshots="$(jq --raw-output '.root | map(select(.active==true or .default==true)) | map(.number) | join("|")' "$snapperfile")"
+
+	if is_transactional && [ -e "${state_file}" ]; then
+	    . "${state_file}"
+	    [ -z "${LAST_WORKING_SNAPSHOTS}" ] || snapshots="$snapshots|${LAST_WORKING_SNAPSHOTS// /}"
+	fi
+
+	info_log "Creating predictions for snapshots: ${snapshots//|/,}"
+
+	update_entries_for_snapshot "(:?$snapshots)"
+}
+
+# TODO: Maybe share this code outside
+pcrlock_cmdline_initrd() {
+	local cmdline="$1"
+	local initrd="$2"
+	local suffix="$3"
+
+	# 710-kernel-cmdline-initrd-entry.pcrlock.d is not part of the
+	# pcrlock standards
+	echo "$cmdline" > "$tmpdir/cmdline"
+	run_log /usr/lib/systemd/systemd-pcrlock \
+		lock-kernel-cmdline \
+		--pcrlock="$tmpdir/cmdline.pcrlock" \
+		"$tmpdir/cmdline"
+	run_log /usr/lib/systemd/systemd-pcrlock \
+		lock-kernel-initrd \
+		--pcrlock="$tmpdir/initrd.pcrlock" \
+		"${boot_root}/$initrd"
+	jq --slurp '{"records": [.[].records[0]]}' \
+	   "$tmpdir/cmdline.pcrlock" \
+	   "$tmpdir/initrd.pcrlock" \
+	   > "/var/lib/pcrlock.d/710-kernel-cmdline-initrd-entry.pcrlock.d/cmdline-initrd-$suffix.pcrlock"
+	rm "$tmpdir/cmdline"
+	rm "$tmpdir/cmdline.pcrlock"
+	rm "$tmpdir/initrd.pcrlock"
+
+	# 710-kernel-cmdline-boot-loader.pcrlock.d is not part of the
+	# pcrlock standards
+	echo -ne "$cmdline\0" > "$tmpdir/cmdline"
+	iconv -t UTF-16LE -o "$tmpdir/cmdline.utf16" "$tmpdir/cmdline"
+	run_log /usr/lib/systemd/systemd-pcrlock \
+		lock-raw \
+		--pcr=12 \
+		--pcrlock="/var/lib/pcrlock.d/710-kernel-cmdline-boot-loader.pcrlock.d/cmdline-$suffix.pcrlock" \
+		"$tmpdir/cmdline.utf16"
+	rm "$tmpdir/cmdline.utf16"
+}
+
+# TODO: Maybe share this code outside
+generate_tpm2_predictions_pcrlock()
+{
+	local pcrs="$1"
+
+	# Select the affected entries
+	prepare_entries
+
+	# Remove all the generated measurements.  This will keep the
+	# predictions at minimum and decrease the combinations
+	rm -fr /var/lib/pcrlock.d/*
+
+	run_log /usr/lib/systemd/systemd-pcrlock lock-firmware-code
+	run_log /usr/lib/systemd/systemd-pcrlock lock-firmware-config
+	# If secure boot is disabled, this can fail.  There is patch
+	# for the policy generation, and for the authority is planned
+	run_log /usr/lib/systemd/systemd-pcrlock lock-secureboot-policy || true
+	run_log /usr/lib/systemd/systemd-pcrlock lock-secureboot-authority || true
+	# TODO: what drive should be here?
+	# run_log /usr/lib/systemd/systemd-pcrlock lock-gpt "$drive"
+
+	# 630-shim-efi-application is not part of the pcrlock standards
+	# TODO: move to shim-pcrlock.rpm
+	run_log /usr/lib/systemd/systemd-pcrlock \
+	    lock-pe \
+	    --pcrlock=/var/lib/pcrlock.d/630-shim-efi-application.pcrlock.d/generated.pcrlock \
+	    "${boot_root}${sdboot_dst}/shim.efi"
+
+	# 640-boot-loader-efi-application is not part of the pcrlock
+	# standards
+	# This is measuing the systemd-boot EFI binary (named grub.efi)
+	# TODO: move to systemd-boot-pcrlock.rpm
+	run_log /usr/lib/systemd/systemd-pcrlock \
+	    lock-pe \
+	    --pcrlock=/var/lib/pcrlock.d/640-boot-loader-efi-application.pcrlock.d/generated.pcrlock \
+	    "${boot_root}${sdboot_dst}/grub.efi"
+
+	# 650-kernel-efi-application.pcrlock is not part of the
+	# pcrlock standards
+	# TODO: move to kernel-TYPE-pcrlock.rpm
+	local n=0
+	while read -r i; do
+		n=$((n+1))
+		run_log /usr/lib/systemd/systemd-pcrlock \
+		    lock-pe \
+		    --pcrlock=/var/lib/pcrlock.d/650-kernel-efi-application.pcrlock.d/linux-"$n".pcrlock \
+		    "${boot_root}/$i"
+	done < <(jq --raw-output 'map(.linux) | unique | .[]' "$entryfile")
+
+	# Join the cmdline and the initrd in a single component
+	mkdir -p /var/lib/pcrlock.d/710-kernel-cmdline-initrd-entry.pcrlock.d
+	n=0
+	while read -r cmdline; do
+		read -r initrd
+		n=$((n+1))
+		pcrlock_cmdline_initrd "initrd=$cmdline" "$initrd" "$n"
+	done < <(jq --raw-output '.[] | ([(.initrd[0] | sub("/"; "\\"; "g")), .options] | join(" ")), .initrd[0]' "$entryfile")
+
+	# Generate variation for 710-kernel-cmdline-initrd-entry
+	# component that contains the current cmdline and the current
+	# initrd, even if this will never be used again.  This is
+	# required because disk-encryption-tool generates a new initrd
+	# during the first boot, making the event log impossible to
+	# align for systemd-pcrlock
+	if [ "$SDB_ADD_INITIAL_CMDLINE" = "1" ]; then
+		read -r cmdline < /proc/cmdline
+		local initrd="${cmdline#*initrd=}"; initrd="${initrd%% *}"; initrd="${initrd//\\//}"
+		pcrlock_cmdline_initrd "$cmdline" "$initrd" "0"
+	fi
+
+	run_log /usr/lib/systemd/systemd-pcrlock --pcr="$pcrs" make-policy
+
+	# Publish the assets in the ESP, so can be imported by
+	# dracut-pcr-signature
+	[ -e /var/lib/systemd/pcrlock.json ] && cp /var/lib/systemd/pcrlock.json "${boot_root}${sdboot_dst}"
+}
+
+# TODO: Maybe share this code outside
+generate_tpm2_predictions_pcr_oracle()
+{
+	local pcrs="$1"
+
+	[ -z "$pcrs" ] || rm -f /etc/systemd/tpm2-pcr-signature.json
+
+	# Select the affected entries
+	prepare_entries
+
+	while read -r entry; do
+	    if ! pcr-oracle \
+		 --private-key /etc/systemd/tpm2-pcr-private-key.pem \
+		 --from eventlog \
+		 --output /etc/systemd/tpm2-pcr-signature.json \
+		 --target-platform=systemd \
+		 --boot-entry "${entry_id}" \
+		 sign "$pcrs"; then
+		err "Failed to install TPM predictions for ${entry_id}"
+	    fi
+	done < <(jq --raw-output '.id' "$entryfile")
+
+	# Publish the assets in the ESP, so can be imported by
+	# dracut-pcr-signature
+	cp /etc/systemd/tpm2-pcr-public-key.pem "${boot_root}${sdboot_dst}"
+	[ -e /etc/systemd/tpm2-pcr-signature.json ] && cp /etc/systemd/tpm2-pcr-signature.json "${boot_root}${sdboot_dst}"
+}
+
 
 # TODO: Maybe share this code outside
 generate_tpm2_predictions()
 {
-	local all_pcrs
-
 	[ -e /etc/crypttab ] || return 0
 	grep -q "tpm2-device" /etc/crypttab || return 0
-	[ -e /etc/systemd/tpm2-pcr-public-key.pem ] ||  return 0
-	[ -e /etc/systemd/tpm2-pcr-private-key.pem ] ||  return 0
+	[ -e /etc/sysconfig/fde-tools ] || return 0
 
-	all_pcrs=$(get_pcrs)
-	[ -z "$all_pcrs" ] || rm -f /etc/systemd/tpm2-pcr-signature.json
+	. /etc/sysconfig/fde-tools
 
-	# We make as many predictions as |all_pcrs| * |entries| to
-	# cover all the combinations.  pcr-oracle is smart to include
-	# the entry only one time, so we will not have duplications.
-	# This is a step for multi device configurations.
-	for pcrs in $all_pcrs; do
-		for entry in "${boot_root}"/loader/entries/*.conf; do
-			entry_id="$(basename "$entry")"
-			if ! pcr-oracle \
-			     --private-key /etc/systemd/tpm2-pcr-private-key.pem \
-			     --from eventlog \
-			     --output /etc/systemd/tpm2-pcr-signature.json \
-			     --target-platform=systemd \
-			     --boot-entry "$entry_id" \
-			     sign "$pcrs"; then
-				err "Failed to install TPM predictions for $entry_id"
-			fi
-		done
-	done
+	if is_pcrlock && is_pcr_oracle; then
+		echo "pcrlock and signed policies are mutually exclusive, remove one set of files to continue"
+		return 0
+	fi
 
-	# Publish the assets in the ESP, so can be imported by
-	# dracut-pcr-signature
-	cp /etc/systemd/tpm2-pcr-public-key.pem /boot/efi/EFI/systemd
-	[ -e /etc/systemd/tpm2-pcr-signature.json ] && cp /etc/systemd/tpm2-pcr-signature.json /boot/efi/EFI/systemd
+	if is_pcrlock; then
+		generate_tpm2_predictions_pcrlock "${FDE_SEAL_PCR_LIST}"
+	elif is_pcr_oracle; then
+		generate_tpm2_predictions_pcr_oracle "${FDE_SEAL_PCR_LIST}"
+	fi
 }
 
 main_menu()
