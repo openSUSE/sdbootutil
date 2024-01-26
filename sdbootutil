@@ -209,17 +209,17 @@ subvol_is_ro()
 	local subvol="${1:?}"
 	while read -r line; do
 		[ "$line" = "ro=true" ] && return 0
-	done < <(btrfs prop get -t s "${subvol#@}" ro)
+	done < <(btrfs prop get -t s "${subvol#${subvol_prefix}}" ro)
 	return 1
 }
 
 detect_parent() {
 	local subvol="$1"
-	parent_uuid="$(btrfs subvol show "${subvol#@}" | sed -ne 's/\s*Parent UUID:\s*//p')"
+	parent_uuid="$(btrfs subvol show "${subvol#${subvol_prefix}}" | sed -ne 's/\s*Parent UUID:\s*//p')"
 	[ "$parent_uuid" != '-' ] || parent_uuid=
 	[ -n "$parent_uuid" ] || return 0
-	parent_subvol="$(/sbin/btrfs subvol show -u "$parent_uuid" "${subvol#@}" | head -1)"
-	parent_snapshot="${parent_subvol#@/.snapshots/}"
+	parent_subvol="$(/sbin/btrfs subvol show -u "$parent_uuid" "${subvol#${subvol_prefix}}" | head -1)"
+	parent_snapshot="${parent_subvol#${subvol_prefix}/.snapshots/}"
 	if [ "$parent_subvol" = "$parent_snapshot" ]; then
 		unset parent_subvol parent_snapshot
 	else
@@ -240,7 +240,7 @@ remove_kernel()
 {
 	local subvol="$1"
 	local kernel_version="$2"
-	local snapshot="${subvol#@/.snapshots/}"
+	local snapshot="${subvol#${subvol_prefix}/.snapshots/}"
 	snapshot="${snapshot%/*}"
 	local id="$entry_token-$kernel_version-$snapshot.conf"
 	run_command_output bootctl unlink "$id"
@@ -366,14 +366,14 @@ install_kernel()
 	local subvol="$1"
 	local kernel_version="$2"
 	local dstinitrd=""
-	local src="${subvol#@}/lib/modules/$kernel_version/$image"
+	local src="${subvol#${subvol_prefix}}/lib/modules/$kernel_version/$image"
 	test -e "$src" || err "Can't find $src"
 
 	calc_chksum "$src"
 	local dst="/$entry_token/$kernel_version/linux-$chksum"
 
 	# XXX: fix calling with snapshot instead of subvol
-	local snapshot="${subvol#@/.snapshots/}"
+	local snapshot="${subvol#${subvol_prefix}/.snapshots/}"
 	snapshot="${snapshot%/snapshot}"
 
 	local initrd="${src%/*}/initrd"
@@ -458,7 +458,7 @@ install_kernel()
 
 install_all_kernels()
 {
-	local subvol="@/.snapshots/${1:?}/snapshot"
+	local subvol="${subvol_prefix}/.snapshots/${1:?}/snapshot"
 	find_kernels "$subvol"
 	for kv in "${!found_kernels[@]}"; do
 		log_info "installing $kv"
@@ -469,7 +469,7 @@ install_all_kernels()
 
 remove_all_kernels()
 {
-	local subvol="@/.snapshots/${1:?}/snapshot"
+	local subvol="${subvol_prefix}/.snapshots/${1:?}/snapshot"
 	find_kernels "$subvol"
 	for kv in "${!found_kernels[@]}"; do
 		remove_kernel "${subvol}" "$kv"
@@ -493,7 +493,7 @@ update_entries_for_subvol()
 update_entries_for_snapshot()
 {
 	local n="$1"
-	update_entries_for_subvol "@/.snapshots/$n/snapshot"
+	update_entries_for_subvol "${subvol_prefix}/.snapshots/$n/snapshot"
 }
 
 update_entries_for_this_system()
@@ -538,7 +538,7 @@ list_entries()
 				fi
 				if [ "$k" = 'options' ]; then
 					local snapshot
-					read -r snapshot <<<"$(echo "$v" | sed -e 's,.*rootflags=subvol=@/.snapshots/\([0-9]\+\)/snapshot.*,\1,')"
+					read -r snapshot <<<"$(echo "$v" | sed -e "s,.*rootflags=subvol=${subvol_prefix}/.snapshots/\([0-9]\+\)/snapshot.*,\1,")"
 					if [ ! -d "/.snapshots/$snapshot/snapshot" ]; then
 						errors+=("/.snapshot/$snapshot/snapshot does not exist")
 					fi
@@ -680,7 +680,7 @@ list_snapshots()
 		if [ "$isdefault" = "true" ]; then
 			id="\e[1;4m$id\e[m"
 		fi
-		update_kernels "@/.snapshots/$n/snapshot"
+		update_kernels "${subvol_prefix}/.snapshots/$n/snapshot"
 		[ "$is_bootable" = 1 ] || id="!$id"
 		echo -e "$id $title"
 	done < <(jq '.root|.[]|[.number, .default, .description]|join(" ")' -r < "$snapperfile")
@@ -703,7 +703,7 @@ show_snapper()
 				default="$n"
 				title="\\Zb\Zu$title\\Zn"
 			fi
-			update_kernels "@/.snapshots/$n/snapshot"
+			update_kernels "${subvol_prefix}/.snapshots/$n/snapshot"
 			[ "$is_bootable" = 1 ] || title="!$title"
 			list+=("$n" "$title")
 		done < <(jq '.root|.[]|[.number, .default, .description]|join(" ")' -r < "$snapperfile")
@@ -729,7 +729,7 @@ show_snapper()
 					;;
 				entries)
 					#read -r MACHINE_ID < /etc/machine-id
-					#update_entries jq "[.[]|select(.machineId==\"$MACHINE_ID\")|select(has(\"options\"))|select(.options|match(\"@/.snapshots/$n/snapshot\"))]"
+					#update_entries jq "[.[]|select(.machineId==\"$MACHINE_ID\")|select(has(\"options\"))|select(.options|match(\"${subvol_prefix}/.snapshots/$n/snapshot\"))]"
 					update_entries_for_snapshot "$n"
 					show_entries "Entries for Snapshot $n"
 					;;
@@ -755,7 +755,7 @@ find_kernels()
 	local fn kv
 	found_kernels=()
 
-	for fn in "${subvol#@}"/usr/lib/modules/*/"$image"; do
+	for fn in "${subvol#${subvol_prefix}}"/usr/lib/modules/*/"$image"; do
 		kv="${fn%/*}"
 		kv="${kv##*/}"
 		calc_chksum "$fn"
@@ -797,7 +797,7 @@ update_kernels()
 
 list_kernels()
 {
-	subvol="@/.snapshots/${1:?}/snapshot"
+	subvol="${subvol_prefix}/.snapshots/${1:?}/snapshot"
 	update_kernels "$subvol"
 	local kernelfiles=("${!installed_kernels[@]}")
 	for k in "${kernelfiles[@]}"; do
@@ -819,7 +819,7 @@ list_kernels()
 
 is_bootable()
 {
-	subvol="@/.snapshots/${1:?}/snapshot"
+	subvol="${subvol_prefix}/.snapshots/${1:?}/snapshot"
 	update_kernels "$subvol"
 
 	[ "$is_bootable" = 1 ] || return 1
@@ -828,7 +828,7 @@ is_bootable()
 
 show_kernels()
 {
-	subvol="@/.snapshots/${1:?}/snapshot"
+	subvol="${subvol_prefix}/.snapshots/${1:?}/snapshot"
 	while true; do
 		update_kernels "$subvol"
 		local list=()
@@ -1212,6 +1212,7 @@ done
 eval "$(bootctl 2>/dev/null | sed -ne 's/Firmware Arch: *\(\w\+\)/firmware_arch="\1"/p;s/ *token: *\(\w\+\)/entry_token="\1"/p;s, *\$BOOT: *\([^ ]\+\).*,boot_root="\1",p')"
 root_uuid=$(findmnt / -r -n -o UUID)
 root_subvol=$(btrfs subvol show / 2>/dev/null|head -1)
+subvol_prefix="${root_subvol%/.snapshots/*}"
 [ -s /etc/machine-id ] && read -r machine_id < /etc/machine-id
 
 if [ -n "$arg_esp_path" ] && [ "$boot_root" != "$arg_esp_path" ]; then
@@ -1231,7 +1232,7 @@ case "$firmware_arch" in
 	*) err "Unsupported architecture $firmware_arch" ;;
 esac
 
-root_snapshot="${root_subvol#@/.snapshots/}"
+root_snapshot="${root_subvol#${subvol_prefix}/.snapshots/}"
 root_snapshot="${root_snapshot%/snapshot}"
 
 if [ "$1" = "install" ]; then
