@@ -311,8 +311,7 @@ reuse_initrd() {
 		while read -r k v; do
 			[ "$k" = 'initrd' ] || continue
 			log_info "found existing initrd $v"
-			dstinitrd="$v"
-			break
+			dstinitrd+=("$v")
 		done < "$conf"
 		[ -z "$dstinitrd" ] || return 0
 	fi
@@ -328,8 +327,7 @@ reuse_initrd() {
 		while read -r k v; do
 			[ "$k" = 'initrd' ] || continue
 			log_info "found parent initrd $v"
-			dstinitrd="$v"
-			break
+			dstinitrd+=("$v")
 		done < "$parent_conf"
 		[ -z "$dstinitrd" ] || return 0
 	fi
@@ -365,8 +363,10 @@ install_kernel()
 {
 	local subvol="$1"
 	local kernel_version="$2"
-	local dstinitrd=""
+	local initrd=()
+	local dstinitrd=()
 	local src="${subvol#${subvol_prefix}}/lib/modules/$kernel_version/$image"
+	local initrddir="${subvol#${subvol_prefix}}/usr/lib/initrd"
 	test -e "$src" || err "Can't find $src"
 
 	calc_chksum "$src"
@@ -381,7 +381,15 @@ install_kernel()
 	mkdir -p "$boot_root${dst%/*}"
 
 	if [ -e "$initrd" ]; then
-		ln -s "$initrd" "$tmpdir/initrd"
+		ln -s "$initrd" "$tmpdir/initrd-0"
+	elif [ -d "$initrddir" ] && [ -x "/usr/bin/mkmoduleinitrd" ]; then
+		local f i
+		i=0
+		for f in "$initrddir"/*; do
+			ln -s "$f" "$tmpdir/initrd-$i"
+			((++i))
+		done
+		/usr/bin/mkmoduleinitrd "${subvol#"${subvol_prefix}"}" "$kernel_version" "$tmpdir/initrd-$i"
 	elif ! reuse_initrd "$snapshot" "$subvol"; then
 		local snapshot_dir="/.snapshots/$snapshot/snapshot"
 		local dracut_args=()
@@ -396,7 +404,7 @@ install_kernel()
 		# visible once the snapshot is active, but the version
 		# in /.snashots is still the unmodified base
 		is_transactional && mount_etc "${snapshot_dir}"
-		run_command_live_output dracut --quiet --reproducible "${dracut_args[@]}" "$tmpdir/initrd" "$kernel_version"
+		run_command_live_output dracut --quiet --reproducible "${dracut_args[@]}" "$tmpdir/initrd-0" "$kernel_version"
 		is_transactional && umount_etc "${snapshot_dir}"
 	fi
 
@@ -407,9 +415,13 @@ install_kernel()
 		break
 	done
 
-	if [ -z "$dstinitrd" ] && [ -e "$tmpdir/initrd" ]; then
-		calc_chksum "$tmpdir/initrd"
-		dstinitrd="${dst%/*}/initrd-$chksum"
+	if [ -z "$dstinitrd" ] && [ -e "$tmpdir/initrd-0" ]; then
+		i=0
+		while [ -e "$tmpdir/initrd-$i" ]; do
+			calc_chksum "$tmpdir/initrd-$i"
+			dstinitrd+=("${dst%/*}/initrd-$chksum")
+			((++i))
+		done
 	fi
 
 	title="${os_release_PRETTY_NAME:-Linux $kernel_version}"
@@ -431,8 +443,10 @@ install_kernel()
 	version    $snapshot@$kernel_version${entry_machine_id:+${nl}machine-id $entry_machine_id}${sort_key:+${nl}sort-key   $sort_key}
 	options    $boot_options
 	linux      $dst
-	initrd     $dstinitrd
 	EOF
+	for i in "${dstinitrd[@]}"; do
+		echo "initrd     $i" >> "$tmpdir/entry.conf"
+	done
 
 	local failed=
 	if [ ! -e "$boot_root$dst" ]; then
@@ -440,8 +454,14 @@ install_kernel()
 	else
 		log_info "reusing $boot_root$dst"
 	fi
-	if [ -z "$failed" ] && [ -e "$tmpdir/initrd" ] && [ ! -e "$boot_root$dstinitrd" ]; then
-		install_with_rollback "$tmpdir/initrd" "$boot_root$dstinitrd" || failed=initrd
+	if [ -z "$failed" ] && [ -e "$tmpdir/initrd-0" ]; then
+		i=0
+		while [ -e "$tmpdir/initrd-$i" ]; do
+			if [ ! -e "$boot_root${dstinitrd[$i]}" ]; then
+				install_with_rollback "$tmpdir/initrd-$i" "$boot_root${dstinitrd[$i]}" || { failed=initrd; break; }
+			fi
+			((++i))
+		done
 	fi
 	if [ -z "$failed" ]; then
 		loader_entry="$boot_root/loader/entries/$entry_token-$kernel_version-$snapshot.conf"
