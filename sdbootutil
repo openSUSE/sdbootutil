@@ -501,7 +501,6 @@ update_entries_for_this_system()
 	update_entries jq "[.[]|select(has(\"options\"))|select(.options|match(\"root=UUID=$root_uuid\"))]"
 }
 
-
 list_entries()
 {
 	if [ ! -s "$entryfile" ]; then
@@ -1129,7 +1128,10 @@ generate_tpm2_predictions_pcrlock()
 {
 	local pcrs="$1"
 
-	update_entries jq '[.[] | select(.type == "type1")]'
+	# Get the numbers for the last three snapshots
+	[ -s "$snapperfile" ] || update_snapper
+	local last_snapshots="$(jq --raw-output '.root | map(.number) | reverse | .[0:3] | map(select(. > 0)) | join("|")' "$snapperfile")"
+	update_entries_for_snapshot "(:?${last_snapshots})"
 
 	# Remove all the generated measurements.  This will keep the
 	# predictions at minimum and decrease the combinations
@@ -1149,7 +1151,7 @@ generate_tpm2_predictions_pcrlock()
 	run_log /usr/lib/systemd/systemd-pcrlock \
 	    lock-pe \
 	    --pcrlock=/var/lib/pcrlock.d/630-shim-efi-application.pcrlock.d/generated.pcrlock \
-	    /boot/efi/EFI/systemd/shim.efi
+	    "${boot_root}${sdboot_dst}/shim.efi"
 
 	# 640-boot-loader-efi-application is not part of the pcrlock
 	# standards
@@ -1158,7 +1160,7 @@ generate_tpm2_predictions_pcrlock()
 	run_log /usr/lib/systemd/systemd-pcrlock \
 	    lock-pe \
 	    --pcrlock=/var/lib/pcrlock.d/640-boot-loader-efi-application.pcrlock.d/generated.pcrlock \
-	    /boot/efi/EFI/systemd/grub.efi
+	    "${boot_root}${sdboot_dst}/grub.efi"
 
 	# 650-kernel-efi-application.pcrlock is not part of the
 	# pcrlock standards
@@ -1169,7 +1171,7 @@ generate_tpm2_predictions_pcrlock()
 		run_log /usr/lib/systemd/systemd-pcrlock \
 		    lock-pe \
 		    --pcrlock=/var/lib/pcrlock.d/650-kernel-efi-application.pcrlock.d/linux-"$n".pcrlock \
-		    /boot/efi/"$i"
+		    "${boot_root}/$i"
 	done < <(jq --raw-output 'map(.linux) | unique | .[]' "$entryfile")
 
 	# Join the cmdline and the initrd in a single component
@@ -1188,7 +1190,7 @@ generate_tpm2_predictions_pcrlock()
 		run_log /usr/lib/systemd/systemd-pcrlock \
 		    lock-kernel-initrd \
 		    --pcrlock=$tmpdir/initrd-"$n".pcrlock \
-		    /boot/efi/"$initrd"
+		    "${boot_root}/$initrd"
 		jq --slurp '{"records": [.[].records[0]]}' \
 		   $tmpdir/cmdline-"$n".pcrlock \
 		   $tmpdir/initrd-"$n".pcrlock \
@@ -1213,7 +1215,7 @@ generate_tpm2_predictions_pcrlock()
 
 	# Publish the assets in the ESP, so can be imported by
 	# dracut-pcr-signature
-	[ -e /var/lib/systemd/pcrlock.json ] && cp /var/lib/systemd/pcrlock.json /boot/efi/EFI/systemd
+	[ -e /var/lib/systemd/pcrlock.json ] && cp /var/lib/systemd/pcrlock.json "${boot_root}${sdboot_dst}"
 }
 
 # TODO: Maybe share this code outside
@@ -1223,8 +1225,12 @@ generate_tpm2_predictions_pcr_oracle()
 
 	[ -z "$pcrs" ] || rm -f /etc/systemd/tpm2-pcr-signature.json
 
-	for entry in "${boot_root}"/loader/entries/*.conf; do
-	    entry_id="$(basename "$entry")"
+	# Get the numbers for the last three snapshots
+	[ -s "$snapperfile" ] || update_snapper
+	local last_snapshots="$(jq --raw-output '.root | map(.number) | reverse | .[0:3] | map(select(. > 0)) | join("|")' "$snapperfile")"
+	update_entries_for_snapshot "(:?${last_snapshots})"
+
+	while read -r entry; do
 	    if ! pcr-oracle \
 		 --private-key /etc/systemd/tpm2-pcr-private-key.pem \
 		 --from eventlog \
@@ -1234,12 +1240,12 @@ generate_tpm2_predictions_pcr_oracle()
 		 sign "$pcrs"; then
 		err "Failed to install TPM predictions for ${entry_id}"
 	    fi
-	done
+	done < <(jq --raw-output '.id' "$entryfile")
 
 	# Publish the assets in the ESP, so can be imported by
 	# dracut-pcr-signature
-	cp /etc/systemd/tpm2-pcr-public-key.pem /boot/efi/EFI/systemd
-	[ -e /etc/systemd/tpm2-pcr-signature.json ] && cp /etc/systemd/tpm2-pcr-signature.json /boot/efi/EFI/systemd
+	cp /etc/systemd/tpm2-pcr-public-key.pem "${boot_root}${sdboot_dst}"
+	[ -e /etc/systemd/tpm2-pcr-signature.json ] && cp /etc/systemd/tpm2-pcr-signature.json "${boot_root}${sdboot_dst}"
 }
 
 
