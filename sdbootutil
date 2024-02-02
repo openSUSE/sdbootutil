@@ -22,6 +22,9 @@ arg_no_reuse_initrd=
 # for x in vmlinuz image vmlinux linux bzImage uImage Image zImage; do
 image=
 
+# State file for transactional systems
+state_file="/var/lib/misc/transactional-update.state"
+
 update_predictions=
 
 rollback=()
@@ -1112,6 +1115,12 @@ run_log()
 }
 
 # TODO: Maybe share this code outside
+info_log()
+{
+	logger -t sdbootutil "$@"
+}
+
+# TODO: Maybe share this code outside
 is_pcrlock() {
 	[ -e /usr/lib/systemd/systemd-pcrlock ]
 }
@@ -1124,14 +1133,68 @@ is_pcr_oracle() {
 }
 
 # TODO: Maybe share this code outside
+prepare_entries()
+{
+	# Get the numbers for the last three snapshots
+	[ -s "$snapperfile" ] || update_snapper
+
+	# Select the default and the active snapshots
+	local snapshots="$(jq --raw-output '.root | map(select(.active==true or .default==true)) | map(.number) | join("|")' "$snapperfile")"
+
+	if is_transactional && [ -e "${state_file}" ]; then
+	    . "${state_file}"
+	    [ -z "${LAST_WORKING_SNAPSHOTS}" ] || snapshots="$snapshots|${LAST_WORKING_SNAPSHOTS// /}"
+	fi
+
+	info_log "Creating predictions for snapshots: ${snapshots//|/,}"
+
+	update_entries_for_snapshot "(:?$snapshots)"
+}
+
+# TODO: Maybe share this code outside
+pcrlock_cmdline_initrd() {
+	local cmdline="$1"
+	local initrd="$2"
+	local suffix="$3"
+
+	# 710-kernel-cmdline-initrd-entry.pcrlock.d is not part of the
+	# pcrlock standards
+	echo "$cmdline" > "$tmpdir/cmdline"
+	run_log /usr/lib/systemd/systemd-pcrlock \
+		lock-kernel-cmdline \
+		--pcrlock="$tmpdir/cmdline.pcrlock" \
+		"$tmpdir/cmdline"
+	run_log /usr/lib/systemd/systemd-pcrlock \
+		lock-kernel-initrd \
+		--pcrlock="$tmpdir/initrd.pcrlock" \
+		"${boot_root}/$initrd"
+	jq --slurp '{"records": [.[].records[0]]}' \
+	   "$tmpdir/cmdline.pcrlock" \
+	   "$tmpdir/initrd.pcrlock" \
+	   > "/var/lib/pcrlock.d/710-kernel-cmdline-initrd-entry.pcrlock.d/cmdline-initrd-$suffix.pcrlock"
+	rm "$tmpdir/cmdline"
+	rm "$tmpdir/cmdline.pcrlock"
+	rm "$tmpdir/initrd.pcrlock"
+
+	# 710-kernel-cmdline-boot-loader.pcrlock.d is not part of the
+	# pcrlock standards
+	echo -ne "$cmdline\0" > "$tmpdir/cmdline"
+	iconv -t UTF-16LE -o "$tmpdir/cmdline.utf16" "$tmpdir/cmdline"
+	run_log /usr/lib/systemd/systemd-pcrlock \
+		lock-raw \
+		--pcr=12 \
+		--pcrlock="/var/lib/pcrlock.d/710-kernel-cmdline-boot-loader.pcrlock.d/cmdline-$suffix.pcrlock" \
+		"$tmpdir/cmdline.utf16"
+	rm "$tmpdir/cmdline.utf16"
+}
+
+# TODO: Maybe share this code outside
 generate_tpm2_predictions_pcrlock()
 {
 	local pcrs="$1"
 
-	# Get the numbers for the last three snapshots
-	[ -s "$snapperfile" ] || update_snapper
-	local last_snapshots="$(jq --raw-output '.root | map(.number) | reverse | .[0:3] | map(select(. > 0)) | join("|")' "$snapperfile")"
-	update_entries_for_snapshot "(:?${last_snapshots})"
+	# Select the affected entries
+	prepare_entries
 
 	# Remove all the generated measurements.  This will keep the
 	# predictions at minimum and decrease the combinations
@@ -1180,36 +1243,20 @@ generate_tpm2_predictions_pcrlock()
 	while read -r cmdline; do
 		read -r initrd
 		n=$((n+1))
-		# 710-kernel-cmdline-initrd-entry.pcrlock.d is not
-		# part of the pcrlock standards
-		echo "initrd=$i" > "$tmpdir/cmdline"
-		run_log /usr/lib/systemd/systemd-pcrlock \
-		    lock-kernel-cmdline \
-		    --pcrlock="$tmpdir/cmdline-$n.pcrlock" \
-		    "$tmpdir/cmdline"
-		run_log /usr/lib/systemd/systemd-pcrlock \
-		    lock-kernel-initrd \
-		    --pcrlock="$tmpdir/initrd-$n.pcrlock" \
-		    "${boot_root}/$initrd"
-		jq --slurp '{"records": [.[].records[0]]}' \
-		   "$tmpdir/cmdline-$n.pcrlock" \
-		   "$tmpdir/initrd-$n.pcrlock" \
-		   > /var/lib/pcrlock.d/710-kernel-cmdline-initrd-entry.pcrlock.d/cmdline-initrd-"$n".pcrlock
-		rm "$tmpdir/cmdline"
-		rm "$tmpdir/cmdline-$n.pcrlock"
-		rm "$tmpdir/initrd-$n.pcrlock"
-
-		# 710-kernel-cmdline-boot-loader.pcrlock.d is not part
-		# of the pcrlock standards
-		echo -ne "initrd=$i\0" > "$tmpdir/cmdline"
-		iconv -t UTF-16LE -o "$tmpdir/cmdline.utf16" "$tmpdir/cmdline"
-		run_log /usr/lib/systemd/systemd-pcrlock \
-		    lock-raw \
-		    --pcr=12 \
-		    --pcrlock=/var/lib/pcrlock.d/710-kernel-cmdline-boot-loader.pcrlock.d/cmdline-"$n".pcrlock \
-		    "$tmpdir/cmdline.utf16"
-		rm "$tmpdir/cmdline.utf16"
+		pcrlock_cmdline_initrd "initrd=$cmdline" "$initrd" "$n"
 	done < <(jq --raw-output '.[] | ([(.initrd[0] | sub("/"; "\\"; "g")), .options] | join(" ")), .initrd[0]' "$entryfile")
+
+	# Generate variation for 710-kernel-cmdline-initrd-entry
+	# component that contains the current cmdline and the current
+	# initrd, even if this will never be used again.  This is
+	# required because disk-encryption-tool generates a new initrd
+	# during the first boot, making the event log impossible to
+	# align for systemd-pcrlock
+	if [ "$SDB_ADD_INITIAL_CMDLINE" = "1" ]; then
+		read -r cmdline < /proc/cmdline
+		local initrd="${cmdline#*initrd=}"; initrd="${initrd%% *}"; initrd="${initrd//\\//}"
+		pcrlock_cmdline_initrd "$cmdline" "$initrd" "0"
+	fi
 
 	run_log /usr/lib/systemd/systemd-pcrlock --pcr="$pcrs" make-policy
 
@@ -1225,10 +1272,8 @@ generate_tpm2_predictions_pcr_oracle()
 
 	[ -z "$pcrs" ] || rm -f /etc/systemd/tpm2-pcr-signature.json
 
-	# Get the numbers for the last three snapshots
-	[ -s "$snapperfile" ] || update_snapper
-	local last_snapshots="$(jq --raw-output '.root | map(.number) | reverse | .[0:3] | map(select(. > 0)) | join("|")' "$snapperfile")"
-	update_entries_for_snapshot "(:?${last_snapshots})"
+	# Select the affected entries
+	prepare_entries
 
 	while read -r entry; do
 	    if ! pcr-oracle \
