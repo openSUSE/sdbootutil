@@ -1182,33 +1182,33 @@ generate_tpm2_predictions_pcrlock()
 		n=$((n+1))
 		# 710-kernel-cmdline-initrd-entry.pcrlock.d is not
 		# part of the pcrlock standards
-		echo "initrd=$i" > $tmpdir/cmdline
+		echo "initrd=$i" > "$tmpdir/cmdline"
 		run_log /usr/lib/systemd/systemd-pcrlock \
 		    lock-kernel-cmdline \
-		    --pcrlock=$tmpdir/cmdline-"$n".pcrlock \
-		    $tmpdir/cmdline
+		    --pcrlock="$tmpdir/cmdline-$n.pcrlock" \
+		    "$tmpdir/cmdline"
 		run_log /usr/lib/systemd/systemd-pcrlock \
 		    lock-kernel-initrd \
-		    --pcrlock=$tmpdir/initrd-"$n".pcrlock \
+		    --pcrlock="$tmpdir/initrd-$n.pcrlock" \
 		    "${boot_root}/$initrd"
 		jq --slurp '{"records": [.[].records[0]]}' \
-		   $tmpdir/cmdline-"$n".pcrlock \
-		   $tmpdir/initrd-"$n".pcrlock \
+		   "$tmpdir/cmdline-$n.pcrlock" \
+		   "$tmpdir/initrd-$n.pcrlock" \
 		   > /var/lib/pcrlock.d/710-kernel-cmdline-initrd-entry.pcrlock.d/cmdline-initrd-"$n".pcrlock
-		rm $tmpdir/cmdline
-		rm $tmpdir/cmdline-"$n".pcrlock
-		rm $tmpdir/initrd-"$n".pcrlock
+		rm "$tmpdir/cmdline"
+		rm "$tmpdir/cmdline-$n.pcrlock"
+		rm "$tmpdir/initrd-$n.pcrlock"
 
 		# 710-kernel-cmdline-boot-loader.pcrlock.d is not part
 		# of the pcrlock standards
-		echo -ne "initrd=$i\0" > $tmpdir/cmdline
-		iconv -t UTF-16LE -o $tmpdir/cmdline.utf16 $tmpdir/cmdline
+		echo -ne "initrd=$i\0" > "$tmpdir/cmdline"
+		iconv -t UTF-16LE -o "$tmpdir/cmdline.utf16" "$tmpdir/cmdline"
 		run_log /usr/lib/systemd/systemd-pcrlock \
 		    lock-raw \
 		    --pcr=12 \
 		    --pcrlock=/var/lib/pcrlock.d/710-kernel-cmdline-boot-loader.pcrlock.d/cmdline-"$n".pcrlock \
-		    $tmpdir/cmdline.utf16
-		rm $tmpdir/cmdline.utf16
+		    "$tmpdir/cmdline.utf16"
+		rm "$tmpdir/cmdline.utf16"
 	done < <(jq --raw-output '.[] | ([(.initrd[0] | sub("/"; "\\"; "g")), .options] | join(" ")), .initrd[0]' "$entryfile")
 
 	run_log /usr/lib/systemd/systemd-pcrlock --pcr="$pcrs" make-policy
