@@ -84,6 +84,12 @@ helpandquit()
 		bootloader [SNAPSHOT]
 			   Print the detected bootloader
 
+		add-uki VERSION [SNAPSHOT]
+			   Create boot entry for uki with specified kernel version
+
+		remove-uki VERSION [SNAPSHOT]
+			   Remove boot entry for uki with specified kernel version
+
 		add-kernel VERSION [SNAPSHOT]
 			   Create boot entry for specified kernel
 
@@ -658,6 +664,75 @@ make_free_space()
 
 	free_space="$(boot_free_space)"
 	[ "$total_size" -lt "$free_space" ]
+}
+
+install_uki() 
+{
+	local subvol="$1"
+	local kernel_version="$2" # Same as kernel version
+	local src="${subvol#${subvol_prefix}}/lib/modules/$kernel_version/uki.efi"
+	test -e "$src" || err "Can't find $src"
+
+	# According uapi group, uki name should contain version.
+    local uki_version=
+	uki_version="$(echo "$src" \
+	| sed 's/.*-\([0-9\.][0-9\.]*\).*/\1/' \
+	| sed 's/\.$//')"
+	if [ -z "$uki_version" ]; then
+	    warn "No version found for uki $image"
+	fi
+
+	calc_chksum "$src"
+	local dst="/$entry_token/$kernel_version/uki-$chksum"
+
+	# XXX: fix calling with snapshot instead of subvol
+	local snapshot="${subvol#${subvol_prefix}/.snapshots/}"
+	snapshot="${snapshot%/snapshot}"
+
+	mkdir -p "$boot_root${dst%/*}"
+
+	title="${os_release_PRETTY_NAME:-Linux $kernel_version}"
+	[ -z "$uki_version" ] || title="$title (UKI $uki_version)"
+	[ -n "$os_release_VERSION" ] || title="$title $os_release_VERSION_ID"
+
+	if ! is_transactional  && subvol_is_ro "$subvol"; then
+		set_snapper_title_and_sortkey "$snapshot"
+	fi
+
+	local entry_machine_id=
+	[ "$entry_token" = "$machine_id" ] && entry_machine_id="$machine_id"
+
+	cat > "$tmpdir/entry.conf" <<-EOF
+	# Boot Loader Specification type#1 entry
+	title      $title
+	efi        $dst
+	version    $snapshot@${uki_version+$uki_version-k}$kernel_version
+	EOF
+
+	local failed=
+	if [ ! -e "$boot_root$dst" ]; then
+		install_with_rollback "$src" "$boot_root$dst" || failed=kernel
+	fi
+	if [ -z "$failed" ]; then
+		loader_entry="$boot_root/loader/entries/$entry_token-uki-$kernel_version-$snapshot.conf"
+		install_with_rollback "$tmpdir/entry.conf" "$loader_entry" || failed="bootloader entry"
+	fi
+
+	rm -f "$tmpdir/entry.conf"
+	[ -z "$failed" ] || err "Failed to install $failed"
+	reset_rollback
+
+	# This action will require to update the PCR predictions
+	update_predictions=1
+}
+
+remove_uki() {
+	local subvol="$1"
+	local kernel_version="$2"
+	local snapshot="${subvol#${subvol_prefix}/.snapshots/}"
+	snapshot="${snapshot%/*}"
+	local id="$entry_token-uki-$kernel_version-$snapshot.conf"
+	run_command_output bootctl unlink "$id"
 }
 
 install_kernel()
@@ -2044,7 +2119,7 @@ if [ -z "$SYSTEMD_LOG_LEVEL" -a -n "$verbose" ]; then
 fi
 
 case "$1" in
-	install|needs-update|update|force-update|add-kernel|remove-kernel|set-default-snapshot|add-all-kernels|mkinitrd|remove-all-kernels|is-installed|list-snapshots|list-entries|list-kernels|show-entry|is-bootable|update-predictions|bootloader) ;;
+	install|needs-update|update|force-update|add-uki|remove-uki|add-kernel|remove-kernel|set-default-snapshot|add-all-kernels|mkinitrd|remove-all-kernels|is-installed|list-snapshots|list-entries|list-kernels|show-entry|is-bootable|update-predictions|bootloader) ;;
 	kernels|snapshots|entries|"") stty_size; interactive=1 ;;
 	*) err "unknown command $1" ;;
 esac
@@ -2108,6 +2183,10 @@ elif [ "$1" = "force-update" ]; then
 	if is_installed; then install_bootloader "${2:-$root_snapshot}"; else :; fi
 elif [ "$1" = "bootloader" ]; then
 	bootloader_name "${2:-$root_snapshot}"
+elif [ "$1" = "add-uki" ]; then
+	install_uki "${3:-$root_subvol}" "$2"
+elif [ "$1" = "remove-uki" ]; then
+	remove_uki "${3:-$root_subvol}" "$2"
 elif [ "$1" = "add-kernel" ]; then
 	install_kernel "${3:-$root_snapshot}" "$2"
 elif [ "$1" = "add-all-kernels" ]; then
