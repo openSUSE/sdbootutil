@@ -397,7 +397,7 @@ install_kernel()
 		local snapshot_dir="/.snapshots/$snapshot/snapshot"
 		local dracut_args=()
 		if [ "$subvol" != "$root_subvol" ]; then
-			dracut_args=('--sysroot' "${snapshot_dir}" '--tmpdir' '/var/tmp')
+			dracut_args=('--sysroot' "${snapshot_dir}" '--tmpdir' '/var/tmp' '--add-device' "$root_device")
 		fi
 		log_info "generating new initrd"
 
@@ -1389,7 +1389,7 @@ done
 
 # XXX: bootctl should have json output for that too
 eval "$(bootctl 2>/dev/null | sed -ne 's/Firmware Arch: *\(\w\+\)/firmware_arch="\1"/p;s/ *token: *\(\w\+\)/entry_token="\1"/p;s, *\$BOOT: *\([^ ]\+\).*,boot_root="\1",p')"
-root_uuid=$(findmnt / -r -n -o UUID)
+read -r root_uuid root_device < <(findmnt / -v -r -n -o UUID,SOURCE)
 root_subvol=$(btrfs subvol show / 2>/dev/null|head -1)
 subvol_prefix="${root_subvol%/.snapshots/*}"
 [ -s /etc/machine-id ] && read -r machine_id < /etc/machine-id
@@ -1403,6 +1403,7 @@ settle_entry_token
 [ -n "$boot_root" ] || err "No ESP detected. Legacy system?"
 [ -n "$root_uuid" ] || err "Can't determine root UUID"
 [ -n "$root_subvol" ] || err "Can't determine root subvolume"
+[ -n "$root_device" ] || err "Can't determine root device"
 [ -n "$entry_token" ] || err "No entry token. sd-boot not installed?"
 [ -n "$firmware_arch" ] || err "Can't determine firmware arch"
 case "$firmware_arch" in
