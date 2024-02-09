@@ -25,7 +25,7 @@ case "$COMMAND" in
 		;;
 	add)
 		if [ "${KERNEL_IMAGE#/usr/lib/modules/$KERNEL_VERSION}" = "$KERNEL_IMAGE" ]; then
-			echo "Unupported kernel location $KERNEL_IMAGE" >&2
+			echo "Unsupported kernel location $KERNEL_IMAGE" >&2
 			exit 1
 		fi
 		exec /usr/bin/sdbootutil "${args[@]}" 'add-kernel' "$KERNEL_VERSION"
