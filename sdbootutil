@@ -1153,22 +1153,34 @@ is_pcr_oracle() {
 }
 
 # TODO: Maybe share this code outside
-prepare_entries()
+select_entries_for_prediction()
 {
 	# Get the numbers for the last three snapshots
 	[ -s "$snapperfile" ] || update_snapper
 
 	# Select the default and the active snapshots
-	local snapshots="$(jq --raw-output '.root | map(select(.active==true or .default==true)) | map(.number) | join("|")' "$snapperfile")"
+	declare -A snapshots
+	local id
+	while read -r id; do
+	    snapshots[$id]=1
+	done < <(jq -r '.root[]|select(.active==true or .default==true)|.number' "$snapperfile")
 
 	if is_transactional && [ -e "${state_file}" ]; then
 	    . "${state_file}"
-	    [ -z "${LAST_WORKING_SNAPSHOTS}" ] || snapshots="$snapshots|${LAST_WORKING_SNAPSHOTS// /}"
+	    for id in $LAST_WORKING_SNAPSHOTS; do
+		snapshots[$id]=1
+	    done
 	fi
 
-	info_log "Creating predictions for snapshots: ${snapshots//|/,}"
+	info_log "Creating predictions for snapshots: ${!snapshots[*]}"
+	local re
+	if [ "${#snapshots[@]}" = 1 ]; then
+	    re="${!snapshots[*]}"
+	else
+	    IFS='|' eval re='"(:?${!snapshots[*]})"'
+	fi
 
-	update_entries_for_snapshot "(:?$snapshots)"
+	update_entries_for_snapshot "$re"
 }
 
 # TODO: Maybe share this code outside
@@ -1214,7 +1226,7 @@ generate_tpm2_predictions_pcrlock()
 	local pcrs="$1"
 
 	# Select the affected entries
-	prepare_entries
+	select_entries_for_prediction
 
 	# Remove all the generated measurements.  This will keep the
 	# predictions at minimum and decrease the combinations
@@ -1285,27 +1297,47 @@ generate_tpm2_predictions_pcrlock()
 	[ -e /var/lib/systemd/pcrlock.json ] && cp /var/lib/systemd/pcrlock.json "${boot_root}${sdboot_dst}"
 }
 
+get_pcrs() {
+	local pcrs
+	local jq_pcr='.tokens[]|select(.type == "systemd-tpm2")|."tpm2_pubkey_pcrs"|join(",")'
+	# We can have multiple devices, each one of them with
+	# different PCRs
+	while read -r dev; do
+		pcrs=$(cryptsetup luksDump --dump-json-metadata "$dev" | jq -r "$jq_pcr")
+		[ -z "$pcrs" ] || echo "$pcrs"
+	done <<<$(blkid -t TYPE=crypto_LUKS -o device)
+}
+
 # TODO: Maybe share this code outside
 generate_tpm2_predictions_pcr_oracle()
 {
-	local pcrs="$1"
-
-	[ -z "$pcrs" ] || rm -f /etc/systemd/tpm2-pcr-signature.json
+	local entry
+	local all_pcrs
 
 	# Select the affected entries
-	prepare_entries
+	select_entries_for_prediction
 
-	while read -r entry; do
-	    if ! pcr-oracle \
-		 --private-key /etc/systemd/tpm2-pcr-private-key.pem \
-		 --from eventlog \
-		 --output /etc/systemd/tpm2-pcr-signature.json \
-		 --target-platform=systemd \
-		 --boot-entry "${entry_id}" \
-		 sign "$pcrs"; then
-		err "Failed to install TPM predictions for ${entry_id}"
-	    fi
-	done < <(jq --raw-output '.id' "$entryfile")
+	all_pcrs=$(get_pcrs)
+	[ -z "$all_pcrs" ] || rm -f /etc/systemd/tpm2-pcr-signature.json
+
+	# We make as many predictions as |all_pcrs| * |entries| to
+	# cover all the combinations.  pcr-oracle is smart to include
+	# the entry only one time, so we will not have duplications.
+	# This is a step for multi device configurations.
+	for pcrs in $all_pcrs; do
+		while read -r entry; do
+			log_info "Generate prediction for $entry with PCRs $pcrs"
+			if ! pcr-oracle \
+				--private-key /etc/systemd/tpm2-pcr-private-key.pem \
+				--from eventlog \
+				--output /etc/systemd/tpm2-pcr-signature.json \
+				--target-platform=systemd \
+				--boot-entry "${entry}" \
+				sign "$pcrs"; then
+				err "Failed to install TPM predictions for ${entry_id}"
+			fi
+		done < <(jq -r '.[]|.id' "$entryfile")
+	done
 
 	# Publish the assets in the ESP, so can be imported by
 	# dracut-pcr-signature
@@ -1331,7 +1363,7 @@ generate_tpm2_predictions()
 	if is_pcrlock; then
 		generate_tpm2_predictions_pcrlock "${FDE_SEAL_PCR_LIST}"
 	elif is_pcr_oracle; then
-		generate_tpm2_predictions_pcr_oracle "${FDE_SEAL_PCR_LIST}"
+		generate_tpm2_predictions_pcr_oracle
 	fi
 }
 
