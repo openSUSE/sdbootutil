@@ -19,6 +19,7 @@ arg_arch=
 arg_all_entries=
 arg_no_variables=
 arg_no_reuse_initrd=
+arg_no_random_seed=
 # for x in vmlinuz image vmlinux linux bzImage uImage Image zImage; do
 image=
 
@@ -1064,6 +1065,7 @@ hex_to_binary()
 
 update_random_seed()
 {
+	[ -z "$arg_no_random_seed" ] || return 0
 	local s _p
 	read -r s _p < <({ dd if=/dev/urandom bs=32 count=1 status=none; [ -e "$boot_root/loader/random-seed" ] && dd if="$boot_root/loader/random-seed" bs=32 count=1 status=none; } | sha256sum)
 	[ "${#s}" = 64 ] || { warn "Invalid random seed"; return 0; }
@@ -1385,7 +1387,7 @@ main_menu()
 
 ####### main #######
 
-getopttmp=$(getopt -o hc:v --long help,flicker,verbose,esp-path:,entry-token:,arch:,image:,no-variables,no-reuse-initrd,all -n "${0##*/}" -- "$@")
+getopttmp=$(getopt -o hc:v --long help,flicker,verbose,esp-path:,entry-token:,arch:,image:,no-variables,no-reuse-initrd,no-random-seed,all -n "${0##*/}" -- "$@")
 eval set -- "$getopttmp"
 
 while true ; do
@@ -1399,6 +1401,7 @@ while true ; do
 		--image) image="$2"; shift 2 ;;
 		--no-variables) arg_no_variables=1; shift ;;
 		--no-reuse-initrd) arg_no_reuse_initrd=1; shift ;;
+		--no-random-seed) arg_no_random_seed=1; shift ;;
 		--all) arg_all_entries=1; shift ;;
                 --) shift ; break ;;
                 *) echo "Internal error!" ; exit 1 ;;
