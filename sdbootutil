@@ -1138,7 +1138,7 @@ set_default_snapshot()
 }
 
 # TODO: Maybe share this code outside
-is_pcrlock() {
+have_pcrlock() {
 	[ -e /usr/lib/systemd/systemd-pcrlock ]
 }
 
@@ -1352,15 +1352,10 @@ generate_tpm2_predictions()
 
 	. /etc/sysconfig/fde-tools
 
-	if is_pcrlock && is_pcr_oracle; then
-		echo "pcrlock and signed policies are mutually exclusive, remove one set of files to continue"
-		return 0
-	fi
-
-	if is_pcrlock; then
-		generate_tpm2_predictions_pcrlock "${FDE_SEAL_PCR_LIST}"
-	elif is_pcr_oracle; then
+	if is_pcr_oracle; then
 		generate_tpm2_predictions_pcr_oracle
+	elif have_pcrlock; then
+		generate_tpm2_predictions_pcrlock "${FDE_SEAL_PCR_LIST}"
 	fi
 }
 
