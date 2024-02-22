@@ -1235,8 +1235,8 @@ generate_tpm2_predictions_pcrlock()
 	# for the policy generation, and for the authority is planned
 	/usr/lib/systemd/systemd-pcrlock lock-secureboot-policy || true
 	/usr/lib/systemd/systemd-pcrlock lock-secureboot-authority || true
-	# TODO: what drive should be here?
-	# /usr/lib/systemd/systemd-pcrlock lock-gpt "$drive"
+	# uses / by default
+	/usr/lib/systemd/systemd-pcrlock lock-gpt
 
 	# 630-shim-efi-application is not part of the pcrlock standards
 	# TODO: move to shim-pcrlock.rpm
@@ -1253,6 +1253,13 @@ generate_tpm2_predictions_pcrlock()
 	    lock-pe \
 	    --pcrlock=/var/lib/pcrlock.d/640-boot-loader-efi-application.pcrlock.d/generated.pcrlock \
 	    "${boot_root}${sdboot_dst}/grub.efi"
+
+	if [ -e "$boot_root/loader/loader.conf" ]; then
+		/usr/lib/systemd/systemd-pcrlock \
+			lock-raw /boot/efi/loader/loader.conf \
+			--pcr=5 \
+			--pcrlock=/var/lib/pcrlock.d/641-sdboot-loader-conf.pcrlock
+	fi
 
 	# 650-kernel-efi-application.pcrlock is not part of the
 	# pcrlock standards
