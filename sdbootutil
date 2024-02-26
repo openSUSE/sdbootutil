@@ -1322,7 +1322,12 @@ generate_tpm2_predictions_pcr_oracle()
 	select_entries_for_prediction
 
 	all_pcrs=$(get_pcrs)
-	[ -z "$all_pcrs" ] || rm -f /etc/systemd/tpm2-pcr-signature.json
+	if [ -z "$all_pcrs" ]; then
+		warn "PCR Oracle configured but not enrolled in any LUKS header"
+		return 0
+	fi
+
+	rm -f /etc/systemd/tpm2-pcr-signature.json
 
 	# We make as many predictions as |all_pcrs| * |entries| to
 	# cover all the combinations.  pcr-oracle is smart to include
@@ -1360,13 +1365,13 @@ generate_tpm2_predictions()
 {
 	[ -e /etc/crypttab ] || return 0
 	grep -q "tpm2-device" /etc/crypttab || return 0
-	[ -e /etc/sysconfig/fde-tools ] || return 0
-
-	. /etc/sysconfig/fde-tools
 
 	if is_pcr_oracle; then
 		generate_tpm2_predictions_pcr_oracle
 	elif have_pcrlock; then
+		[ -e /etc/sysconfig/fde-tools ] || return 0
+		. /etc/sysconfig/fde-tools
+
 		generate_tpm2_predictions_pcrlock "${FDE_SEAL_PCR_LIST}"
 	fi
 }
