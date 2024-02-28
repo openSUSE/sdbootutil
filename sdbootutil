@@ -284,6 +284,47 @@ sedrootflags()
 	sed "${sed_arguments[@]}"
 }
 
+entry_filter=("cat")
+update_entries()
+{
+	[ -z "$1" ] || entry_filter=("$@")
+	bootctl list --json=short | "${entry_filter[@]}" > "$entryfile"
+}
+
+update_entries_for_subvol()
+{
+	local subvol="$1"
+	update_entries jq "[.[]|select(has(\"options\"))|select(.options|match(\"root=UUID=$root_uuid .*rootflags=subvol=$subvol\"))]"
+}
+
+update_entries_for_snapshot()
+{
+	local n="$1"
+	update_entries_for_subvol "${subvol_prefix}/.snapshots/$n/snapshot"
+}
+
+update_entries_for_this_system()
+{
+	update_entries jq "[.[]|select(has(\"options\"))|select(.options|match(\"root=UUID=$root_uuid\"))]"
+}
+
+find_conf_file() {
+	local kernel_version="${1:?}"
+	local snapshot="$2"
+	local id="$entry_token-$kernel_version${snapshot:+-$snapshot}.conf"
+
+	update_entries_for_snapshot "$snapshot"
+
+	while IFS= read -r path; do
+		if [ -f "$path" ]; then
+			echo "$path"
+			return 0
+		fi
+	done < <(jq -r --arg id "$id" '.[] | select(.id == $id) | .path' < "$entryfile")
+
+	return 1
+}
+
 remove_kernel()
 {
 	local snapshot="$1"
@@ -315,7 +356,7 @@ install_with_rollback()
 
 update_snapper()
 {
-    snapper --jsonout --no-dbus list --disable-used-space > "$snapperfile"
+	snapper --jsonout --no-dbus list --disable-used-space > "$snapperfile"
 }
 
 set_snapper_title_and_sortkey()
@@ -349,13 +390,26 @@ set_snapper_title_and_sortkey()
 reuse_initrd() {
 	local snapshot="$1"
 	local subvol="$2"
+	local kernel_version="${3:?}"
+	local conf
 
 	[ -z "$arg_no_reuse_initrd" ] || return 1
 
-	local conf="$boot_root/loader/entries/$entry_token-$kernel_version-$snapshot.conf"
-	if [ -e "$conf" ]; then
-		local k
-		local v
+	conf="$(find_conf_file "$kernel_version" "${snapshot}")"
+	local find_conf_status=$?
+
+	if [ $find_conf_status -ne 0 ]; then
+		# check if we can reuse the initrd from the parent
+		# to avoid expensive regeneration
+		detect_parent "$subvol"
+		if [ -n "$parent_subvol" ]; then
+			conf="$(find_conf_file "$kernel_version" "$parent_snapshot")"
+			find_conf_status=$?
+		fi
+	fi
+
+	if [ "$find_conf_status" -eq 0 ]; then
+		local k v
 		while read -r k v; do
 			[ "$k" = 'initrd' ] || continue
 			log_info "found existing initrd $v"
@@ -363,23 +417,6 @@ reuse_initrd() {
 		done < "$conf"
 		[ -z "$dstinitrd" ] || return 0
 	fi
-
-	# check if we can reuse the initrd from the parent
-	# to avoid expensive regeneration
-	detect_parent "$subvol"
-	local parent_conf="$boot_root/loader/entries/$entry_token-$kernel_version-$parent_snapshot.conf"
-	if [ -n "$parent_subvol" ] && [ -e "$parent_conf" ]; then
-		#subvol_is_ro "$parent_subvol" || err "Parent snapshot $parent_snapshot is not read-only, can't reuse initrd"
-		local k
-		local v
-		while read -r k v; do
-			[ "$k" = 'initrd' ] || continue
-			log_info "found parent initrd $v"
-			dstinitrd+=("$v")
-		done < "$parent_conf"
-		[ -z "$dstinitrd" ] || return 0
-	fi
-
 	return 1
 }
 
@@ -441,7 +478,7 @@ install_kernel()
 			((++i))
 		done
 		/usr/bin/mkmoduleinitrd "${subvol#"${subvol_prefix}"}" "$kernel_version" "$tmpdir/initrd-$i"
-	elif ! reuse_initrd "$snapshot" "$subvol"; then
+	elif ! reuse_initrd "$snapshot" "$subvol" "$kernel_version"; then
 		local snapshot_dir="/.snapshots/$snapshot/snapshot"
 		local dracut_args=()
 		dracut_args=('--force' '--tmpdir' '/var/tmp')
@@ -518,7 +555,16 @@ install_kernel()
 		done
 	fi
 	if [ -z "$failed" ]; then
-		loader_entry="$boot_root/loader/entries/$entry_token-$kernel_version${snapshot:+-$snapshot}.conf"
+		local tries
+		if [ -f /etc/kernel/tries ]; then
+			read -r tries < /etc/kernel/tries
+		fi
+
+		if ! [[ "$tries" =~ ^[0-9]+$ ]]; then
+			tries=
+		fi
+
+		loader_entry="$boot_root/loader/entries/$entry_token-$kernel_version${snapshot:+-$snapshot}${tries:++$tries}.conf"
 		install_with_rollback "$tmpdir/entry.conf" "$loader_entry" || failed="bootloader entry"
 		rm -f "$tmpdir/entry.conf"
 	fi
@@ -548,30 +594,6 @@ remove_all_kernels()
 		remove_kernel "${snapshot}" "$kv"
 	done
 
-}
-
-entry_filter=("cat")
-update_entries()
-{
-	[ -z "$1" ] || entry_filter=("$@")
-	bootctl list --json=short | "${entry_filter[@]}" > "$entryfile"
-}
-
-update_entries_for_subvol()
-{
-	local subvol="$1"
-	update_entries jq "[.[]|select(has(\"options\"))|select(.options|match(\"root=UUID=$root_uuid .*rootflags=subvol=$subvol\"))]"
-}
-
-update_entries_for_snapshot()
-{
-	local n="$1"
-	update_entries_for_subvol "${subvol_prefix}/.snapshots/$n/snapshot"
-}
-
-update_entries_for_this_system()
-{
-	update_entries jq "[.[]|select(has(\"options\"))|select(.options|match(\"root=UUID=$root_uuid\"))]"
 }
 
 list_entries()
