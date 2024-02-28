@@ -363,6 +363,12 @@ umount_etc()
 	umount "${snapshot_dir}/etc"
 }
 
+add_version_to_title()
+{
+	# TW pretty name does not include the version
+	[ -n "$os_release_VERSION" ] || title="$title $os_release_VERSION_ID"
+}
+
 install_kernel()
 {
 	local subvol="$1"
@@ -429,12 +435,13 @@ install_kernel()
 	fi
 
 	title="${os_release_PRETTY_NAME:-Linux $kernel_version}"
-	# TW pretty name does not include the version
-	[ -n "$os_release_VERSION" ] || title="$title $os_release_VERSION_ID"
 	# shellcheck disable=SC2154
 	sort_key="$os_release_ID"
 
-	if ! is_transactional  && subvol_is_ro "$subvol"; then
+	if is_transactional; then
+		add_version_to_title
+	elif subvol_is_ro "$subvol"; then
+		add_version_to_title
 		set_snapper_title_and_sortkey "$snapshot"
 	fi
 
