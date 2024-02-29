@@ -671,6 +671,9 @@ install_uki()
 	local subvol="$1"
 	local kernel_version="$2" # Same as kernel version
 	local src="${subvol#${subvol_prefix}}/lib/modules/$kernel_version/uki.efi"
+    if [ "$image" = "vmlinuz" ] || [ "$image" = "Image" ]; then
+        err "When adding UKI provide the uki image name \"--image\""
+    fi
 	test -e "$src" || err "Can't find $src"
 
 	# According uapi group, uki name should contain version.
