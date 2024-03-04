@@ -67,13 +67,13 @@ helpandquit()
 		  -h, --help		This screen
 
 		COMMAND:
-		add-kernel VERSION [SUBVOL]
+		add-kernel VERSION [SNAPSHOT]
 			   Create boot entry for specified kernel
 
 		add-all-kernels [SNAPSHOT]
 			   Create boot entries for all kernels in SNAPSHOT
 
-		remove-kernel VERSION [SUBVOL]
+		remove-kernel VERSION [SNAPSHOT]
 			   Remove boot entry for specified kernel
 
 		remove-all-kernels [SNAPSHOT]
@@ -242,10 +242,9 @@ sedrootflags()
 
 remove_kernel()
 {
-	local subvol="$1"
+	local snapshot="${1:?}"
+	local subvol="${subvol_prefix}/.snapshots/${snapshot}/snapshot"
 	local kernel_version="$2"
-	local snapshot="${subvol#${subvol_prefix}/.snapshots/}"
-	snapshot="${snapshot%/*}"
 	local id="$entry_token-$kernel_version-$snapshot.conf"
 	run_command_output bootctl unlink "$id"
 
@@ -365,7 +364,8 @@ umount_etc()
 
 install_kernel()
 {
-	local subvol="$1"
+	local snapshot="${1:?}"
+	local subvol="${subvol_prefix}/.snapshots/${snapshot}/snapshot"
 	local kernel_version="$2"
 	local initrd=()
 	local dstinitrd=()
@@ -375,10 +375,6 @@ install_kernel()
 
 	calc_chksum "$src"
 	local dst="/$entry_token/$kernel_version/linux-$chksum"
-
-	# XXX: fix calling with snapshot instead of subvol
-	local snapshot="${subvol#${subvol_prefix}/.snapshots/}"
-	snapshot="${snapshot%/snapshot}"
 
 	local initrd="${src%/*}/initrd"
 
@@ -482,21 +478,21 @@ install_kernel()
 
 install_all_kernels()
 {
-	local subvol="${subvol_prefix}/.snapshots/${1:?}/snapshot"
-	find_kernels "$subvol"
+	local snapshot="${1:?}"
+	find_kernels "$snapshot"
 	for kv in "${!found_kernels[@]}"; do
 		log_info "installing $kv"
-		install_kernel "${subvol}" "$kv"
+		install_kernel "${snapshot}" "$kv"
 	done
 
 }
 
 remove_all_kernels()
 {
-	local subvol="${subvol_prefix}/.snapshots/${1:?}/snapshot"
-	find_kernels "$subvol"
+	local snapshot="${1:?}"
+	find_kernels "$snapshot"
 	for kv in "${!found_kernels[@]}"; do
-		remove_kernel "${subvol}" "$kv"
+		remove_kernel "${snapshot}" "$kv"
 	done
 
 }
@@ -774,7 +770,7 @@ calc_chksum() {
 declare -A found_kernels
 find_kernels()
 {
-	local subvol="${1:?}"
+	local subvol="${subvol_prefix}/.snapshots/${1:?}/snapshot"
 	local fn kv
 	found_kernels=()
 
@@ -851,6 +847,7 @@ is_bootable()
 
 show_kernels()
 {
+	local snapshot="${1:?}"
 	subvol="${subvol_prefix}/.snapshots/${1:?}/snapshot"
 	while true; do
 		update_kernels "$subvol"
@@ -910,7 +907,7 @@ show_kernels()
 					break # might have selected delete so refresh
 					;;
 				install)
-					install_kernel "$subvol" "$kv"
+					install_kernel "$snapshot" "$kv"
 					break
 					;;
 			esac
@@ -1459,11 +1456,11 @@ elif [ "$1" = "update" ]; then
 elif [ "$1" = "force-update" ]; then
 	if is_installed; then install_sdboot "${2:-$root_snapshot}"; else :; fi
 elif [ "$1" = "add-kernel" ]; then
-	install_kernel "${3:-$root_subvol}" "$2"
+	install_kernel "${3:-$root_snapshot}" "$2"
 elif [ "$1" = "add-all-kernels" ]; then
 	install_all_kernels "${2:-$root_snapshot}"
 elif [ "$1" = "remove-kernel" ]; then
-	remove_kernel "${3:-$root_subvol}" "$2"
+	remove_kernel "${3:-$root_snapshot}" "$2"
 elif [ "$1" = "remove-all-kernels" ]; then
 	remove_all_kernels "${2:-$root_snapshot}"
 elif [ "$1" = "set-default-snapshot" ]; then
