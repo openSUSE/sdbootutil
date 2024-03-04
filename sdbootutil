@@ -463,6 +463,7 @@ install_kernel()
 		while [ -e "$tmpdir/initrd-$i" ]; do
 			if [ ! -e "$boot_root${dstinitrd[$i]}" ]; then
 				install_with_rollback "$tmpdir/initrd-$i" "$boot_root${dstinitrd[$i]}" || { failed=initrd; break; }
+				rm -f "$tmpdir/initrd-$i"
 			fi
 			((++i))
 		done
@@ -470,9 +471,8 @@ install_kernel()
 	if [ -z "$failed" ]; then
 		loader_entry="$boot_root/loader/entries/$entry_token-$kernel_version-$snapshot.conf"
 		install_with_rollback "$tmpdir/entry.conf" "$loader_entry" || failed="bootloader entry"
+		rm -f "$tmpdir/entry.conf"
 	fi
-	rm -f "$tmpdir/initrd"
-	rm -f "$tmpdir/entry.conf"
 	[ -z "$failed" ] || err "Failed to install $failed"
 	reset_rollback
 
