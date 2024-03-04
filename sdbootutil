@@ -67,7 +67,10 @@ helpandquit()
 		  -h, --help		This screen
 
 		COMMAND:
-		add-kernel VERSION [SNAPSHOT]
+		bootloader
+			   Print the detected bootloader
+
+		add-kernel VERSION [[SNAPSHOT]
 			   Create boot entry for specified kernel
 
 		add-all-kernels [SNAPSHOT]
@@ -153,6 +156,25 @@ warn()
 	else
 		echo "Warning: $*" >&2
 	fi
+}
+
+is_sdboot()
+{
+	# If systemd-boot and grub2 are co-installed, we favor grub2
+	# in the detection
+	local sdboot grub2
+	sdboot="$(find_sdboot)"
+	grub2="$(find_grub2)"
+	[ -e "$sdboot" ] && [ ! -e "$grub2" ]
+}
+
+is_grub2()
+{
+	# If systemd-boot and grub2 are co-installed, we favor grub2
+	# in the detection
+	local grub2
+	grub2="$(find_grub2)"
+	[ -e "$grub2" ]
 }
 
 reset_rollback()
@@ -956,8 +978,15 @@ find_sdboot()
 	# systemd-boot from a separate package
 	local sdboot="$prefix/usr/lib/systemd-boot/systemd-boot$firmware_arch.efi"
 	[ -e "$sdboot" ] || sdboot="$prefix/usr/lib/systemd/boot/efi/systemd-boot$firmware_arch.efi"
-	[ -e "$sdboot" ] || err "missing $sdboot"
 	echo "$sdboot"
+}
+
+find_grub2()
+{
+	local prefix="/.snapshots/${1-$root_snapshot}/snapshot"
+	local grub2="$prefix/usr/share/efi/$(uname -m)/grub.efi"
+	[ -e "$grub2" ] || grub2="$prefix/usr/share/grub2/$(uname -m)-efi/grub.efi"
+	echo "$grub2"
 }
 
 sdboot_needs_update()
@@ -1381,6 +1410,17 @@ generate_tpm2_predictions()
 	fi
 }
 
+bootloader_name()
+{
+	if is_sdboot; then
+		echo "systemd-boot"
+	elif is_grub2; then
+		echo "grub2"
+	else
+		err "Bootloader not detected"
+	fi
+}
+
 main_menu()
 {
 	while true; do
@@ -1421,7 +1461,7 @@ while true ; do
 done
 
 case "$1" in
-	install|needs-update|update|force-update|add-kernel|remove-kernel|set-default-snapshot|add-all-kernels|mkinitrd|remove-all-kernels|is-installed|list-snapshots|list-entries|list-kernels|is-bootable|update-predictions) ;;
+	install|needs-update|update|force-update|add-kernel|remove-kernel|set-default-snapshot|add-all-kernels|mkinitrd|remove-all-kernels|is-installed|list-snapshots|list-entries|list-kernels|is-bootable|update-predictions|bootloader) ;;
 	kernels|snapshots|entries|"") stty_size; interactive=1 ;;
 	*) err "unknown command $1" ;;
 esac
@@ -1470,6 +1510,8 @@ elif [ "$1" = "update" ]; then
 	if sdboot_needs_update "${2:-$root_snapshot}"; then install_sdboot "${2:-$root_snapshot}"; else :; fi
 elif [ "$1" = "force-update" ]; then
 	if is_installed; then install_sdboot "${2:-$root_snapshot}"; else :; fi
+elif [ "$1" = "bootloader" ]; then
+	bootloader_name "${2:-$root_snapshot}"
 elif [ "$1" = "add-kernel" ]; then
 	install_kernel "${3:-$root_snapshot}" "$2"
 elif [ "$1" = "add-all-kernels" ]; then
