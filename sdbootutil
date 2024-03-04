@@ -1142,6 +1142,10 @@ have_pcrlock() {
 	[ -e /usr/lib/systemd/systemd-pcrlock ]
 }
 
+pcrlock() {
+	SYSTEMD_LOG_LEVEL="${SYSTEMD_LOG_LEVEL:-warning}" /usr/lib/systemd/systemd-pcrlock "$@"
+}
+
 # TODO: Maybe share this code outside
 is_pcr_oracle() {
 	[ -e /etc/systemd/tpm2-pcr-public-key.pem ] && \
@@ -1189,11 +1193,11 @@ pcrlock_cmdline_initrd() {
 	# 710-kernel-cmdline-initrd-entry.pcrlock.d is not part of the
 	# pcrlock standards
 	echo "$cmdline" > "$tmpdir/cmdline"
-	/usr/lib/systemd/systemd-pcrlock \
+	pcrlock \
 		lock-kernel-cmdline \
 		--pcrlock="$tmpdir/cmdline.pcrlock" \
 		"$tmpdir/cmdline"
-	/usr/lib/systemd/systemd-pcrlock \
+	pcrlock \
 		lock-kernel-initrd \
 		--pcrlock="$tmpdir/initrd.pcrlock" \
 		"${boot_root}/$initrd"
@@ -1209,7 +1213,7 @@ pcrlock_cmdline_initrd() {
 	# pcrlock standards
 	echo -ne "$cmdline\0" > "$tmpdir/cmdline"
 	iconv -t UTF-16LE -o "$tmpdir/cmdline.utf16" "$tmpdir/cmdline"
-	/usr/lib/systemd/systemd-pcrlock \
+	pcrlock \
 		lock-raw \
 		--pcr=12 \
 		--pcrlock="/var/lib/pcrlock.d/710-kernel-cmdline-boot-loader.pcrlock.d/cmdline-$suffix.pcrlock" \
@@ -1229,18 +1233,18 @@ generate_tpm2_predictions_pcrlock()
 	# predictions at minimum and decrease the combinations
 	rm -fr /var/lib/pcrlock.d/*
 
-	/usr/lib/systemd/systemd-pcrlock lock-firmware-code
-	/usr/lib/systemd/systemd-pcrlock lock-firmware-config
+	pcrlock lock-firmware-code
+	pcrlock lock-firmware-config
 	# If secure boot is disabled, this can fail.  There is patch
 	# for the policy generation, and for the authority is planned
 	/usr/lib/systemd/systemd-pcrlock lock-secureboot-policy || true
 	/usr/lib/systemd/systemd-pcrlock lock-secureboot-authority || true
 	# uses / by default
-	/usr/lib/systemd/systemd-pcrlock lock-gpt
+	pcrlock lock-gpt
 
 	# 630-shim-efi-application is not part of the pcrlock standards
 	# TODO: move to shim-pcrlock.rpm
-	/usr/lib/systemd/systemd-pcrlock \
+	pcrlock \
 	    lock-pe \
 	    --pcrlock=/var/lib/pcrlock.d/630-shim-efi-application.pcrlock.d/generated.pcrlock \
 	    "${boot_root}${sdboot_dst}/shim.efi"
@@ -1249,13 +1253,13 @@ generate_tpm2_predictions_pcrlock()
 	# standards
 	# This is measuing the systemd-boot EFI binary (named grub.efi)
 	# TODO: move to systemd-boot-pcrlock.rpm
-	/usr/lib/systemd/systemd-pcrlock \
+	pcrlock \
 	    lock-pe \
 	    --pcrlock=/var/lib/pcrlock.d/640-boot-loader-efi-application.pcrlock.d/generated.pcrlock \
 	    "${boot_root}${sdboot_dst}/grub.efi"
 
 	if [ -e "$boot_root/loader/loader.conf" ]; then
-		/usr/lib/systemd/systemd-pcrlock \
+		pcrlock \
 			lock-raw /boot/efi/loader/loader.conf \
 			--pcr=5 \
 			--pcrlock=/var/lib/pcrlock.d/641-sdboot-loader-conf.pcrlock
@@ -1267,7 +1271,7 @@ generate_tpm2_predictions_pcrlock()
 	local n=0
 	while read -r i; do
 		n=$((n+1))
-		/usr/lib/systemd/systemd-pcrlock \
+		pcrlock \
 		    lock-pe \
 		    --pcrlock=/var/lib/pcrlock.d/650-kernel-efi-application.pcrlock.d/linux-"$n".pcrlock \
 		    "${boot_root}/$i"
@@ -1294,7 +1298,7 @@ generate_tpm2_predictions_pcrlock()
 		pcrlock_cmdline_initrd "$cmdline" "$initrd" "0"
 	fi
 
-	/usr/lib/systemd/systemd-pcrlock --pcr="$pcrs" make-policy
+	pcrlock --pcr="$pcrs" make-policy
 
 	# Publish the assets in the ESP, so can be imported by
 	# dracut-pcr-signature
