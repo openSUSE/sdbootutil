@@ -6,13 +6,11 @@ shopt -s nullglob
 
 # set to --keep-title to use altenate screen. Better for debugging but causes flicker
 dialog_altenate_screen=
-dialog_backtitle="Systemd-boot"
+dialog_backtitle="sdbootutil"
 interactive=
 verbose=
 nl=$'\n'
 shimdir="/usr/share/efi/$(uname -m)"
-sdboot_vendor="systemd"
-sdboot_dst="/EFI/$sdboot_vendor"
 arg_esp_path="$SYSTEMD_ESP_PATH"
 arg_entry_token=
 arg_arch=
@@ -953,11 +951,11 @@ sdboot_version()
 	local fn="$1"
 	if [ -z "$1" ]; then
 		if [ -e "$shimdir/shim.efi" ]; then
-			fn="$boot_root$sdboot_dst/grub.efi"
+			fn="$boot_root$boot_dst/grub.efi"
 		else
 			local sdboot
 			sdboot="$(find_sdboot)"
-			fn="$boot_root$sdboot_dst/${sdboot##*/}"
+			fn="$boot_root$boot_dst/${sdboot##*/}"
 		fi
 	fi
 	[ -e "$fn" ] || return 1
@@ -968,7 +966,7 @@ sdboot_version()
 
 is_installed()
 {
-	sdboot_version > /dev/null && [ -e "$boot_root/$sdboot_dst/installed_by_sdbootutil" ]
+	sdboot_version > /dev/null && [ -e "$boot_root/$boot_dst/installed_by_sdbootutil" ]
 }
 
 find_sdboot()
@@ -989,6 +987,17 @@ find_grub2()
 	echo "$grub2"
 }
 
+find_bootloader()
+{
+	if is_sdboot; then
+		find_sdboot "$1"
+	elif is_grub2; then
+		find_grub2 "$1"
+	else
+		err "Bootloader not detected"
+	fi
+}
+
 sdboot_needs_update()
 {
 	local snapshot="${1-$root_snapshot}"
@@ -1005,13 +1014,14 @@ sdboot_needs_update()
 	return 0
 }
 
-install_sdboot()
+install_bootloader()
 {
 	local snapshot="${1:-$root_snapshot}"
 	local prefix="/.snapshots/${root_snapshot}/snapshot"
-	local sdboot blkpart drive partno
+	local bootloader bldr_name blkpart drive partno
 
-	sdboot=$(find_sdboot "$1")
+	bootloader=$(find_bootloader "$1")
+	bldr_name=$(bootloader_name)
 
 	mkdir -p "$boot_root/loader/entries"
 
@@ -1024,12 +1034,12 @@ install_sdboot()
 	read -r partno < "/sys/class/block/${blkpart##*/}"/partition
 
 	if [ -e "$prefix$shimdir/shim.efi" ]; then
-		log_info "Installing systemd-boot with shim into $boot_root"
-		entry="$sdboot_dst/shim.efi"
+		log_info "Installing $bldr_name with shim into $boot_root"
+		entry="$boot_dst/shim.efi"
 		for i in MokManager shim; do
-			install -D "$prefix$shimdir/$i.efi" "$boot_root$sdboot_dst/$i.efi"
+			install -D "$prefix$shimdir/$i.efi" "$boot_root$boot_dst/$i.efi"
 		done
-		install -D "$sdboot" "$boot_root$sdboot_dst/grub.efi"
+		install -D "$bootloader" "$boot_root$boot_dst/grub.efi"
 
 		# boot entry point
 		for i in MokManager fallback; do
@@ -1037,23 +1047,24 @@ install_sdboot()
 		done
 		install -D "$prefix$shimdir/shim.efi" "$boot_root/EFI/BOOT/BOOT${firmware_arch^^}.EFI"
 	else
-		log_info "Installing systemd-boot into $boot_root"
-		entry="$sdboot_dst/${sdboot##*/}"
-		install -D "$sdboot" "$boot_root$entry"
-		install -D "$sdboot" "$boot_root/EFI/BOOT/BOOT${firmware_arch^^}.EFI"
+		log_info "Installing $bldr_name into $boot_root"
+		entry="$boot_dst/${bootloader##*/}"
+		install -D "$bootloader" "$boot_root$entry"
+		install -D "$bootloader" "$boot_root/EFI/BOOT/BOOT${firmware_arch^^}.EFI"
 	fi
 	# this is for shim to create the entry if missing
-	echo "${entry##*/},openSUSE Boot Manager" | iconv -f ascii -t ucs2 > "$boot_root/$sdboot_dst/boot.csv"
+	echo "${entry##*/},openSUSE Boot Manager" | iconv -f ascii -t ucs2 > "$boot_root/$boot_dst/boot.csv"
 
 	mkdir -p "$boot_root/$entry_token"
-	echo "$entry_token" > "$boot_root/$sdboot_dst/installed_by_sdbootutil"
+	echo "$entry_token" > "$boot_root/$boot_dst/installed_by_sdbootutil"
 	mkdir -p "/etc/kernel"
 	[ -s /etc/kernel/entry-token ] || echo "$entry_token" > /etc/kernel/entry-token
 	update_random_seed
 
-	[ -s "$boot_root/loader/entries.srel" ] || echo type1 > "$boot_root/loader/entries.srel"
-
-    	[ -e "$boot_root/loader/loader.conf" ] || echo -e "#timeout 3\n#console-mode keep\n" > "$boot_root/loader/loader.conf"
+	if is_sdboot; then
+		[ -s "$boot_root/loader/entries.srel" ] || echo type1 > "$boot_root/loader/entries.srel"
+		[ -e "$boot_root/loader/loader.conf" ] || echo -e "#timeout 3\n#console-mode keep\n" > "$boot_root/loader/loader.conf"
+	fi
 
 	# Create boot menu entry if it does not exist
 	[ -n "$arg_no_variables" ] || efibootmgr | grep -q 'Boot.*openSUSE Boot Manager' || efibootmgr -q --create --disk "$drive" --part "$partno" --label "openSUSE Boot Manager" --loader "$entry" || true
@@ -1110,7 +1121,7 @@ update_random_seed()
 	mv "$boot_root/loader/random-seed.new" "$boot_root/loader/random-seed"
 }
 
-install_sdboot_interactive()
+install_bootloader_interactive()
 {
 	local v
 	v="$(sdboot_version)"
@@ -1126,7 +1137,7 @@ install_sdboot_interactive()
 		d --aspect 60 --yesno "Are you sure you want to install systemd-boot into $boot_root?\n
 			This will overwrite any existing bootloaders" 0 0 || return 0
 	fi
-	install_sdboot
+	install_bootloader
 	d --aspect 60 --msgbox "Installed into $boot_root" 0 0
 }
 
@@ -1277,7 +1288,7 @@ generate_tpm2_predictions_pcrlock()
 	pcrlock \
 	    lock-pe \
 	    --pcrlock=/var/lib/pcrlock.d/630-shim-efi-application.pcrlock.d/generated.pcrlock \
-	    "${boot_root}${sdboot_dst}/shim.efi"
+	    "${boot_root}${boot_dst}/shim.efi"
 
 	# 640-boot-loader-efi-application is not part of the pcrlock
 	# standards
@@ -1286,7 +1297,7 @@ generate_tpm2_predictions_pcrlock()
 	pcrlock \
 	    lock-pe \
 	    --pcrlock=/var/lib/pcrlock.d/640-boot-loader-efi-application.pcrlock.d/generated.pcrlock \
-	    "${boot_root}${sdboot_dst}/grub.efi"
+	    "${boot_root}${boot_dst}/grub.efi"
 
 	if [ -e "$boot_root/loader/loader.conf" ]; then
 		pcrlock \
@@ -1332,7 +1343,7 @@ generate_tpm2_predictions_pcrlock()
 
 	# Publish the assets in the ESP, so can be imported by
 	# dracut-pcr-signature
-	[ -e /var/lib/systemd/pcrlock.json ] && cp /var/lib/systemd/pcrlock.json "${boot_root}${sdboot_dst}"
+	[ -e /var/lib/systemd/pcrlock.json ] && cp /var/lib/systemd/pcrlock.json "${boot_root}${boot_dst}"
 }
 
 get_pcrs() {
@@ -1389,8 +1400,8 @@ generate_tpm2_predictions_pcr_oracle()
 
 	# Publish the assets in the ESP, so can be imported by
 	# dracut-pcr-signature
-	cp /etc/systemd/tpm2-pcr-public-key.pem "${boot_root}${sdboot_dst}"
-	[ -e /etc/systemd/tpm2-pcr-signature.json ] && cp /etc/systemd/tpm2-pcr-signature.json "${boot_root}${sdboot_dst}"
+	cp /etc/systemd/tpm2-pcr-public-key.pem "${boot_root}${boot_dst}"
+	[ -e /etc/systemd/tpm2-pcr-signature.json ] && cp /etc/systemd/tpm2-pcr-signature.json "${boot_root}${boot_dst}"
 }
 
 
@@ -1432,7 +1443,7 @@ main_menu()
 			snapper) show_snapper ;;
 			sd-boot) update_entries cat; show_entries ;;
 			kernels) show_kernels "$root_snapshot";;
-			install) install_sdboot_interactive ;;
+			install) install_bootloader_interactive ;;
 		esac
 	done
 }
@@ -1502,8 +1513,17 @@ esac
 root_snapshot="${root_subvol#${subvol_prefix}/.snapshots/}"
 root_snapshot="${root_snapshot%/snapshot}"
 
+# XXX: Unify both in /EFI/opensuse?
+if is_sdboot; then
+	boot_dst="/EFI/systemd"
+elif is_grub2; then
+	boot_dst="/EFI/opensuse"
+else
+	err "Bootloader not detected"
+fi
+
 if [ "$1" = "install" ]; then
-	install_sdboot "${2:-$root_snapshot}"
+	install_bootloader "${2:-$root_snapshot}"
 elif [ "$1" = "needs-update" ]; then
 	sdboot_needs_update "${2:-$root_snapshot}"
 elif [ "$1" = "update" ]; then
