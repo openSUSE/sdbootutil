@@ -1,0 +1,7 @@
+[Unit]
+Description=Update TPM predictions
+ConditionSecurity=tpm2
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/sdbootutil update-predictions

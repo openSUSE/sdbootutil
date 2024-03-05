@@ -86,6 +86,11 @@ package may disable other plugin scripts that are incompatible.
 %install
 install -D -m 755 sdbootutil %{buildroot}%{_bindir}/sdbootutil
 
+# services
+for i in sdbootutil-update-predictions.service; do
+	install -D -m 644 "$i" %{buildroot}%{_unitdir}/"$i"
+done
+
 mkdir -p %{buildroot}%{_prefix}/lib/module-init-tools/kernel-scriptlets
 for a in rpm; do
     install -m 755 "$a-script" %{buildroot}%{_prefix}/lib/module-init-tools/kernel-scriptlets
@@ -132,6 +137,7 @@ sdbootutil update
 %files
 %license LICENSE
 %{_bindir}/sdbootutil
+%{_unitdir}/sdbootutil-update-predictions.service
 
 %files rpm-scriptlets
 %dir %{_prefix}/lib/module-init-tools
