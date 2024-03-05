@@ -78,6 +78,17 @@ Requires:       /usr/bin/kernel-install
 Plugin script for kernel-install. Note: installation of this
 package may disable other plugin scripts that are incompatible.
 
+%package bash-completion
+Summary:        Bash completions for sdbootutil
+Requires:       sdbootutil >= %{version}-%{release}
+Requires:       bash
+Requires:       bash-completion
+
+%description bash-completion
+Bash completions script for sdbootutil.
+Allows the user to press TAB to see available commands,
+options and parameters.
+
 %prep
 %setup -q
 
@@ -85,6 +96,9 @@ package may disable other plugin scripts that are incompatible.
 
 %install
 install -D -m 755 sdbootutil %{buildroot}%{_bindir}/sdbootutil
+
+#bash completions
+install -D -m 755 completion/sdbootutil %{buildroot}%{_datadir}/bash-completion/completions/sdbootutil
 
 # services
 for i in sdbootutil-update-predictions.service; do
@@ -153,5 +167,10 @@ sdbootutil update
 %ghost %config(noreplace,missingok) /etc/kernel/install.d/50-dracut.install
 %ghost %config(noreplace,missingok) /etc/kernel/install.d/51-dracut-rescue.install
 %ghost %config(noreplace,missingok) /etc/kernel/install.d/90-loaderentry.install
+
+%files bash-completion
+%dir %{_datadir}/bash-completion
+%dir %{_datadir}/bash-completion/completions
+%{_datadir}/bash-completion/completions/sdbootutil
 
 %changelog
