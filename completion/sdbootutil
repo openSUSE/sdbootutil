@@ -1,0 +1,70 @@
+err() {
+	:
+}
+
+find_kernels()
+{
+	local fn kv
+	found_kernels=()
+
+	for fn in ""/usr/lib/modules/*/"$image"; do
+		kv="${fn%/*}"
+		kv="${kv##*/}"
+		found_kernels+=("$kv")
+	done
+}
+
+eval "$(sdbootutil _print_bash_completion_data)"
+
+_sdbootutil_completion() {
+	local cur prev words cword subvol_prefix image
+	COMPREPLY=()
+	_get_comp_words_by_ref -n : cur prev words cword
+
+	local command_found=0
+	eval_bootctl
+	set_image_name
+	define_commands
+	local i=0
+
+	for word in "${words[@]:1:$cword-1}"; do
+		if [[ ${command_types["$word"]} =~ ^(command|command_needing_kernel)$ ]]; then
+			command_found=1
+		fi
+		if [[ " --arch " == " $word " ]]; then
+			firmware_arch="${words[i+2]}"
+			set_image_name
+		fi
+		if [[ " --image " == " $word " ]]; then
+			image="${words[i+2]}"
+		fi
+		((i++))
+	done
+
+	if [[ ${command_types["$prev"]} == "command_needing_kernel" ]]; then
+		find_kernels
+		local kernel_versions="${found_kernels[@]}"
+		COMPREPLY=( $(compgen -W "${kernel_versions}" -- ${cur}) )
+	elif [[ "$prev" == "--arch" ]]; then
+		COMPREPLY=( $(compgen -W "x64 aa64" -- ${cur}) )
+	elif [[ "$prev" == "--image" ]]; then
+		COMPREPLY=( $(compgen -W "vmlinuz Image" -- ${cur}) )
+	elif [[ $cur == -* ]]; then
+		local opts_and_args
+		for key in "${!command_types[@]}"; do
+			if [[ ${command_types["$key"]} =~ ^(option|argument)$ ]]; then
+				opts_and_args+="$key "
+			fi
+		done
+		COMPREPLY=( $(compgen -W "${opts_and_args}" -- ${cur}) )
+	elif [[ $command_found -eq 0 ]]; then
+		local commands
+		for key in "${!command_types[@]}"; do
+			if [[ ${command_types["$key"]} =~ ^(option|argument|command|command_needing_kernel)$ ]]; then
+				commands+="$key "
+			fi
+		done
+		COMPREPLY=( $(compgen -W "${commands}" -- ${cur}) )
+	fi
+}
+complete -F _sdbootutil_completion sdbootutil

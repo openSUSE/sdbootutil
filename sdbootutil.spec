@@ -86,6 +86,10 @@ package may disable other plugin scripts that are incompatible.
 %install
 install -D -m 755 sdbootutil %{buildroot}%{_bindir}/sdbootutil
 
+#bash completions
+mkdir -p %{buildroot}%{_datadir}/bash-completion/completions
+install -D -m 755 completion/sdbootutil %{buildroot}%{_datadir}/bash-completion/completions/sdbootutil
+
 # services
 for i in sdbootutil-update-predictions.service; do
 	install -D -m 644 "$i" %{buildroot}%{_unitdir}/"$i"
@@ -137,6 +141,9 @@ sdbootutil update
 %files
 %license LICENSE
 %{_bindir}/sdbootutil
+%dir %{_datadir}/bash-completion
+%dir %{_datadir}/bash-completion/completions
+%{_datadir}/bash-completion/completions/sdbootutil
 %{_unitdir}/sdbootutil-update-predictions.service
 
 %files rpm-scriptlets
