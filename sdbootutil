@@ -289,7 +289,7 @@ install_with_rollback()
 		mv "$dst" "$dst.bak" || return "$?"
 	fi
 	rollback+=("$dst")
-	install -m 0644 "$src" "$dst" || return "$?"
+	install -p -m 0644 "$src" "$dst" || return "$?"
 	chown root:root "$dst" 2>/dev/null || :
 	log_info "installed $dst"
 }
@@ -946,27 +946,35 @@ show_kernels()
 	done
 }
 
-sdboot_version()
+bootloader_version()
 {
 	local fn="$1"
 	if [ -z "$1" ]; then
 		if [ -e "$shimdir/shim.efi" ]; then
 			fn="$boot_root$boot_dst/grub.efi"
 		else
-			local sdboot
-			sdboot="$(find_sdboot)"
-			fn="$boot_root$boot_dst/${sdboot##*/}"
+			local bootloader
+			bootloader="$(find_bootloader)"
+			fn="$boot_root$boot_dst/${bootloader##*/}"
 		fi
 	fi
 	[ -e "$fn" ] || return 1
-	read -r _ _ _ v _ < <(grep -ao '#### LoaderInfo: systemd-boot [^#]\+ ####' "$fn")
+	if is_sdboot; then
+		read -r _ _ _ v _ < <(grep -ao '#### LoaderInfo: systemd-boot [^#]\+ ####' "$fn")
+	else
+		# Useless as it reports mayor.minor, so append the
+		# last update time until the minutes, as the FAT store
+		# dates differently than other filesystems
+		read -r _ _ _ v _ < <(grep -aoP 'GNU GRUB  version %s\x00[^\x00]+\x00' "$fn")
+		v="${v:2}-$(date -r "$fn" +'%Y%m%d%H%M')"
+	fi
 	[ -n "$v" ] || return 1
 	echo "$v"
 }
 
 is_installed()
 {
-	sdboot_version > /dev/null && [ -e "$boot_root/$boot_dst/installed_by_sdbootutil" ]
+	bootloader_version > /dev/null && [ -e "$boot_root/$boot_dst/installed_by_sdbootutil" ]
 }
 
 find_sdboot()
@@ -998,19 +1006,21 @@ find_bootloader()
 	fi
 }
 
-sdboot_needs_update()
+bootloader_needs_update()
 {
 	local snapshot="${1-$root_snapshot}"
 	local prefix="/.snapshots/${snapshot}/snapshot"
+	local bldr_name
 	local v nv
-	v="$(sdboot_version)"
+	v="$(bootloader_version)"
 	[ -n "$v" ] || return 1
 	log_info "deployed version $v"
-	nv="$(sdboot_version "$(find_sdboot "$snapshot")")"
+	nv="$(bootloader_version "$(find_bootloader "$snapshot")")"
 	[ -n "$v" ] || return 1
 	log_info "system version $nv"
 	systemd-analyze compare-versions "$v" lt "$nv" 2>/dev/null || return 1
-	log_info "systemd-boot needs to be updated"
+	bldr_name=$(bootloader_name)
+	log_info "$bldr_name needs to be updated"
 	return 0
 }
 
@@ -1037,20 +1047,20 @@ install_bootloader()
 		log_info "Installing $bldr_name with shim into $boot_root"
 		entry="$boot_dst/shim.efi"
 		for i in MokManager shim; do
-			install -D "$prefix$shimdir/$i.efi" "$boot_root$boot_dst/$i.efi"
+			install -p -D "$prefix$shimdir/$i.efi" "$boot_root$boot_dst/$i.efi"
 		done
-		install -D "$bootloader" "$boot_root$boot_dst/grub.efi"
+		install -p -D "$bootloader" "$boot_root$boot_dst/grub.efi"
 
 		# boot entry point
 		for i in MokManager fallback; do
-			install -D "$prefix$shimdir/$i.efi" "$boot_root/EFI/BOOT/$i.efi"
+			install -p -D "$prefix$shimdir/$i.efi" "$boot_root/EFI/BOOT/$i.efi"
 		done
-		install -D "$prefix$shimdir/shim.efi" "$boot_root/EFI/BOOT/BOOT${firmware_arch^^}.EFI"
+		install -p -D "$prefix$shimdir/shim.efi" "$boot_root/EFI/BOOT/BOOT${firmware_arch^^}.EFI"
 	else
 		log_info "Installing $bldr_name into $boot_root"
 		entry="$boot_dst/${bootloader##*/}"
-		install -D "$bootloader" "$boot_root$entry"
-		install -D "$bootloader" "$boot_root/EFI/BOOT/BOOT${firmware_arch^^}.EFI"
+		install -p -D "$bootloader" "$boot_root$entry"
+		install -p -D "$bootloader" "$boot_root/EFI/BOOT/BOOT${firmware_arch^^}.EFI"
 	fi
 	# this is for shim to create the entry if missing
 	echo "${entry##*/},openSUSE Boot Manager" | iconv -f ascii -t ucs2 > "$boot_root/$boot_dst/boot.csv"
@@ -1124,11 +1134,11 @@ update_random_seed()
 install_bootloader_interactive()
 {
 	local v
-	v="$(sdboot_version)"
+	v="$(bootloader_version)"
 	if [ -n "$v" ]; then
-		if sdboot_needs_update; then
+		if bootloader_needs_update; then
 			local nv
-			nv="$(sdboot_version "$(find_sdboot)")"
+			nv="$(bootloader_version "$(find_bootloader)")"
 			d --aspect 60 --yesno "Update systemd-boot from $v to $nv?" 0 0 || return 0
 		else
 			d --aspect 60 --yesno "systemd-boot already at current version $v. Install again?" 0 0 || return 0
@@ -1525,11 +1535,11 @@ fi
 if [ "$1" = "install" ]; then
 	install_bootloader "${2:-$root_snapshot}"
 elif [ "$1" = "needs-update" ]; then
-	sdboot_needs_update "${2:-$root_snapshot}"
+	bootloader_needs_update "${2:-$root_snapshot}"
 elif [ "$1" = "update" ]; then
-	if sdboot_needs_update "${2:-$root_snapshot}"; then install_sdboot "${2:-$root_snapshot}"; else :; fi
+	if bootloader_needs_update "${2:-$root_snapshot}"; then install_bootloader "${2:-$root_snapshot}"; else :; fi
 elif [ "$1" = "force-update" ]; then
-	if is_installed; then install_sdboot "${2:-$root_snapshot}"; else :; fi
+	if is_installed; then install_bootloader "${2:-$root_snapshot}"; else :; fi
 elif [ "$1" = "bootloader" ]; then
 	bootloader_name "${2:-$root_snapshot}"
 elif [ "$1" = "add-kernel" ]; then
