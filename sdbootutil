@@ -211,6 +211,7 @@ menuheight() {
 }
 
 stty_size() {
+	# shellcheck disable=SC2046
 	set -- $(stty size 2>/dev/null)
 	LINES="$1"
 	COLUMNS="$2"
@@ -222,7 +223,6 @@ stty_size() {
 	fi
 
 	dh_menu=$((LINES-15))
-	dh_text=$((LINES-5))
 }
 
 # check whether it's a transactional system
@@ -236,17 +236,17 @@ subvol_is_ro()
 	local subvol="${1:?}"
 	while read -r line; do
 		[ "$line" = "ro=true" ] && return 0
-	done < <(btrfs prop get -t s "${subvol#${subvol_prefix}}" ro)
+	done < <(btrfs prop get -t s "${subvol#"${subvol_prefix}"}" ro)
 	return 1
 }
 
 detect_parent() {
 	local subvol="$1"
-	parent_uuid="$(btrfs subvol show "${subvol#${subvol_prefix}}" | sed -ne 's/\s*Parent UUID:\s*//p')"
+	parent_uuid="$(btrfs subvol show "${subvol#"${subvol_prefix}"}" | sed -ne 's/\s*Parent UUID:\s*//p')"
 	[ "$parent_uuid" != '-' ] || parent_uuid=
 	[ -n "$parent_uuid" ] || return 0
-	parent_subvol="$(/sbin/btrfs subvol show -u "$parent_uuid" "${subvol#${subvol_prefix}}" | head -1)"
-	parent_snapshot="${parent_subvol#${subvol_prefix}/.snapshots/}"
+	parent_subvol="$(/sbin/btrfs subvol show -u "$parent_uuid" "${subvol#"${subvol_prefix}"}" | head -1)"
+	parent_snapshot="${parent_subvol#"${subvol_prefix}"/.snapshots/}"
 	if [ "$parent_subvol" = "$parent_snapshot" ]; then
 		unset parent_subvol parent_snapshot
 	else
@@ -306,13 +306,14 @@ set_snapper_title_and_sortkey()
 
 	update_snapper
 
+	# shellcheck disable=SC2046
 	IFS="|" read -r type date desc important pre_num <<< \
 		$(jq -r --arg snapshot "$snapshot" \
 		'.["root"][]|select(.number==( $snapshot|tonumber))|[.type,.date,(.description|gsub("\\|";"_")),.userdata.important,."pre-number"//""]|join("|")'\
 		< "$snapperfile")
 
 	if [ -z "$desc" ] && [ "$type" = "post" ] && [ -n "$pre_num" ]; then
-		read -r desc <<< $(jq -r --arg snapshot "$pre_num" '.["root"][]|select(.number==($snapshot|tonumber))|.description' < "$snapperfile")
+		read -r desc <<< "$(jq -r --arg snapshot "$pre_num" '.["root"][]|select(.number==($snapshot|tonumber))|.description' < "$snapperfile")"
 	fi
 
 	if [ "$important" = "yes" ]; then important="*"; else important=""; fi
@@ -366,7 +367,7 @@ mount_etc()
 	local snapshot_dir="$1"
 
 	IFS=',' read -ra fields <<< \
-	   $(findmnt --tab-file "${snapshot_dir}/etc/fstab" --noheadings --nofsroot --output OPTIONS /etc | sed 's#/sysroot##g' | sed 's#:/etc,#:'${snapshot_dir}'/etc,#g')
+	   $(findmnt --tab-file "${snapshot_dir}/etc/fstab" --noheadings --nofsroot --output OPTIONS /etc | sed 's#/sysroot##g' | sed 's#:/etc,#:'"${snapshot_dir}"'/etc,#g')
 
 	local lower=""
 	local upper=""
@@ -396,10 +397,9 @@ install_kernel()
 	local snapshot="${1:?}"
 	local subvol="${subvol_prefix}/.snapshots/${snapshot}/snapshot"
 	local kernel_version="$2"
-	local initrd=()
 	local dstinitrd=()
-	local src="${subvol#${subvol_prefix}}/lib/modules/$kernel_version/$image"
-	local initrddir="${subvol#${subvol_prefix}}/usr/lib/initrd"
+	local src="${subvol#"${subvol_prefix}"}/lib/modules/$kernel_version/$image"
+	local initrddir="${subvol#"${subvol_prefix}"}/usr/lib/initrd"
 	test -e "$src" || err "Can't find $src"
 
 	calc_chksum "$src"
@@ -804,7 +804,7 @@ find_kernels()
 	local fn kv
 	found_kernels=()
 
-	for fn in "${subvol#${subvol_prefix}}"/usr/lib/modules/*/"$image"; do
+	for fn in "${subvol#"${subvol_prefix}"}"/usr/lib/modules/*/"$image"; do
 		kv="${fn%/*}"
 		kv="${kv##*/}"
 		calc_chksum "$fn"
@@ -1217,18 +1217,19 @@ select_entries_for_prediction()
 	done < <(jq -r '.root[]|select(.active==true or .default==true)|.number' "$snapperfile")
 
 	if is_transactional && [ -e "${state_file}" ]; then
-	    . "${state_file}"
-	    for id in $LAST_WORKING_SNAPSHOTS; do
-		snapshots[$id]=1
-	    done
+		# shellcheck disable=SC1090
+		. "${state_file}"
+		for id in $LAST_WORKING_SNAPSHOTS; do
+			snapshots[$id]=1
+		done
 	fi
 
 	log_info "Creating predictions for snapshots: ${!snapshots[*]}"
 	local re
 	if [ "${#snapshots[@]}" = 1 ]; then
-	    re="${!snapshots[*]}"
+		re="${!snapshots[*]}"
 	else
-	    IFS='|' eval re='"(:?${!snapshots[*]})"'
+		IFS='|' eval re='"(:?${!snapshots[*]})"'
 	fi
 
 	update_entries_for_snapshot "$re"
@@ -1424,6 +1425,7 @@ generate_tpm2_predictions()
 		generate_tpm2_predictions_pcr_oracle
 	elif have_pcrlock; then
 		[ -e /etc/sysconfig/fde-tools ] || return 0
+		# shellcheck disable=SC1091
 		. /etc/sysconfig/fde-tools
 
 		generate_tpm2_predictions_pcrlock "${FDE_SEAL_PCR_LIST}"
@@ -1519,7 +1521,7 @@ case "$firmware_arch" in
 	*) err "Unsupported architecture $firmware_arch" ;;
 esac
 
-root_snapshot="${root_subvol#${subvol_prefix}/.snapshots/}"
+root_snapshot="${root_subvol#"${subvol_prefix}"/.snapshots/}"
 root_snapshot="${root_snapshot%/snapshot}"
 
 # XXX: Unify both in /EFI/opensuse?
