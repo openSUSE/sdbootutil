@@ -47,7 +47,6 @@ trap cleanup EXIT
 
 entryfile="$tmpdir/entries.json"
 snapperfile="$tmpdir/snapper.json"
-title_sort_file="$tmpdir/title_sort.txt"
 tmpfile="$tmpdir/tmp"
 
 helpandquit()
