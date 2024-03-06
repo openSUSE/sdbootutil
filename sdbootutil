@@ -28,7 +28,7 @@ update_predictions=
 
 rollback=()
 
-tmpdir=$(mktemp -d -t sdboot.XXXXXX)
+tmpdir=$(mktemp -d -t sdbootutil.XXXXXX)
 cleanup()
 {
 	local i
