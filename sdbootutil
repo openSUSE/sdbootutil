@@ -710,7 +710,7 @@ list_snapshots()
 		if [ "$isdefault" = "true" ]; then
 			id="\e[1;4m$id\e[m"
 		fi
-		update_kernels "${subvol_prefix}/.snapshots/$n/snapshot"
+		update_kernels "$n"
 		[ "$is_bootable" = 1 ] || id="!$id"
 		echo -e "$id $title"
 	done < <(jq '.root|.[]|[.number, .default, .description]|join(" ")' -r < "$snapperfile")
@@ -733,7 +733,7 @@ show_snapper()
 				default="$n"
 				title="\\Zb\Zu$title\\Zn"
 			fi
-			update_kernels "${subvol_prefix}/.snapshots/$n/snapshot"
+			update_kernels "$n"
 			[ "$is_bootable" = 1 ] || title="!$title"
 			list+=("$n" "$title")
 		done < <(jq '.root|.[]|[.number, .default, .description]|join(" ")' -r < "$snapperfile")
@@ -802,16 +802,16 @@ declare -A stale_kernels
 is_bootable=
 update_kernels()
 {
-	local subvol="${1:?}"
+	local snapshot="${1:?}"
 	local path id
 	installed_kernels=()
 	stale_kernels=()
 	is_bootable=
-	find_kernels "$subvol"
+	find_kernels "$snapshot"
 	for kv in "${!found_kernels[@]}"; do
 		installed_kernels["/$entry_token/$kv/linux-${found_kernels[$kv]}"]=''
 	done
-	update_entries_for_subvol "$subvol"
+	update_entries_for_snapshot "$snapshot"
 
 	# XXX: maybe we should parse the actual path in the entry
 	while read -r path id; do
@@ -827,8 +827,8 @@ update_kernels()
 
 list_kernels()
 {
-	subvol="${subvol_prefix}/.snapshots/${1:?}/snapshot"
-	update_kernels "$subvol"
+	local snapshot="${1:?}"
+	update_kernels "$snapshot"
 	local kernelfiles=("${!installed_kernels[@]}")
 	for k in "${kernelfiles[@]}"; do
 		local id="${installed_kernels[$k]}"
@@ -849,8 +849,8 @@ list_kernels()
 
 is_bootable()
 {
-	subvol="${subvol_prefix}/.snapshots/${1:?}/snapshot"
-	update_kernels "$subvol"
+	local snapshot="${1:?}"
+	update_kernels "$snapshot"
 
 	[ "$is_bootable" = 1 ] || return 1
 	return 0
@@ -861,7 +861,7 @@ show_kernels()
 	local snapshot="${1:?}"
 	subvol="${subvol_prefix}/.snapshots/${1:?}/snapshot"
 	while true; do
-		update_kernels "$subvol"
+		update_kernels "$snapshot"
 		local list=()
 		local n=0
 		local default=
