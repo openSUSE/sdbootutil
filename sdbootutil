@@ -64,18 +64,21 @@ helpandquit()
 		  --image		Specify Linux kernel file name
 		  --no-variables	Do not update UEFI variables
 		  --no-reuse-initrd	Always regenerate initrd
-		  --no-snapshots	Install on a non-snapshotting system
 		  -v, --verbose		More verbose output
 		  -h, --help		This screen
 
 		COMMAND:
-		add-kernel VERSION [SUBVOL]
+		add-kernel VERSION [SNAPSHOT]
 			   Create boot entry for specified kernel
 
 		add-all-kernels [SNAPSHOT]
 			   Create boot entries for all kernels in SNAPSHOT
 
-		remove-kernel VERSION [SUBVOL]
+		mkinitrd [SNAPSHOT]
+			   Create boot entries for all kernels in SNAPSHOT,
+			   assumes --no-reuse-initrd to regenerate initrds
+
+		remove-kernel VERSION [SNAPSHOT]
 			   Remove boot entry for specified kernel
 
 		remove-all-kernels [SNAPSHOT]
@@ -381,8 +384,21 @@ umount_etc()
 	umount "${snapshot_dir}/etc"
 }
 
+add_version_to_title()
+{
+	# TW pretty name does not include the version
+	[ -n "$os_release_VERSION" ] || title="$title $os_release_VERSION_ID"
+}
+
 install_kernel()
 {
+	if [ $no_snapshots -eq 1 ]; then
+		local snapshot=""
+		local subvol=""
+	else
+		local snapshot="${1:?}"
+		local subvol="${subvol_prefix}/.snapshots/${snapshot}/snapshot"
+	fi
 	local kernel_version="$2"
 	local subvol="$1"
 	local src="${subvol#${subvol_prefix}}/lib/modules/$kernel_version/$image"
@@ -459,7 +475,10 @@ install_kernel()
 	# shellcheck disable=SC2154
 	sort_key="$os_release_ID"
 
-	if ! is_transactional  && subvol_is_ro "$subvol"; then
+	if is_transactional; then
+		add_version_to_title
+	elif subvol_is_ro "$subvol"; then
+		add_version_to_title
 		set_snapper_title_and_sortkey "$snapshot"
 	fi
 
@@ -508,25 +527,28 @@ install_kernel()
 install_all_kernels()
 {
 	if [ $no_snapshots -eq 1 ]; then
-		local subvol=""
+		local snapshot=""
 	else
-		local subvol="${subvol_prefix}/.snapshots/${1:?}/snapshot"
+		local snapshot="${1:?}"
 	fi
-	
-	find_kernels "$subvol"
+	find_kernels "$snapshot"
 	for kv in "${!found_kernels[@]}"; do
 		log_info "installing $kv"
-		install_kernel "${subvol}" "$kv"
+		install_kernel "${snapshot}" "$kv"
 	done
 
 }
 
 remove_all_kernels()
 {
-	local subvol="${subvol_prefix}/.snapshots/${1:?}/snapshot"
-	find_kernels "$subvol"
+	if [ $no_snapshots -eq 1 ]; then
+		local snapshot=""
+	else
+		local snapshot="${1:?}"
+	fi
+	find_kernels "$snapshot"
 	for kv in "${!found_kernels[@]}"; do
-		remove_kernel "${subvol}" "$kv"
+		remove_kernel "${snapshot}" "$kv"
 	done
 
 }
@@ -1198,20 +1220,12 @@ set_default_snapshot()
 }
 
 # TODO: Maybe share this code outside
-run_log()
-{
-	"$@" 2>&1 | logger -t sdbootutil
-}
-
-# TODO: Maybe share this code outside
-info_log()
-{
-	logger -t sdbootutil "$@"
-}
-
-# TODO: Maybe share this code outside
-is_pcrlock() {
+have_pcrlock() {
 	[ -e /usr/lib/systemd/systemd-pcrlock ]
+}
+
+pcrlock() {
+	SYSTEMD_LOG_LEVEL="${SYSTEMD_LOG_LEVEL:-warning}" /usr/lib/systemd/systemd-pcrlock "$@"
 }
 
 # TODO: Maybe share this code outside
@@ -1241,7 +1255,7 @@ select_entries_for_prediction()
 	    done
 	fi
 
-	info_log "Creating predictions for snapshots: ${!snapshots[*]}"
+	log_info "Creating predictions for snapshots: ${!snapshots[*]}"
 	local re
 	if [ "${#snapshots[@]}" = 1 ]; then
 	    re="${!snapshots[*]}"
@@ -1261,11 +1275,11 @@ pcrlock_cmdline_initrd() {
 	# 710-kernel-cmdline-initrd-entry.pcrlock.d is not part of the
 	# pcrlock standards
 	echo "$cmdline" > "$tmpdir/cmdline"
-	run_log /usr/lib/systemd/systemd-pcrlock \
+	pcrlock \
 		lock-kernel-cmdline \
 		--pcrlock="$tmpdir/cmdline.pcrlock" \
 		"$tmpdir/cmdline"
-	run_log /usr/lib/systemd/systemd-pcrlock \
+	pcrlock \
 		lock-kernel-initrd \
 		--pcrlock="$tmpdir/initrd.pcrlock" \
 		"${boot_root}/$initrd"
@@ -1281,7 +1295,7 @@ pcrlock_cmdline_initrd() {
 	# pcrlock standards
 	echo -ne "$cmdline\0" > "$tmpdir/cmdline"
 	iconv -t UTF-16LE -o "$tmpdir/cmdline.utf16" "$tmpdir/cmdline"
-	run_log /usr/lib/systemd/systemd-pcrlock \
+	pcrlock \
 		lock-raw \
 		--pcr=12 \
 		--pcrlock="/var/lib/pcrlock.d/710-kernel-cmdline-boot-loader.pcrlock.d/cmdline-$suffix.pcrlock" \
@@ -1301,18 +1315,18 @@ generate_tpm2_predictions_pcrlock()
 	# predictions at minimum and decrease the combinations
 	rm -fr /var/lib/pcrlock.d/*
 
-	run_log /usr/lib/systemd/systemd-pcrlock lock-firmware-code
-	run_log /usr/lib/systemd/systemd-pcrlock lock-firmware-config
+	pcrlock lock-firmware-code
+	pcrlock lock-firmware-config
 	# If secure boot is disabled, this can fail.  There is patch
 	# for the policy generation, and for the authority is planned
-	run_log /usr/lib/systemd/systemd-pcrlock lock-secureboot-policy || true
-	run_log /usr/lib/systemd/systemd-pcrlock lock-secureboot-authority || true
-	# TODO: what drive should be here?
-	# run_log /usr/lib/systemd/systemd-pcrlock lock-gpt "$drive"
+	/usr/lib/systemd/systemd-pcrlock lock-secureboot-policy || true
+	/usr/lib/systemd/systemd-pcrlock lock-secureboot-authority || true
+	# uses / by default
+	pcrlock lock-gpt
 
 	# 630-shim-efi-application is not part of the pcrlock standards
 	# TODO: move to shim-pcrlock.rpm
-	run_log /usr/lib/systemd/systemd-pcrlock \
+	pcrlock \
 	    lock-pe \
 	    --pcrlock=/var/lib/pcrlock.d/630-shim-efi-application.pcrlock.d/generated.pcrlock \
 	    "${boot_root}${sdboot_dst}/shim.efi"
@@ -1321,10 +1335,17 @@ generate_tpm2_predictions_pcrlock()
 	# standards
 	# This is measuing the systemd-boot EFI binary (named grub.efi)
 	# TODO: move to systemd-boot-pcrlock.rpm
-	run_log /usr/lib/systemd/systemd-pcrlock \
+	pcrlock \
 	    lock-pe \
 	    --pcrlock=/var/lib/pcrlock.d/640-boot-loader-efi-application.pcrlock.d/generated.pcrlock \
 	    "${boot_root}${sdboot_dst}/grub.efi"
+
+	if [ -e "$boot_root/loader/loader.conf" ]; then
+		pcrlock \
+			lock-raw /boot/efi/loader/loader.conf \
+			--pcr=5 \
+			--pcrlock=/var/lib/pcrlock.d/641-sdboot-loader-conf.pcrlock
+	fi
 
 	# 650-kernel-efi-application.pcrlock is not part of the
 	# pcrlock standards
@@ -1332,7 +1353,7 @@ generate_tpm2_predictions_pcrlock()
 	local n=0
 	while read -r i; do
 		n=$((n+1))
-		run_log /usr/lib/systemd/systemd-pcrlock \
+		pcrlock \
 		    lock-pe \
 		    --pcrlock=/var/lib/pcrlock.d/650-kernel-efi-application.pcrlock.d/linux-"$n".pcrlock \
 		    "${boot_root}/$i"
@@ -1359,7 +1380,7 @@ generate_tpm2_predictions_pcrlock()
 		pcrlock_cmdline_initrd "$cmdline" "$initrd" "0"
 	fi
 
-	run_log /usr/lib/systemd/systemd-pcrlock --pcr="$pcrs" make-policy
+	pcrlock --pcr="$pcrs" make-policy
 
 	# Publish the assets in the ESP, so can be imported by
 	# dracut-pcr-signature
@@ -1387,14 +1408,24 @@ generate_tpm2_predictions_pcr_oracle()
 	select_entries_for_prediction
 
 	all_pcrs=$(get_pcrs)
-	[ -z "$all_pcrs" ] || rm -f /etc/systemd/tpm2-pcr-signature.json
+	if [ -z "$all_pcrs" ]; then
+		warn "PCR Oracle configured but not enrolled in any LUKS header"
+		return 0
+	fi
+
+	rm -f /etc/systemd/tpm2-pcr-signature.json
 
 	# We make as many predictions as |all_pcrs| * |entries| to
 	# cover all the combinations.  pcr-oracle is smart to include
 	# the entry only one time, so we will not have duplications.
 	# This is a step for multi device configurations.
+	declare -a entries
+	mapfile -t entries < <(jq -r '.[]|.id' "$entryfile")
+	if [ -z "${entries[0]}" ]; then
+		err "No bootloader entries found"
+	fi
 	for pcrs in $all_pcrs; do
-		while read -r entry; do
+		for entry in "${entries[@]}"; do
 			log_info "Generate prediction for $entry with PCRs $pcrs"
 			if ! pcr-oracle \
 				--private-key /etc/systemd/tpm2-pcr-private-key.pem \
@@ -1403,9 +1434,9 @@ generate_tpm2_predictions_pcr_oracle()
 				--target-platform=systemd \
 				--boot-entry "${entry}" \
 				sign "$pcrs"; then
-				err "Failed to install TPM predictions for ${entry_id}"
+				err "Failed to install TPM predictions for ${entry}"
 			fi
-		done < <(jq -r '.[]|.id' "$entryfile")
+		done
 	done
 
 	# Publish the assets in the ESP, so can be imported by
@@ -1420,19 +1451,14 @@ generate_tpm2_predictions()
 {
 	[ -e /etc/crypttab ] || return 0
 	grep -q "tpm2-device" /etc/crypttab || return 0
-	[ -e /etc/sysconfig/fde-tools ] || return 0
 
-	. /etc/sysconfig/fde-tools
-
-	if is_pcrlock && is_pcr_oracle; then
-		echo "pcrlock and signed policies are mutually exclusive, remove one set of files to continue"
-		return 0
-	fi
-
-	if is_pcrlock; then
-		generate_tpm2_predictions_pcrlock "${FDE_SEAL_PCR_LIST}"
-	elif is_pcr_oracle; then
+	if is_pcr_oracle; then
 		generate_tpm2_predictions_pcr_oracle
+	elif have_pcrlock; then
+		[ -e /etc/sysconfig/fde-tools ] || return 0
+		. /etc/sysconfig/fde-tools
+
+		generate_tpm2_predictions_pcrlock "${FDE_SEAL_PCR_LIST}"
 	fi
 }
 
