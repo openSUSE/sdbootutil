@@ -423,7 +423,6 @@ install_kernel()
 
 	if [ -e "$initrd" ]; then
 		ln -s "$initrd" "$tmpdir/initrd-0"
-		# echo "sgöjsölgkölsk"
 	elif [ -d "$initrddir" ] && [ -x "/usr/bin/mkmoduleinitrd" ]; then
 		local f i
 		i=0
@@ -1059,7 +1058,7 @@ install_sdboot()
 	fi
 	
 	local sdboot blkpart drive partno
-	
+
 	sdboot=$(find_sdboot "$1")
 
 	mkdir -p "$boot_root/loader/entries"
@@ -1093,6 +1092,7 @@ install_sdboot()
 	fi
 	# this is for shim to create the entry if missing
 	echo "${entry##*/},openSUSE Boot Manager" | iconv -f ascii -t ucs2 > "$boot_root/$sdboot_dst/boot.csv"
+
 	# echo "boot_root: $boot_root"
 	mkdir -p "$boot_root/$entry_token"
 	echo "$entry_token" > "$boot_root/$sdboot_dst/installed_by_sdbootutil"
@@ -1101,6 +1101,7 @@ install_sdboot()
 	update_random_seed
 
 	[ -s "$boot_root/loader/entries.srel" ] || echo type1 > "$boot_root/loader/entries.srel"
+
 	# echo "boot_root: $boot_root"
 	if [ $no_snapshots -eq 1 ]; then
 		echo -e "timeout 5\n#console-mode keep\n" > "$boot_root/loader/loader.conf"
@@ -1565,6 +1566,9 @@ elif [ "$1" = "force-update" ]; then
 elif [ "$1" = "add-kernel" ]; then
 	install_kernel "${3:-$root_snapshot}" "$2"
 elif [ "$1" = "add-all-kernels" ]; then
+	install_all_kernels "${2:-$root_snapshot}"
+elif [ "$1" = "mkinitrd" ]; then
+	arg_no_reuse_initrd=1
 	install_all_kernels "${2:-$root_snapshot}"
 elif [ "$1" = "remove-kernel" ]; then
 	remove_kernel "${3:-$root_snapshot}" "$2"
