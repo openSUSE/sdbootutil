@@ -1563,11 +1563,11 @@ elif [ "$1" = "update" ]; then
 elif [ "$1" = "force-update" ]; then
 	if is_installed; then install_sdboot "${2:-$root_snapshot}"; else :; fi
 elif [ "$1" = "add-kernel" ]; then
-	install_kernel "${3:-$snapshot}" "$2"
+	install_kernel "${3:-$root_snapshot}" "$2"
 elif [ "$1" = "add-all-kernels" ]; then
 	install_all_kernels "${2:-$root_snapshot}"
 elif [ "$1" = "remove-kernel" ]; then
-	remove_kernel "${3:-$snapshot}" "$2"
+	remove_kernel "${3:-$root_snapshot}" "$2"
 elif [ "$1" = "remove-all-kernels" ]; then
 	remove_all_kernels "${2:-$root_snapshot}"
 elif [ "$1" = "set-default-snapshot" ]; then
