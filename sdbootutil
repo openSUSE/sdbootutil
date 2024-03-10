@@ -20,6 +20,7 @@ arg_all_entries=
 arg_no_variables=
 arg_no_reuse_initrd=
 arg_no_random_seed=
+no_snapshots=0
 # for x in vmlinuz image vmlinux linux bzImage uImage Image zImage; do
 image=
 
@@ -63,21 +64,18 @@ helpandquit()
 		  --image		Specify Linux kernel file name
 		  --no-variables	Do not update UEFI variables
 		  --no-reuse-initrd	Always regenerate initrd
+		  --no-snapshots	Install on a non-snapshotting system
 		  -v, --verbose		More verbose output
 		  -h, --help		This screen
 
 		COMMAND:
-		add-kernel VERSION [SNAPSHOT]
+		add-kernel VERSION [SUBVOL]
 			   Create boot entry for specified kernel
 
 		add-all-kernels [SNAPSHOT]
 			   Create boot entries for all kernels in SNAPSHOT
 
-		mkinitrd [SNAPSHOT]
-			   Create boot entries for all kernels in SNAPSHOT,
-			   assumes --no-reuse-initrd to regenerate initrds
-
-		remove-kernel VERSION [SNAPSHOT]
+		remove-kernel VERSION [SUBVOL]
 			   Remove boot entry for specified kernel
 
 		remove-all-kernels [SNAPSHOT]
@@ -214,6 +212,9 @@ is_transactional()
 
 subvol_is_ro()
 {
+	if [ $no_snapshots -eq 1 ]; then
+		return 0
+	fi
 	local subvol="${1:?}"
 	while read -r line; do
 		[ "$line" = "ro=true" ] && return 0
@@ -237,7 +238,12 @@ detect_parent() {
 
 sedrootflags()
 {
-	local subvol="${1:?}"
+	if [ $no_snapshots -eq 1 ]; then
+		local subvol=""
+	sed -e "s/[ \t]\+/ /g;s/\<\(BOOT_IMAGE\|initrd\)=[^ ]* \?//;s/\<root=[^ ]*/root=UUID=$root_uuid/;tr;:r;:x"
+	else
+		local subvol="${1:?}"
+	fi
 	# - delete BOOT_IMAGE= and initrd=
 	# - make sure root= refers to uuid
 	# - replace or add rootflags to point at correct subvolume
@@ -246,9 +252,10 @@ sedrootflags()
 
 remove_kernel()
 {
-	local snapshot="${1:?}"
-	local subvol="${subvol_prefix}/.snapshots/${snapshot}/snapshot"
+	local subvol="$1"
 	local kernel_version="$2"
+	local snapshot="${subvol#${subvol_prefix}/.snapshots/}"
+	snapshot="${snapshot%/*}"
 	local id="$entry_token-$kernel_version-$snapshot.conf"
 	run_command_output bootctl unlink "$id"
 
@@ -281,6 +288,9 @@ update_snapper()
 
 set_snapper_title_and_sortkey()
 {
+	if [ $no_snapshots -eq 1 ]; then
+		return 0
+	fi
 	snapshot="${1:?}"
 	local type date desc important pre_num
 	local snapshot_info
@@ -306,8 +316,13 @@ set_snapper_title_and_sortkey()
 }
 
 reuse_initrd() {
-	local snapshot="${1:?}"
-	local subvol="${2:?}"
+	if [ $no_snapshots -eq 1 ]; then
+		local snapshot=""
+		local subvol=""
+	else
+		local snapshot="${1:?}"
+		local subvol="${2:?}"
+	fi
 
 	[ -z "$arg_no_reuse_initrd" ] || return 1
 
@@ -366,32 +381,32 @@ umount_etc()
 	umount "${snapshot_dir}/etc"
 }
 
-add_version_to_title()
-{
-	# TW pretty name does not include the version
-	[ -n "$os_release_VERSION" ] || title="$title $os_release_VERSION_ID"
-}
-
 install_kernel()
 {
-	local snapshot="${1:?}"
-	local subvol="${subvol_prefix}/.snapshots/${snapshot}/snapshot"
 	local kernel_version="$2"
+	local subvol="$1"
+	local src="${subvol#${subvol_prefix}}/lib/modules/$kernel_version/$image"
 	local initrd=()
 	local dstinitrd=()
-	local src="${subvol#${subvol_prefix}}/lib/modules/$kernel_version/$image"
-	local initrddir="${subvol#${subvol_prefix}}/usr/lib/initrd"
+	
 	test -e "$src" || err "Can't find $src"
 
 	calc_chksum "$src"
 	local dst="/$entry_token/$kernel_version/linux-$chksum"
 
+	# XXX: fix calling with snapshot instead of subvol
+	local snapshot="${subvol#${subvol_prefix}/.snapshots/}"
+	snapshot="${snapshot%/snapshot}"
+	if [ $no_snapshots -eq 1 ]; then
+		snapshot=""
+	fi
 	local initrd="${src%/*}/initrd"
 
 	mkdir -p "$boot_root${dst%/*}"
 
 	if [ -e "$initrd" ]; then
 		ln -s "$initrd" "$tmpdir/initrd-0"
+		# echo "sgöjsölgkölsk"
 	elif [ -d "$initrddir" ] && [ -x "/usr/bin/mkmoduleinitrd" ]; then
 		local f i
 		i=0
@@ -399,9 +414,13 @@ install_kernel()
 			ln -s "$f" "$tmpdir/initrd-$i"
 			((++i))
 		done
+		
 		/usr/bin/mkmoduleinitrd "${subvol#"${subvol_prefix}"}" "$kernel_version" "$tmpdir/initrd-$i"
 	elif ! reuse_initrd "$snapshot" "$subvol"; then
 		local snapshot_dir="/.snapshots/$snapshot/snapshot"
+		if [ $no_snapshots -eq 1 ]; then
+			snapshot_dir="/"
+		fi
 		local dracut_args=()
 		if [ "$subvol" != "$root_subvol" ]; then
 			dracut_args=('--sysroot' "${snapshot_dir}" '--tmpdir' '/var/tmp' '--add-device' "$root_device")
@@ -435,13 +454,12 @@ install_kernel()
 	fi
 
 	title="${os_release_PRETTY_NAME:-Linux $kernel_version}"
+	# TW pretty name does not include the version
+	[ -n "$os_release_VERSION" ] || title="$title $os_release_VERSION_ID"
 	# shellcheck disable=SC2154
 	sort_key="$os_release_ID"
 
-	if is_transactional; then
-		add_version_to_title
-	elif subvol_is_ro "$subvol"; then
-		add_version_to_title
+	if ! is_transactional  && subvol_is_ro "$subvol"; then
 		set_snapper_title_and_sortkey "$snapshot"
 	fi
 
@@ -489,21 +507,26 @@ install_kernel()
 
 install_all_kernels()
 {
-	local snapshot="${1:?}"
-	find_kernels "$snapshot"
+	if [ $no_snapshots -eq 1 ]; then
+		local subvol=""
+	else
+		local subvol="${subvol_prefix}/.snapshots/${1:?}/snapshot"
+	fi
+	
+	find_kernels "$subvol"
 	for kv in "${!found_kernels[@]}"; do
 		log_info "installing $kv"
-		install_kernel "${snapshot}" "$kv"
+		install_kernel "${subvol}" "$kv"
 	done
 
 }
 
 remove_all_kernels()
 {
-	local snapshot="${1:?}"
-	find_kernels "$snapshot"
+	local subvol="${subvol_prefix}/.snapshots/${1:?}/snapshot"
+	find_kernels "$subvol"
 	for kv in "${!found_kernels[@]}"; do
-		remove_kernel "${snapshot}" "$kv"
+		remove_kernel "${subvol}" "$kv"
 	done
 
 }
@@ -781,11 +804,16 @@ calc_chksum() {
 declare -A found_kernels
 find_kernels()
 {
-	local subvol="${subvol_prefix}/.snapshots/${1:?}/snapshot"
+	if [ $no_snapshots -eq 1 ]; then
+		local subvol=""
+	else
+		local subvol="${1:?}"
+	fi
 	local fn kv
 	found_kernels=()
 
 	for fn in "${subvol#${subvol_prefix}}"/usr/lib/modules/*/"$image"; do
+		echo "fn: $fn"
 		kv="${fn%/*}"
 		kv="${kv##*/}"
 		calc_chksum "$fn"
@@ -802,7 +830,11 @@ declare -A stale_kernels
 is_bootable=
 update_kernels()
 {
-	local subvol="${1:?}"
+	if [ $no_snapshots -eq 1 ]; then
+		local subvol=""
+	else
+		local subvol="${1:?}"
+	fi
 	local path id
 	installed_kernels=()
 	stale_kernels=()
@@ -827,11 +859,17 @@ update_kernels()
 
 list_kernels()
 {
-	subvol="${subvol_prefix}/.snapshots/${1:?}/snapshot"
+	if [ $no_snapshots -eq 1 ]; then
+		subvol=""
+	else
+		subvol="${subvol_prefix}/.snapshots/${1:?}/snapshot"
+	fi
 	update_kernels "$subvol"
 	local kernelfiles=("${!installed_kernels[@]}")
 	for k in "${kernelfiles[@]}"; do
+		echo "k: $k" 
 		local id="${installed_kernels[$k]}"
+		echo $id
 		local kv="${k%/*}"
 		kv="${kv##*/}"
 		if [ -z "$id" ]; then
@@ -858,8 +896,10 @@ is_bootable()
 
 show_kernels()
 {
-	local snapshot="${1:?}"
 	subvol="${subvol_prefix}/.snapshots/${1:?}/snapshot"
+	if [ $no_snapshots -eq 1 ]; then
+		subvol=""
+	fi
 	while true; do
 		update_kernels "$subvol"
 		local list=()
@@ -918,7 +958,7 @@ show_kernels()
 					break # might have selected delete so refresh
 					;;
 				install)
-					install_kernel "$snapshot" "$kv"
+					install_kernel "$subvol" "$kv"
 					break
 					;;
 			esac
@@ -951,7 +991,11 @@ is_installed()
 
 find_sdboot()
 {
-	local prefix="/.snapshots/${1-$root_snapshot}/snapshot"
+	if [ $no_snapshots -eq 1 ]; then
+		local prefix=""
+	else
+		local prefix="/.snapshots/${1-$root_snapshot}/snapshot"
+	fi
 	# XXX: this is a hack in case we need to inject a signed
 	# systemd-boot from a separate package
 	local sdboot="$prefix/usr/lib/systemd-boot/systemd-boot$firmware_arch.efi"
@@ -962,8 +1006,12 @@ find_sdboot()
 
 sdboot_needs_update()
 {
-	local snapshot="${1-$root_snapshot}"
-	local prefix="/.snapshots/${snapshot}/snapshot"
+	if [ no_snapshots -eq 1 ]; then
+		local prefix=""
+	else
+		local snapshot="${1-$root_snapshot}"
+		local prefix="/.snapshots/${snapshot}/snapshot"
+	fi
 	local v nv
 	v="$(sdboot_version)"
 	[ -n "$v" ] || return 1
@@ -978,10 +1026,17 @@ sdboot_needs_update()
 
 install_sdboot()
 {
-	local snapshot="${1:-$root_snapshot}"
-	local prefix="/.snapshots/${root_snapshot}/snapshot"
+	if [ $no_snapshots -eq 1 ]; then
+		# local snapshot="${1:-$root_snapshot}"
+		local prefix=""
+		
+	else
+		local snapshot="${1:-$root_snapshot}"
+		local prefix="/.snapshots/${root_snapshot}/snapshot"
+	fi
+	
 	local sdboot blkpart drive partno
-
+	
 	sdboot=$(find_sdboot "$1")
 
 	mkdir -p "$boot_root/loader/entries"
@@ -1015,7 +1070,7 @@ install_sdboot()
 	fi
 	# this is for shim to create the entry if missing
 	echo "${entry##*/},openSUSE Boot Manager" | iconv -f ascii -t ucs2 > "$boot_root/$sdboot_dst/boot.csv"
-
+	# echo "boot_root: $boot_root"
 	mkdir -p "$boot_root/$entry_token"
 	echo "$entry_token" > "$boot_root/$sdboot_dst/installed_by_sdbootutil"
 	mkdir -p "/etc/kernel"
@@ -1023,8 +1078,12 @@ install_sdboot()
 	update_random_seed
 
 	[ -s "$boot_root/loader/entries.srel" ] || echo type1 > "$boot_root/loader/entries.srel"
-
-    	[ -e "$boot_root/loader/loader.conf" ] || echo -e "#timeout 3\n#console-mode keep\n" > "$boot_root/loader/loader.conf"
+	# echo "boot_root: $boot_root"
+	if [ $no_snapshots -eq 1 ]; then
+		echo -e "timeout 5\n#console-mode keep\n" > "$boot_root/loader/loader.conf"
+	else
+		[ -e "$boot_root/loader/loader.conf" ] || echo -e "#timeout 3\n#console-mode keep\n" > "$boot_root/loader/loader.conf"
+	fi
 
 	# Create boot menu entry if it does not exist
 	[ -n "$arg_no_variables" ] || efibootmgr | grep -q 'Boot.*openSUSE Boot Manager' || efibootmgr -q --create --disk "$drive" --part "$partno" --label "openSUSE Boot Manager" --loader "$entry" || true
@@ -1139,12 +1198,20 @@ set_default_snapshot()
 }
 
 # TODO: Maybe share this code outside
-have_pcrlock() {
-	[ -e /usr/lib/systemd/systemd-pcrlock ]
+run_log()
+{
+	"$@" 2>&1 | logger -t sdbootutil
 }
 
-pcrlock() {
-	SYSTEMD_LOG_LEVEL="${SYSTEMD_LOG_LEVEL:-warning}" /usr/lib/systemd/systemd-pcrlock "$@"
+# TODO: Maybe share this code outside
+info_log()
+{
+	logger -t sdbootutil "$@"
+}
+
+# TODO: Maybe share this code outside
+is_pcrlock() {
+	[ -e /usr/lib/systemd/systemd-pcrlock ]
 }
 
 # TODO: Maybe share this code outside
@@ -1174,7 +1241,7 @@ select_entries_for_prediction()
 	    done
 	fi
 
-	log_info "Creating predictions for snapshots: ${!snapshots[*]}"
+	info_log "Creating predictions for snapshots: ${!snapshots[*]}"
 	local re
 	if [ "${#snapshots[@]}" = 1 ]; then
 	    re="${!snapshots[*]}"
@@ -1194,11 +1261,11 @@ pcrlock_cmdline_initrd() {
 	# 710-kernel-cmdline-initrd-entry.pcrlock.d is not part of the
 	# pcrlock standards
 	echo "$cmdline" > "$tmpdir/cmdline"
-	pcrlock \
+	run_log /usr/lib/systemd/systemd-pcrlock \
 		lock-kernel-cmdline \
 		--pcrlock="$tmpdir/cmdline.pcrlock" \
 		"$tmpdir/cmdline"
-	pcrlock \
+	run_log /usr/lib/systemd/systemd-pcrlock \
 		lock-kernel-initrd \
 		--pcrlock="$tmpdir/initrd.pcrlock" \
 		"${boot_root}/$initrd"
@@ -1214,7 +1281,7 @@ pcrlock_cmdline_initrd() {
 	# pcrlock standards
 	echo -ne "$cmdline\0" > "$tmpdir/cmdline"
 	iconv -t UTF-16LE -o "$tmpdir/cmdline.utf16" "$tmpdir/cmdline"
-	pcrlock \
+	run_log /usr/lib/systemd/systemd-pcrlock \
 		lock-raw \
 		--pcr=12 \
 		--pcrlock="/var/lib/pcrlock.d/710-kernel-cmdline-boot-loader.pcrlock.d/cmdline-$suffix.pcrlock" \
@@ -1234,18 +1301,18 @@ generate_tpm2_predictions_pcrlock()
 	# predictions at minimum and decrease the combinations
 	rm -fr /var/lib/pcrlock.d/*
 
-	pcrlock lock-firmware-code
-	pcrlock lock-firmware-config
+	run_log /usr/lib/systemd/systemd-pcrlock lock-firmware-code
+	run_log /usr/lib/systemd/systemd-pcrlock lock-firmware-config
 	# If secure boot is disabled, this can fail.  There is patch
 	# for the policy generation, and for the authority is planned
-	/usr/lib/systemd/systemd-pcrlock lock-secureboot-policy || true
-	/usr/lib/systemd/systemd-pcrlock lock-secureboot-authority || true
-	# uses / by default
-	pcrlock lock-gpt
+	run_log /usr/lib/systemd/systemd-pcrlock lock-secureboot-policy || true
+	run_log /usr/lib/systemd/systemd-pcrlock lock-secureboot-authority || true
+	# TODO: what drive should be here?
+	# run_log /usr/lib/systemd/systemd-pcrlock lock-gpt "$drive"
 
 	# 630-shim-efi-application is not part of the pcrlock standards
 	# TODO: move to shim-pcrlock.rpm
-	pcrlock \
+	run_log /usr/lib/systemd/systemd-pcrlock \
 	    lock-pe \
 	    --pcrlock=/var/lib/pcrlock.d/630-shim-efi-application.pcrlock.d/generated.pcrlock \
 	    "${boot_root}${sdboot_dst}/shim.efi"
@@ -1254,17 +1321,10 @@ generate_tpm2_predictions_pcrlock()
 	# standards
 	# This is measuing the systemd-boot EFI binary (named grub.efi)
 	# TODO: move to systemd-boot-pcrlock.rpm
-	pcrlock \
+	run_log /usr/lib/systemd/systemd-pcrlock \
 	    lock-pe \
 	    --pcrlock=/var/lib/pcrlock.d/640-boot-loader-efi-application.pcrlock.d/generated.pcrlock \
 	    "${boot_root}${sdboot_dst}/grub.efi"
-
-	if [ -e "$boot_root/loader/loader.conf" ]; then
-		pcrlock \
-			lock-raw /boot/efi/loader/loader.conf \
-			--pcr=5 \
-			--pcrlock=/var/lib/pcrlock.d/641-sdboot-loader-conf.pcrlock
-	fi
 
 	# 650-kernel-efi-application.pcrlock is not part of the
 	# pcrlock standards
@@ -1272,7 +1332,7 @@ generate_tpm2_predictions_pcrlock()
 	local n=0
 	while read -r i; do
 		n=$((n+1))
-		pcrlock \
+		run_log /usr/lib/systemd/systemd-pcrlock \
 		    lock-pe \
 		    --pcrlock=/var/lib/pcrlock.d/650-kernel-efi-application.pcrlock.d/linux-"$n".pcrlock \
 		    "${boot_root}/$i"
@@ -1299,7 +1359,7 @@ generate_tpm2_predictions_pcrlock()
 		pcrlock_cmdline_initrd "$cmdline" "$initrd" "0"
 	fi
 
-	pcrlock --pcr="$pcrs" make-policy
+	run_log /usr/lib/systemd/systemd-pcrlock --pcr="$pcrs" make-policy
 
 	# Publish the assets in the ESP, so can be imported by
 	# dracut-pcr-signature
@@ -1327,24 +1387,14 @@ generate_tpm2_predictions_pcr_oracle()
 	select_entries_for_prediction
 
 	all_pcrs=$(get_pcrs)
-	if [ -z "$all_pcrs" ]; then
-		warn "PCR Oracle configured but not enrolled in any LUKS header"
-		return 0
-	fi
-
-	rm -f /etc/systemd/tpm2-pcr-signature.json
+	[ -z "$all_pcrs" ] || rm -f /etc/systemd/tpm2-pcr-signature.json
 
 	# We make as many predictions as |all_pcrs| * |entries| to
 	# cover all the combinations.  pcr-oracle is smart to include
 	# the entry only one time, so we will not have duplications.
 	# This is a step for multi device configurations.
-	declare -a entries
-	mapfile -t entries < <(jq -r '.[]|.id' "$entryfile")
-	if [ -z "${entries[0]}" ]; then
-		err "No bootloader entries found"
-	fi
 	for pcrs in $all_pcrs; do
-		for entry in "${entries[@]}"; do
+		while read -r entry; do
 			log_info "Generate prediction for $entry with PCRs $pcrs"
 			if ! pcr-oracle \
 				--private-key /etc/systemd/tpm2-pcr-private-key.pem \
@@ -1353,9 +1403,9 @@ generate_tpm2_predictions_pcr_oracle()
 				--target-platform=systemd \
 				--boot-entry "${entry}" \
 				sign "$pcrs"; then
-				err "Failed to install TPM predictions for ${entry}"
+				err "Failed to install TPM predictions for ${entry_id}"
 			fi
-		done
+		done < <(jq -r '.[]|.id' "$entryfile")
 	done
 
 	# Publish the assets in the ESP, so can be imported by
@@ -1370,14 +1420,19 @@ generate_tpm2_predictions()
 {
 	[ -e /etc/crypttab ] || return 0
 	grep -q "tpm2-device" /etc/crypttab || return 0
+	[ -e /etc/sysconfig/fde-tools ] || return 0
 
-	if is_pcr_oracle; then
-		generate_tpm2_predictions_pcr_oracle
-	elif have_pcrlock; then
-		[ -e /etc/sysconfig/fde-tools ] || return 0
-		. /etc/sysconfig/fde-tools
+	. /etc/sysconfig/fde-tools
 
+	if is_pcrlock && is_pcr_oracle; then
+		echo "pcrlock and signed policies are mutually exclusive, remove one set of files to continue"
+		return 0
+	fi
+
+	if is_pcrlock; then
 		generate_tpm2_predictions_pcrlock "${FDE_SEAL_PCR_LIST}"
+	elif is_pcr_oracle; then
+		generate_tpm2_predictions_pcr_oracle
 	fi
 }
 
@@ -1399,7 +1454,7 @@ main_menu()
 
 ####### main #######
 
-getopttmp=$(getopt -o hc:v --long help,flicker,verbose,esp-path:,entry-token:,arch:,image:,no-variables,no-reuse-initrd,no-random-seed,all -n "${0##*/}" -- "$@")
+getopttmp=$(getopt -o hc:v --long help,flicker,verbose,esp-path:,entry-token:,arch:,image:,no-variables,no-reuse-initrd,no-random-seed,all,no-snapshots -n "${0##*/}" -- "$@")
 eval set -- "$getopttmp"
 
 while true ; do
@@ -1415,13 +1470,14 @@ while true ; do
 		--no-reuse-initrd) arg_no_reuse_initrd=1; shift ;;
 		--no-random-seed) arg_no_random_seed=1; shift ;;
 		--all) arg_all_entries=1; shift ;;
+		--no-snapshots) no_snapshots=1; shift ;;
                 --) shift ; break ;;
                 *) echo "Internal error!" ; exit 1 ;;
         esac
 done
 
 case "$1" in
-	install|needs-update|update|force-update|add-kernel|remove-kernel|set-default-snapshot|add-all-kernels|mkinitrd|remove-all-kernels|is-installed|list-snapshots|list-entries|list-kernels|is-bootable|update-predictions) ;;
+	install|needs-update|update|force-update|add-kernel|remove-kernel|set-default-snapshot|add-all-kernels|remove-all-kernels|is-installed|list-snapshots|list-entries|list-kernels|is-bootable|update-predictions) ;;
 	kernels|snapshots|entries|"") stty_size; interactive=1 ;;
 	*) err "unknown command $1" ;;
 esac
@@ -1437,8 +1493,13 @@ done
 # XXX: bootctl should have json output for that too
 eval "$(bootctl 2>/dev/null | sed -ne 's/Firmware Arch: *\(\w\+\)/firmware_arch="\1"/p;s/ *token: *\(\w\+\)/entry_token="\1"/p;s, *\$BOOT: *\([^ ]\+\).*,boot_root="\1",p')"
 read -r root_uuid root_device < <(findmnt / -v -r -n -o UUID,SOURCE)
-root_subvol=$(btrfs subvol show / 2>/dev/null|head -1)
-subvol_prefix="${root_subvol%/.snapshots/*}"
+if [ $no_snapshots -eq 1 ]; then
+	root_subvol=""
+	sub_vol_prefix=""
+else
+	root_subvol=$(btrfs subvol show / 2>/dev/null|head -1)
+	subvol_prefix="${root_subvol%/.snapshots/*}"
+fi
 [ -s /etc/machine-id ] && read -r machine_id < /etc/machine-id
 
 if [ -n "$arg_esp_path" ] && [ "$boot_root" != "$arg_esp_path" ]; then
@@ -1449,7 +1510,7 @@ settle_entry_token
 
 [ -n "$boot_root" ] || err "No ESP detected. Legacy system?"
 [ -n "$root_uuid" ] || err "Can't determine root UUID"
-[ -n "$root_subvol" ] || err "Can't determine root subvolume"
+[ -n "$root_subvol" ] || [ $no_snapshots -eq 1 ] || err "Can't determine root subvolume"
 [ -n "$root_device" ] || err "Can't determine root device"
 [ -n "$entry_token" ] || err "No entry token. sd-boot not installed?"
 [ -n "$firmware_arch" ] || err "Can't determine firmware arch"
@@ -1459,8 +1520,12 @@ case "$firmware_arch" in
 	*) err "Unsupported architecture $firmware_arch" ;;
 esac
 
-root_snapshot="${root_subvol#${subvol_prefix}/.snapshots/}"
-root_snapshot="${root_snapshot%/snapshot}"
+if [ $no_snapshots -eq 1 ]; then
+	root_snapshot=""
+else
+	root_snapshot="${root_subvol#${subvol_prefix}/.snapshots/}"
+	root_snapshot="${root_snapshot%/snapshot}"
+fi
 
 if [ "$1" = "install" ]; then
 	install_sdboot "${2:-$root_snapshot}"
@@ -1471,14 +1536,11 @@ elif [ "$1" = "update" ]; then
 elif [ "$1" = "force-update" ]; then
 	if is_installed; then install_sdboot "${2:-$root_snapshot}"; else :; fi
 elif [ "$1" = "add-kernel" ]; then
-	install_kernel "${3:-$root_snapshot}" "$2"
+	install_kernel "${3:-$root_subvol}" "$2"
 elif [ "$1" = "add-all-kernels" ]; then
 	install_all_kernels "${2:-$root_snapshot}"
-elif [ "$1" = "mkinitrd" ]; then
-	arg_no_reuse_initrd=1
-	install_all_kernels "${2:-$root_snapshot}"
 elif [ "$1" = "remove-kernel" ]; then
-	remove_kernel "${3:-$root_snapshot}" "$2"
+	remove_kernel "${3:-$root_subvol}" "$2"
 elif [ "$1" = "remove-all-kernels" ]; then
 	remove_all_kernels "${2:-$root_snapshot}"
 elif [ "$1" = "set-default-snapshot" ]; then
