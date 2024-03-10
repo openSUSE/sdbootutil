@@ -255,9 +255,10 @@ sedrootflags()
 
 remove_kernel()
 {
-	local subvol="$1"
+	local snapshot="${1:?}"
+	local subvol="${subvol_prefix}/.snapshots/${snapshot}/snapshot"
 	local kernel_version="$2"
-	local snapshot="${subvol#${subvol_prefix}/.snapshots/}"
+	# local snapshot="${subvol#${subvol_prefix}/.snapshots/}"
 	snapshot="${snapshot%/*}"
 	local id="$entry_token-$kernel_version-$snapshot.conf"
 	run_command_output bootctl unlink "$id"
@@ -889,7 +890,7 @@ list_kernels()
 	update_kernels "$subvol"
 	local kernelfiles=("${!installed_kernels[@]}")
 	for k in "${kernelfiles[@]}"; do
-		echo "k: $k" 
+		# echo "k: $k"
 		local id="${installed_kernels[$k]}"
 		echo $id
 		local kv="${k%/*}"
@@ -980,7 +981,7 @@ show_kernels()
 					break # might have selected delete so refresh
 					;;
 				install)
-					install_kernel "$subvol" "$kv"
+					install_kernel "$snapshot" "$kv"
 					break
 					;;
 			esac
@@ -1503,7 +1504,7 @@ while true ; do
 done
 
 case "$1" in
-	install|needs-update|update|force-update|add-kernel|remove-kernel|set-default-snapshot|add-all-kernels|remove-all-kernels|is-installed|list-snapshots|list-entries|list-kernels|is-bootable|update-predictions) ;;
+	install|needs-update|update|force-update|add-kernel|remove-kernel|set-default-snapshot|add-all-kernels|mkinitrd|remove-all-kernels|is-installed|list-snapshots|list-entries|list-kernels|is-bootable|update-predictions) ;;
 	kernels|snapshots|entries|"") stty_size; interactive=1 ;;
 	*) err "unknown command $1" ;;
 esac
@@ -1562,11 +1563,11 @@ elif [ "$1" = "update" ]; then
 elif [ "$1" = "force-update" ]; then
 	if is_installed; then install_sdboot "${2:-$root_snapshot}"; else :; fi
 elif [ "$1" = "add-kernel" ]; then
-	install_kernel "${3:-$root_subvol}" "$2"
+	install_kernel "${3:-$snapshot}" "$2"
 elif [ "$1" = "add-all-kernels" ]; then
 	install_all_kernels "${2:-$root_snapshot}"
 elif [ "$1" = "remove-kernel" ]; then
-	remove_kernel "${3:-$root_subvol}" "$2"
+	remove_kernel "${3:-$snapshot}" "$2"
 elif [ "$1" = "remove-all-kernels" ]; then
 	remove_all_kernels "${2:-$root_snapshot}"
 elif [ "$1" = "set-default-snapshot" ]; then
