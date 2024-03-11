@@ -64,10 +64,10 @@ helpandquit()
 		  -h, --help		This screen
 
 		COMMAND:
-		bootloader
+		bootloader [SNAPSHOT]
 			   Print the detected bootloader
 
-		add-kernel VERSION [[SNAPSHOT]
+		add-kernel VERSION [SNAPSHOT]
 			   Create boot entry for specified kernel
 
 		add-all-kernels [SNAPSHOT]
@@ -160,8 +160,8 @@ is_sdboot()
 	# If systemd-boot and grub2 are co-installed, we favor grub2
 	# in the detection
 	local sdboot grub2
-	sdboot="$(find_sdboot)"
-	grub2="$(find_grub2)"
+	sdboot="$(find_sdboot "${1-$root_snapshot}")"
+	grub2="$(find_grub2 "${1-$root_snapshot}")"
 	[ -e "$sdboot" ] && [ ! -e "$grub2" ]
 }
 
@@ -170,7 +170,7 @@ is_grub2()
 	# If systemd-boot and grub2 are co-installed, we favor grub2
 	# in the detection
 	local grub2
-	grub2="$(find_grub2)"
+	grub2="$(find_grub2 "${1-$root_snapshot}")"
 	[ -e "$grub2" ]
 }
 
@@ -996,10 +996,10 @@ find_grub2()
 
 find_bootloader()
 {
-	if is_sdboot; then
-		find_sdboot "$1"
-	elif is_grub2; then
-		find_grub2 "$1"
+	if is_sdboot "${1-$root_snapshot}"; then
+		find_sdboot "${1-$root_snapshot}"
+	elif is_grub2 "${1-$root_snapshot}"; then
+		find_grub2 "${1-$root_snapshot}"
 	else
 		err "Bootloader not detected"
 	fi
@@ -1018,7 +1018,7 @@ bootloader_needs_update()
 	[ -n "$v" ] || return 1
 	log_info "system version $nv"
 	systemd-analyze compare-versions "$v" lt "$nv" 2>/dev/null || return 1
-	bldr_name=$(bootloader_name)
+	bldr_name=$(bootloader_name "$snapshot")
 	log_info "$bldr_name needs to be updated"
 	return 0
 }
@@ -1029,8 +1029,8 @@ install_bootloader()
 	local prefix="/.snapshots/${root_snapshot}/snapshot"
 	local bootloader bldr_name blkpart drive partno
 
-	bootloader=$(find_bootloader "$1")
-	bldr_name=$(bootloader_name)
+	bootloader=$(find_bootloader "$snapshot")
+	bldr_name=$(bootloader_name "$snapshot")
 
 	mkdir -p "$boot_root/loader/entries"
 
@@ -1070,7 +1070,7 @@ install_bootloader()
 	[ -s /etc/kernel/entry-token ] || echo "$entry_token" > /etc/kernel/entry-token
 	update_random_seed
 
-	if is_sdboot; then
+	if is_sdboot "$snapshot"; then
 		[ -s "$boot_root/loader/entries.srel" ] || echo type1 > "$boot_root/loader/entries.srel"
 		[ -e "$boot_root/loader/loader.conf" ] || echo -e "#timeout 3\n#console-mode keep\n" > "$boot_root/loader/loader.conf"
 	fi
@@ -1434,9 +1434,9 @@ generate_tpm2_predictions()
 
 bootloader_name()
 {
-	if is_sdboot; then
+	if is_sdboot "${1-$root_snapshot}"; then
 		echo "systemd-boot"
-	elif is_grub2; then
+	elif is_grub2 "${1-$root_snapshot}"; then
 		echo "grub2"
 	else
 		err "Bootloader not detected"
