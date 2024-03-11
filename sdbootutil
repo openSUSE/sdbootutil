@@ -64,6 +64,7 @@ helpandquit()
 		  --image		Specify Linux kernel file name
 		  --no-variables	Do not update UEFI variables
 		  --no-reuse-initrd	Always regenerate initrd
+		  --no-snapshots	The running system does not support snapshots
 		  -v, --verbose		More verbose output
 		  -h, --help		This screen
 
@@ -227,7 +228,11 @@ subvol_is_ro()
 
 detect_parent() {
 	local subvol="$1"
-	parent_uuid="$(btrfs subvol show "${subvol#${subvol_prefix}}" | sed -ne 's/\s*Parent UUID:\s*//p')"
+	if [ $no_snapshots -eq 1 ]; then
+		parent_uuid=""
+	else
+		parent_uuid="$(btrfs subvol show "${subvol#${subvol_prefix}}" | sed -ne 's/\s*Parent UUID:\s*//p')"
+	fi
 	[ "$parent_uuid" != '-' ] || parent_uuid=
 	[ -n "$parent_uuid" ] || return 0
 	parent_subvol="$(/sbin/btrfs subvol show -u "$parent_uuid" "${subvol#${subvol_prefix}}" | head -1)"
@@ -255,12 +260,21 @@ sedrootflags()
 
 remove_kernel()
 {
-	local snapshot="${1:?}"
-	local subvol="${subvol_prefix}/.snapshots/${snapshot}/snapshot"
+	if [ $no_snapshots -eq 1 ]; then
+		snapshot=""
+		subvol=""
+	else
+		local snapshot="${1:?}"
+		local subvol="${subvol_prefix}/.snapshots/${snapshot}/snapshot"
+		snapshot="${snapshot%/*}"
+	fi
+	
 	local kernel_version="$2"
+	echo "kerbel_version in remove_kernel: $kernel_version"
 	# local snapshot="${subvol#${subvol_prefix}/.snapshots/}"
-	snapshot="${snapshot%/*}"
+	
 	local id="$entry_token-$kernel_version-$snapshot.conf"
+	echo "id: $id"
 	run_command_output bootctl unlink "$id"
 
 	# This action will require to update the PCR predictions
@@ -405,9 +419,9 @@ install_kernel()
 	local src="${subvol#${subvol_prefix}}/lib/modules/$kernel_version/$image"
 	local initrd=()
 	local dstinitrd=()
-	
-	test -e "$src" || err "Can't find $src"
 
+	test -e "$src" || err "Can't find $src"
+	
 	calc_chksum "$src"
 	local dst="/$entry_token/$kernel_version/linux-$chksum"
 
@@ -420,7 +434,6 @@ install_kernel()
 	local initrd="${src%/*}/initrd"
 
 	mkdir -p "$boot_root${dst%/*}"
-
 	if [ -e "$initrd" ]; then
 		ln -s "$initrd" "$tmpdir/initrd-0"
 	elif [ -d "$initrddir" ] && [ -x "/usr/bin/mkmoduleinitrd" ]; then
@@ -430,14 +443,17 @@ install_kernel()
 			ln -s "$f" "$tmpdir/initrd-$i"
 			((++i))
 		done
-		
+
 		/usr/bin/mkmoduleinitrd "${subvol#"${subvol_prefix}"}" "$kernel_version" "$tmpdir/initrd-$i"
+		
 	elif ! reuse_initrd "$snapshot" "$subvol"; then
 		local snapshot_dir="/.snapshots/$snapshot/snapshot"
+		local dracut_args=()
 		if [ $no_snapshots -eq 1 ]; then
 			snapshot_dir="/"
+			dracut_args=('--force' '--tmpdir' '/var/tmp' '--add-device' "$root_device")
 		fi
-		local dracut_args=()
+		
 		if [ "$subvol" != "$root_subvol" ]; then
 			dracut_args=('--sysroot' "${snapshot_dir}" '--tmpdir' '/var/tmp' '--add-device' "$root_device")
 		fi
@@ -547,8 +563,10 @@ remove_all_kernels()
 		local snapshot="${1:?}"
 	fi
 	find_kernels "$snapshot"
+	echo ${!found_kernels[@]}
 	for kv in "${!found_kernels[@]}"; do
 		remove_kernel "${snapshot}" "$kv"
+		echo "kv: $kv"
 	done
 
 }
@@ -612,10 +630,18 @@ list_entries()
 					fi
 				fi
 				if [ "$k" = 'options' ]; then
-					local snapshot
-					read -r snapshot <<<"$(echo "$v" | sed -e "s,.*rootflags=subvol=${subvol_prefix}/.snapshots/\([0-9]\+\)/snapshot.*,\1,")"
-					if [ ! -d "/.snapshots/$snapshot/snapshot" ]; then
-						errors+=("/.snapshot/$snapshot/snapshot does not exist")
+					if [ $no_snapshots -eq 1 ]; then
+						local snapshot
+						read -r snapshot <<<"$(echo "$v" | sed -e "s,.*rootflags=subvol=${subvol_prefix}\([0-9]\+\),\1,")"
+						if [ -n "$v" ]; then
+							echo $snapshot
+						fi
+					else
+						local snapshot
+						read -r snapshot <<<"$(echo "$v" | sed -e "s,.*rootflags=subvol=${subvol_prefix}/.snapshots/\([0-9]\+\)/snapshot.*,\1,")"
+						if [ ! -d "/.snapshots/$snapshot/snapshot" ]; then
+							errors+=("/.snapshot/$snapshot/snapshot does not exist")
+						fi
 					fi
 				fi
 			done < "$conf"
@@ -746,6 +772,9 @@ show_entry()
 
 list_snapshots()
 {
+	if [ $no_snapshots -eq 1 ]; then
+		err "list-snapshots incompatible with --no-snapshots!"
+	fi
 	update_snapper 2>"$tmpfile" || err "$(cat "$tmpfile")"
 
 	local n=0
@@ -763,6 +792,9 @@ list_snapshots()
 
 show_snapper()
 {
+	if [ $no_snapshots -eq 1 ]; then
+		err "snapshots incompatible with --no-snapshots!"
+	fi
 	if ! update_snapper 2>"$tmpfile"; then
 		d --title "Error" --textbox "$tmpfile" 0 0
 		exit 1
@@ -828,6 +860,7 @@ find_kernels()
 {
 	if [ $no_snapshots -eq 1 ]; then
 		local subvol=""
+		subvol_prefix=""
 	else
 		local subvol="${1:?}"
 	fi
@@ -842,6 +875,7 @@ find_kernels()
 		found_kernels["$kv"]="$chksum"
 		log_info "found kernel $kv = $chksum"
 	done
+	# echo "fnd_k in find_kernels: $found_kernels[$kv]"
 }
 
 # map that uses expected path on the ESP for each installed kernel as key. The
