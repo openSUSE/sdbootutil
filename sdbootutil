@@ -241,7 +241,21 @@ sedrootflags()
 	# - delete BOOT_IMAGE= and initrd=
 	# - make sure root= refers to uuid
 	# - replace or add rootflags to point at correct subvolume
-	sed -e "s/[ \t]\+/ /g;s/\<\(BOOT_IMAGE\|initrd\)=[^ ]* \?//;s/\<root=[^ ]*/root=UUID=$root_uuid/;tr;:r;s,\<rootflags=subvol=[^ ]*,rootflags=subvol=$subvol,;tx; s,\$, rootflags=subvol=$subvol,;:x"
+	# - replace or add machine-id
+	processed_cmdline=$(sed -e "s/[ \t]\+/ /g" \
+							 -e "s/\<\(BOOT_IMAGE\|initrd\)=[^ ]* \?//" \
+							 -e "s/\<root=[^ ]*/root=UUID=$root_uuid/" \
+							 -e "s,\<rootflags=subvol=[^ ]*,rootflags=subvol=$subvol," \
+							 -e "s,\<systemd.machine_id=[^ ]*,systemd.machine_id=$machine_id,")
+
+	if ! echo "$processed_cmdline" | grep -q "\<rootflags=subvol="; then
+		processed_cmdline="$processed_cmdline rootflags=subvol=$subvol"
+	fi
+	if ! echo "$processed_cmdline" | grep -q "\<systemd.machine_id="; then
+		processed_cmdline="$processed_cmdline systemd.machine_id=$machine_id"
+	fi
+
+	echo "$processed_cmdline"
 }
 
 remove_kernel()
