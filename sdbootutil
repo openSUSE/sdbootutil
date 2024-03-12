@@ -11,6 +11,7 @@ interactive=
 verbose=
 nl=$'\n'
 shimdir="/usr/share/efi/$(uname -m)"
+grub2moddir="/usr/share/grub2/$(uname -m)-efi"
 arg_esp_path="$SYSTEMD_ESP_PATH"
 arg_entry_token=
 arg_arch=
@@ -1073,6 +1074,26 @@ install_bootloader()
 	if is_sdboot "$snapshot"; then
 		[ -s "$boot_root/loader/entries.srel" ] || echo type1 > "$boot_root/loader/entries.srel"
 		[ -e "$boot_root/loader/loader.conf" ] || echo -e "#timeout 3\n#console-mode keep\n" > "$boot_root/loader/loader.conf"
+	elif is_grub2 "$snapshot"; then
+		# Minimal configuration file for now.  The theme can
+		# come later with:
+		#   * rsync the theme in /boot/efi
+		#   * grub memdisk, removing unused modules (fs,
+		#     crypto, LVM, RAID)
+	        [ -e "$boot_root$boot_dst/grub.cfg" ] || cat > "$boot_root$boot_dst/grub.cfg" <<-EOF
+		timeout=8
+		function load_video {
+		  # A load_video call is added for each bls entry
+		  true
+		}
+		# Required to populate EFI varidables
+		insmod bli
+		blscfg
+		EOF
+
+		[ -e "$boot_root/EFI/BOOT/grub.cfg" ] || cp "$boot_root$boot_dst/grub.cfg" "$boot_root/EFI/BOOT/grub.cfg"
+		mkdir -p "$boot_root$boot_dst/$(uname -m)-efi"
+		cp -a "$prefix$grub2moddir/bli.mod" "$boot_root$boot_dst/$(uname -m)-efi"
 	fi
 
 	# Create boot menu entry if it does not exist
