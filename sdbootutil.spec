@@ -58,9 +58,6 @@ Plugin scripts for snapper to handle BLS config files
 %package rpm-scriptlets
 Summary:        Scripts to create boot entries on kernel updates
 Requires:       sdbootutil >= %{version}-%{release}
-# make sure to not replace scriptlets with nops on systems that
-# use grub2
-Conflicts:      grub2
 Conflicts:      suse-kernel-rpm-scriptlets
 Provides:       suse-kernel-rpm-scriptlets
 Obsoletes:      %{name}-filetriggers < %{version}

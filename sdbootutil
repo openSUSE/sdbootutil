@@ -6,13 +6,12 @@ shopt -s nullglob
 
 # set to --keep-title to use altenate screen. Better for debugging but causes flicker
 dialog_altenate_screen=
-dialog_backtitle="Systemd-boot"
+dialog_backtitle="sdbootutil"
 interactive=
 verbose=
 nl=$'\n'
 shimdir="/usr/share/efi/$(uname -m)"
-sdboot_vendor="systemd"
-sdboot_dst="/EFI/$sdboot_vendor"
+grub2moddir="/usr/share/grub2/$(uname -m)-efi"
 arg_esp_path="$SYSTEMD_ESP_PATH"
 arg_entry_token=
 arg_arch=
@@ -30,7 +29,7 @@ update_predictions=
 
 rollback=()
 
-tmpdir=$(mktemp -d -t sdboot.XXXXXX)
+tmpdir=$(mktemp -d -t sdbootutil.XXXXXX)
 cleanup()
 {
 	local i
@@ -49,7 +48,6 @@ trap cleanup EXIT
 
 entryfile="$tmpdir/entries.json"
 snapperfile="$tmpdir/snapper.json"
-title_sort_file="$tmpdir/title_sort.txt"
 tmpfile="$tmpdir/tmp"
 
 helpandquit()
@@ -67,6 +65,9 @@ helpandquit()
 		  -h, --help		This screen
 
 		COMMAND:
+		bootloader [SNAPSHOT]
+			   Print the detected bootloader
+
 		add-kernel VERSION [SNAPSHOT]
 			   Create boot entry for specified kernel
 
@@ -155,6 +156,25 @@ warn()
 	fi
 }
 
+is_sdboot()
+{
+	# If systemd-boot and grub2 are co-installed, we favor grub2
+	# in the detection
+	local sdboot grub2
+	sdboot="$(find_sdboot "${1-$root_snapshot}")"
+	grub2="$(find_grub2 "${1-$root_snapshot}")"
+	[ -e "$sdboot" ] && [ ! -e "$grub2" ]
+}
+
+is_grub2()
+{
+	# If systemd-boot and grub2 are co-installed, we favor grub2
+	# in the detection
+	local grub2
+	grub2="$(find_grub2 "${1-$root_snapshot}")"
+	[ -e "$grub2" ]
+}
+
 reset_rollback()
 {
 	for i in "${rollback[@]}"; do
@@ -192,6 +212,7 @@ menuheight() {
 }
 
 stty_size() {
+	# shellcheck disable=SC2046
 	set -- $(stty size 2>/dev/null)
 	LINES="$1"
 	COLUMNS="$2"
@@ -203,7 +224,6 @@ stty_size() {
 	fi
 
 	dh_menu=$((LINES-15))
-	dh_text=$((LINES-5))
 }
 
 # check whether it's a transactional system
@@ -217,17 +237,17 @@ subvol_is_ro()
 	local subvol="${1:?}"
 	while read -r line; do
 		[ "$line" = "ro=true" ] && return 0
-	done < <(btrfs prop get -t s "${subvol#${subvol_prefix}}" ro)
+	done < <(btrfs prop get -t s "${subvol#"${subvol_prefix}"}" ro)
 	return 1
 }
 
 detect_parent() {
 	local subvol="$1"
-	parent_uuid="$(btrfs subvol show "${subvol#${subvol_prefix}}" | sed -ne 's/\s*Parent UUID:\s*//p')"
+	parent_uuid="$(btrfs subvol show "${subvol#"${subvol_prefix}"}" | sed -ne 's/\s*Parent UUID:\s*//p')"
 	[ "$parent_uuid" != '-' ] || parent_uuid=
 	[ -n "$parent_uuid" ] || return 0
-	parent_subvol="$(/sbin/btrfs subvol show -u "$parent_uuid" "${subvol#${subvol_prefix}}" | head -1)"
-	parent_snapshot="${parent_subvol#${subvol_prefix}/.snapshots/}"
+	parent_subvol="$(/sbin/btrfs subvol show -u "$parent_uuid" "${subvol#"${subvol_prefix}"}" | head -1)"
+	parent_snapshot="${parent_subvol#"${subvol_prefix}"/.snapshots/}"
 	if [ "$parent_subvol" = "$parent_snapshot" ]; then
 		unset parent_subvol parent_snapshot
 	else
@@ -269,7 +289,7 @@ install_with_rollback()
 		mv "$dst" "$dst.bak" || return "$?"
 	fi
 	rollback+=("$dst")
-	install -m 0644 "$src" "$dst" || return "$?"
+	install -p -m 0644 "$src" "$dst" || return "$?"
 	chown root:root "$dst" 2>/dev/null || :
 	log_info "installed $dst"
 }
@@ -287,13 +307,14 @@ set_snapper_title_and_sortkey()
 
 	update_snapper
 
+	# shellcheck disable=SC2046
 	IFS="|" read -r type date desc important pre_num <<< \
 		$(jq -r --arg snapshot "$snapshot" \
 		'.["root"][]|select(.number==( $snapshot|tonumber))|[.type,.date,(.description|gsub("\\|";"_")),.userdata.important,."pre-number"//""]|join("|")'\
 		< "$snapperfile")
 
 	if [ -z "$desc" ] && [ "$type" = "post" ] && [ -n "$pre_num" ]; then
-		read -r desc <<< $(jq -r --arg snapshot "$pre_num" '.["root"][]|select(.number==($snapshot|tonumber))|.description' < "$snapperfile")
+		read -r desc <<< "$(jq -r --arg snapshot "$pre_num" '.["root"][]|select(.number==($snapshot|tonumber))|.description' < "$snapperfile")"
 	fi
 
 	if [ "$important" = "yes" ]; then important="*"; else important=""; fi
@@ -347,7 +368,7 @@ mount_etc()
 	local snapshot_dir="$1"
 
 	IFS=',' read -ra fields <<< \
-	   $(findmnt --tab-file "${snapshot_dir}/etc/fstab" --noheadings --nofsroot --output OPTIONS /etc | sed 's#/sysroot##g' | sed 's#:/etc,#:'${snapshot_dir}'/etc,#g')
+	   $(findmnt --tab-file "${snapshot_dir}/etc/fstab" --noheadings --nofsroot --output OPTIONS /etc | sed 's#/sysroot##g' | sed 's#:/etc,#:'"${snapshot_dir}"'/etc,#g')
 
 	local lower=""
 	local upper=""
@@ -377,10 +398,9 @@ install_kernel()
 	local snapshot="${1:?}"
 	local subvol="${subvol_prefix}/.snapshots/${snapshot}/snapshot"
 	local kernel_version="$2"
-	local initrd=()
 	local dstinitrd=()
-	local src="${subvol#${subvol_prefix}}/lib/modules/$kernel_version/$image"
-	local initrddir="${subvol#${subvol_prefix}}/usr/lib/initrd"
+	local src="${subvol#"${subvol_prefix}"}/lib/modules/$kernel_version/$image"
+	local initrddir="${subvol#"${subvol_prefix}"}/usr/lib/initrd"
 	test -e "$src" || err "Can't find $src"
 
 	calc_chksum "$src"
@@ -785,7 +805,7 @@ find_kernels()
 	local fn kv
 	found_kernels=()
 
-	for fn in "${subvol#${subvol_prefix}}"/usr/lib/modules/*/"$image"; do
+	for fn in "${subvol#"${subvol_prefix}"}"/usr/lib/modules/*/"$image"; do
 		kv="${fn%/*}"
 		kv="${kv##*/}"
 		calc_chksum "$fn"
@@ -926,27 +946,35 @@ show_kernels()
 	done
 }
 
-sdboot_version()
+bootloader_version()
 {
 	local fn="$1"
 	if [ -z "$1" ]; then
 		if [ -e "$shimdir/shim.efi" ]; then
-			fn="$boot_root$sdboot_dst/grub.efi"
+			fn="$boot_root$boot_dst/grub.efi"
 		else
-			local sdboot
-			sdboot="$(find_sdboot)"
-			fn="$boot_root$sdboot_dst/${sdboot##*/}"
+			local bootloader
+			bootloader="$(find_bootloader)"
+			fn="$boot_root$boot_dst/${bootloader##*/}"
 		fi
 	fi
 	[ -e "$fn" ] || return 1
-	read -r _ _ _ v _ < <(grep -ao '#### LoaderInfo: systemd-boot [^#]\+ ####' "$fn")
+	if is_sdboot; then
+		read -r _ _ _ v _ < <(grep -ao '#### LoaderInfo: systemd-boot [^#]\+ ####' "$fn")
+	else
+		# Useless as it reports mayor.minor, so append the
+		# last update time until the minutes, as the FAT store
+		# dates differently than other filesystems
+		read -r _ _ _ v _ < <(grep -aoP 'GNU GRUB  version %s\x00[^\x00]+\x00' "$fn")
+		v="${v:2}-$(date -r "$fn" +'%Y%m%d%H%M')"
+	fi
 	[ -n "$v" ] || return 1
 	echo "$v"
 }
 
 is_installed()
 {
-	sdboot_version > /dev/null && [ -e "$boot_root/$sdboot_dst/installed_by_sdbootutil" ]
+	bootloader_version > /dev/null && [ -e "$boot_root/$boot_dst/installed_by_sdbootutil" ]
 }
 
 find_sdboot()
@@ -956,33 +984,54 @@ find_sdboot()
 	# systemd-boot from a separate package
 	local sdboot="$prefix/usr/lib/systemd-boot/systemd-boot$firmware_arch.efi"
 	[ -e "$sdboot" ] || sdboot="$prefix/usr/lib/systemd/boot/efi/systemd-boot$firmware_arch.efi"
-	[ -e "$sdboot" ] || err "missing $sdboot"
 	echo "$sdboot"
 }
 
-sdboot_needs_update()
+find_grub2()
+{
+	local prefix="/.snapshots/${1-$root_snapshot}/snapshot"
+	local grub2="$prefix/usr/share/efi/$(uname -m)/grub.efi"
+	[ -e "$grub2" ] || grub2="$prefix/usr/share/grub2/$(uname -m)-efi/grub.efi"
+	echo "$grub2"
+}
+
+find_bootloader()
+{
+	if is_sdboot "${1-$root_snapshot}"; then
+		find_sdboot "${1-$root_snapshot}"
+	elif is_grub2 "${1-$root_snapshot}"; then
+		find_grub2 "${1-$root_snapshot}"
+	else
+		err "Bootloader not detected"
+	fi
+}
+
+bootloader_needs_update()
 {
 	local snapshot="${1-$root_snapshot}"
 	local prefix="/.snapshots/${snapshot}/snapshot"
+	local bldr_name
 	local v nv
-	v="$(sdboot_version)"
+	v="$(bootloader_version)"
 	[ -n "$v" ] || return 1
 	log_info "deployed version $v"
-	nv="$(sdboot_version "$(find_sdboot "$snapshot")")"
+	nv="$(bootloader_version "$(find_bootloader "$snapshot")")"
 	[ -n "$v" ] || return 1
 	log_info "system version $nv"
 	systemd-analyze compare-versions "$v" lt "$nv" 2>/dev/null || return 1
-	log_info "systemd-boot needs to be updated"
+	bldr_name=$(bootloader_name "$snapshot")
+	log_info "$bldr_name needs to be updated"
 	return 0
 }
 
-install_sdboot()
+install_bootloader()
 {
 	local snapshot="${1:-$root_snapshot}"
 	local prefix="/.snapshots/${root_snapshot}/snapshot"
-	local sdboot blkpart drive partno
+	local bootloader bldr_name blkpart drive partno
 
-	sdboot=$(find_sdboot "$1")
+	bootloader=$(find_bootloader "$snapshot")
+	bldr_name=$(bootloader_name "$snapshot")
 
 	mkdir -p "$boot_root/loader/entries"
 
@@ -995,36 +1044,57 @@ install_sdboot()
 	read -r partno < "/sys/class/block/${blkpart##*/}"/partition
 
 	if [ -e "$prefix$shimdir/shim.efi" ]; then
-		log_info "Installing systemd-boot with shim into $boot_root"
-		entry="$sdboot_dst/shim.efi"
+		log_info "Installing $bldr_name with shim into $boot_root"
+		entry="$boot_dst/shim.efi"
 		for i in MokManager shim; do
-			install -D "$prefix$shimdir/$i.efi" "$boot_root$sdboot_dst/$i.efi"
+			install -p -D "$prefix$shimdir/$i.efi" "$boot_root$boot_dst/$i.efi"
 		done
-		install -D "$sdboot" "$boot_root$sdboot_dst/grub.efi"
+		install -p -D "$bootloader" "$boot_root$boot_dst/grub.efi"
 
 		# boot entry point
 		for i in MokManager fallback; do
-			install -D "$prefix$shimdir/$i.efi" "$boot_root/EFI/BOOT/$i.efi"
+			install -p -D "$prefix$shimdir/$i.efi" "$boot_root/EFI/BOOT/$i.efi"
 		done
-		install -D "$prefix$shimdir/shim.efi" "$boot_root/EFI/BOOT/BOOT${firmware_arch^^}.EFI"
+		install -p -D "$prefix$shimdir/shim.efi" "$boot_root/EFI/BOOT/BOOT${firmware_arch^^}.EFI"
 	else
-		log_info "Installing systemd-boot into $boot_root"
-		entry="$sdboot_dst/${sdboot##*/}"
-		install -D "$sdboot" "$boot_root$entry"
-		install -D "$sdboot" "$boot_root/EFI/BOOT/BOOT${firmware_arch^^}.EFI"
+		log_info "Installing $bldr_name into $boot_root"
+		entry="$boot_dst/${bootloader##*/}"
+		install -p -D "$bootloader" "$boot_root$entry"
+		install -p -D "$bootloader" "$boot_root/EFI/BOOT/BOOT${firmware_arch^^}.EFI"
 	fi
 	# this is for shim to create the entry if missing
-	echo "${entry##*/},openSUSE Boot Manager" | iconv -f ascii -t ucs2 > "$boot_root/$sdboot_dst/boot.csv"
+	echo "${entry##*/},openSUSE Boot Manager" | iconv -f ascii -t ucs2 > "$boot_root/$boot_dst/boot.csv"
 
 	mkdir -p "$boot_root/$entry_token"
-	echo "$entry_token" > "$boot_root/$sdboot_dst/installed_by_sdbootutil"
+	echo "$entry_token" > "$boot_root/$boot_dst/installed_by_sdbootutil"
 	mkdir -p "/etc/kernel"
 	[ -s /etc/kernel/entry-token ] || echo "$entry_token" > /etc/kernel/entry-token
 	update_random_seed
 
-	[ -s "$boot_root/loader/entries.srel" ] || echo type1 > "$boot_root/loader/entries.srel"
+	if is_sdboot "$snapshot"; then
+		[ -s "$boot_root/loader/entries.srel" ] || echo type1 > "$boot_root/loader/entries.srel"
+		[ -e "$boot_root/loader/loader.conf" ] || echo -e "#timeout 3\n#console-mode keep\n" > "$boot_root/loader/loader.conf"
+	elif is_grub2 "$snapshot"; then
+		# Minimal configuration file for now.  The theme can
+		# come later with:
+		#   * rsync the theme in /boot/efi
+		#   * grub memdisk, removing unused modules (fs,
+		#     crypto, LVM, RAID)
+	        [ -e "$boot_root$boot_dst/grub.cfg" ] || cat > "$boot_root$boot_dst/grub.cfg" <<-EOF
+		timeout=8
+		function load_video {
+		  # A load_video call is added for each bls entry
+		  true
+		}
+		# Required to populate EFI varidables
+		insmod bli
+		blscfg
+		EOF
 
-    	[ -e "$boot_root/loader/loader.conf" ] || echo -e "#timeout 3\n#console-mode keep\n" > "$boot_root/loader/loader.conf"
+		[ -e "$boot_root/EFI/BOOT/grub.cfg" ] || cp "$boot_root$boot_dst/grub.cfg" "$boot_root/EFI/BOOT/grub.cfg"
+		mkdir -p "$boot_root$boot_dst/$(uname -m)-efi"
+		cp -a "$prefix$grub2moddir/bli.mod" "$boot_root$boot_dst/$(uname -m)-efi"
+	fi
 
 	# Create boot menu entry if it does not exist
 	[ -n "$arg_no_variables" ] || efibootmgr | grep -q 'Boot.*openSUSE Boot Manager' || efibootmgr -q --create --disk "$drive" --part "$partno" --label "openSUSE Boot Manager" --loader "$entry" || true
@@ -1081,14 +1151,14 @@ update_random_seed()
 	mv "$boot_root/loader/random-seed.new" "$boot_root/loader/random-seed"
 }
 
-install_sdboot_interactive()
+install_bootloader_interactive()
 {
 	local v
-	v="$(sdboot_version)"
+	v="$(bootloader_version)"
 	if [ -n "$v" ]; then
-		if sdboot_needs_update; then
+		if bootloader_needs_update; then
 			local nv
-			nv="$(sdboot_version "$(find_sdboot)")"
+			nv="$(bootloader_version "$(find_bootloader)")"
 			d --aspect 60 --yesno "Update systemd-boot from $v to $nv?" 0 0 || return 0
 		else
 			d --aspect 60 --yesno "systemd-boot already at current version $v. Install again?" 0 0 || return 0
@@ -1097,7 +1167,7 @@ install_sdboot_interactive()
 		d --aspect 60 --yesno "Are you sure you want to install systemd-boot into $boot_root?\n
 			This will overwrite any existing bootloaders" 0 0 || return 0
 	fi
-	install_sdboot
+	install_bootloader
 	d --aspect 60 --msgbox "Installed into $boot_root" 0 0
 }
 
@@ -1168,18 +1238,19 @@ select_entries_for_prediction()
 	done < <(jq -r '.root[]|select(.active==true or .default==true)|.number' "$snapperfile")
 
 	if is_transactional && [ -e "${state_file}" ]; then
-	    . "${state_file}"
-	    for id in $LAST_WORKING_SNAPSHOTS; do
-		snapshots[$id]=1
-	    done
+		# shellcheck disable=SC1090
+		. "${state_file}"
+		for id in $LAST_WORKING_SNAPSHOTS; do
+			snapshots[$id]=1
+		done
 	fi
 
 	log_info "Creating predictions for snapshots: ${!snapshots[*]}"
 	local re
 	if [ "${#snapshots[@]}" = 1 ]; then
-	    re="${!snapshots[*]}"
+		re="${!snapshots[*]}"
 	else
-	    IFS='|' eval re='"(:?${!snapshots[*]})"'
+		IFS='|' eval re='"(:?${!snapshots[*]})"'
 	fi
 
 	update_entries_for_snapshot "$re"
@@ -1248,7 +1319,7 @@ generate_tpm2_predictions_pcrlock()
 	pcrlock \
 	    lock-pe \
 	    --pcrlock=/var/lib/pcrlock.d/630-shim-efi-application.pcrlock.d/generated.pcrlock \
-	    "${boot_root}${sdboot_dst}/shim.efi"
+	    "${boot_root}${boot_dst}/shim.efi"
 
 	# 640-boot-loader-efi-application is not part of the pcrlock
 	# standards
@@ -1257,7 +1328,7 @@ generate_tpm2_predictions_pcrlock()
 	pcrlock \
 	    lock-pe \
 	    --pcrlock=/var/lib/pcrlock.d/640-boot-loader-efi-application.pcrlock.d/generated.pcrlock \
-	    "${boot_root}${sdboot_dst}/grub.efi"
+	    "${boot_root}${boot_dst}/grub.efi"
 
 	if [ -e "$boot_root/loader/loader.conf" ]; then
 		pcrlock \
@@ -1303,7 +1374,7 @@ generate_tpm2_predictions_pcrlock()
 
 	# Publish the assets in the ESP, so can be imported by
 	# dracut-pcr-signature
-	[ -e /var/lib/systemd/pcrlock.json ] && cp /var/lib/systemd/pcrlock.json "${boot_root}${sdboot_dst}"
+	[ -e /var/lib/systemd/pcrlock.json ] && cp /var/lib/systemd/pcrlock.json "${boot_root}${boot_dst}"
 }
 
 get_pcrs() {
@@ -1360,8 +1431,8 @@ generate_tpm2_predictions_pcr_oracle()
 
 	# Publish the assets in the ESP, so can be imported by
 	# dracut-pcr-signature
-	cp /etc/systemd/tpm2-pcr-public-key.pem "${boot_root}${sdboot_dst}"
-	[ -e /etc/systemd/tpm2-pcr-signature.json ] && cp /etc/systemd/tpm2-pcr-signature.json "${boot_root}${sdboot_dst}"
+	cp /etc/systemd/tpm2-pcr-public-key.pem "${boot_root}${boot_dst}"
+	[ -e /etc/systemd/tpm2-pcr-signature.json ] && cp /etc/systemd/tpm2-pcr-signature.json "${boot_root}${boot_dst}"
 }
 
 
@@ -1375,9 +1446,21 @@ generate_tpm2_predictions()
 		generate_tpm2_predictions_pcr_oracle
 	elif have_pcrlock; then
 		[ -e /etc/sysconfig/fde-tools ] || return 0
+		# shellcheck disable=SC1091
 		. /etc/sysconfig/fde-tools
 
 		generate_tpm2_predictions_pcrlock "${FDE_SEAL_PCR_LIST}"
+	fi
+}
+
+bootloader_name()
+{
+	if is_sdboot "${1-$root_snapshot}"; then
+		echo "systemd-boot"
+	elif is_grub2 "${1-$root_snapshot}"; then
+		echo "grub2"
+	else
+		err "Bootloader not detected"
 	fi
 }
 
@@ -1392,7 +1475,7 @@ main_menu()
 			snapper) show_snapper ;;
 			sd-boot) update_entries cat; show_entries ;;
 			kernels) show_kernels "$root_snapshot";;
-			install) install_sdboot_interactive ;;
+			install) install_bootloader_interactive ;;
 		esac
 	done
 }
@@ -1421,7 +1504,7 @@ while true ; do
 done
 
 case "$1" in
-	install|needs-update|update|force-update|add-kernel|remove-kernel|set-default-snapshot|add-all-kernels|mkinitrd|remove-all-kernels|is-installed|list-snapshots|list-entries|list-kernels|is-bootable|update-predictions) ;;
+	install|needs-update|update|force-update|add-kernel|remove-kernel|set-default-snapshot|add-all-kernels|mkinitrd|remove-all-kernels|is-installed|list-snapshots|list-entries|list-kernels|is-bootable|update-predictions|bootloader) ;;
 	kernels|snapshots|entries|"") stty_size; interactive=1 ;;
 	*) err "unknown command $1" ;;
 esac
@@ -1459,17 +1542,28 @@ case "$firmware_arch" in
 	*) err "Unsupported architecture $firmware_arch" ;;
 esac
 
-root_snapshot="${root_subvol#${subvol_prefix}/.snapshots/}"
+root_snapshot="${root_subvol#"${subvol_prefix}"/.snapshots/}"
 root_snapshot="${root_snapshot%/snapshot}"
 
+# XXX: Unify both in /EFI/opensuse?
+if is_sdboot; then
+	boot_dst="/EFI/systemd"
+elif is_grub2; then
+	boot_dst="/EFI/opensuse"
+else
+	err "Bootloader not detected"
+fi
+
 if [ "$1" = "install" ]; then
-	install_sdboot "${2:-$root_snapshot}"
+	install_bootloader "${2:-$root_snapshot}"
 elif [ "$1" = "needs-update" ]; then
-	sdboot_needs_update "${2:-$root_snapshot}"
+	bootloader_needs_update "${2:-$root_snapshot}"
 elif [ "$1" = "update" ]; then
-	if sdboot_needs_update "${2:-$root_snapshot}"; then install_sdboot "${2:-$root_snapshot}"; else :; fi
+	if bootloader_needs_update "${2:-$root_snapshot}"; then install_bootloader "${2:-$root_snapshot}"; else :; fi
 elif [ "$1" = "force-update" ]; then
-	if is_installed; then install_sdboot "${2:-$root_snapshot}"; else :; fi
+	if is_installed; then install_bootloader "${2:-$root_snapshot}"; else :; fi
+elif [ "$1" = "bootloader" ]; then
+	bootloader_name "${2:-$root_snapshot}"
 elif [ "$1" = "add-kernel" ]; then
 	install_kernel "${3:-$root_snapshot}" "$2"
 elif [ "$1" = "add-all-kernels" ]; then
