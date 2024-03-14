@@ -261,7 +261,25 @@ sedrootflags()
 	# - delete BOOT_IMAGE= and initrd=
 	# - make sure root= refers to uuid
 	# - replace or add rootflags to point at correct subvolume
-	sed -e "s/[ \t]\+/ /g;s/\<\(BOOT_IMAGE\|initrd\)=[^ ]* \?//;s/\<root=[^ ]*/root=UUID=$root_uuid/;tr;:r;s,\<rootflags=subvol=[^ ]*,rootflags=subvol=$subvol,;tx; s,\$, rootflags=subvol=$subvol,;:x"
+	# - replace or add systemd.machine-id to match current machine-id
+	#
+	# from the sed manual:
+	# ‘t’
+	#     branch conditionally (that is: jump to a label) _only if_ a ‘s///’
+	#     command has succeeded since the last input line was read or another
+	#     conditional branch was taken.
+	# we use the t command to jump over an expression that appends a
+	# parameter if replacing the parameter succeeded (ie it was
+	# already there). Since we always operate on the same line,
+	# "empty" t jumps are used to reset the condition after very
+	# s///.
+	sed -e "s/[ \t]\+/ /g" \
+		-e "s/\<\(BOOT_IMAGE\|initrd\)=[^ ]* \?//" \
+		-e "ta;:a" \
+		-e "s/\<root=[^ ]*/root=UUID=$root_uuid/;tb;s,\$, root=UUID=$root_uuid,;tc;:c;:b" \
+		-e "s,\<rootflags=subvol=[^ ]*,rootflags=subvol=$subvol,;td;s,\$, rootflags=subvol=$subvol,;te;:e;:d" \
+		-e "s,\<systemd.machine_id=[^ ]*,systemd.machine_id=$machine_id,;tf;s,\$, systemd.machine_id=$machine_id,;tg;:g;:f"
+
 }
 
 remove_kernel()
