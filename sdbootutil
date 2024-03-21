@@ -1385,7 +1385,7 @@ generate_tpm2_predictions_pcrlock()
 	if [ "$SDB_ADD_INITIAL_CMDLINE" = "1" ]; then
 		read -r cmdline < /proc/cmdline
 		local initrd="${cmdline#*initrd=}"; initrd="${initrd%% *}"; initrd="${initrd//\\//}"
-		pcrlock_cmdline_initrd "$cmdline" "$initrd" "0"
+		pcrlock_cmdline_initrd "$cmdline" "$initrd" "0" || warn "Not all PCRs are registered in the policy"
 	fi
 
 	pcrlock --pcr="$pcrs" make-policy
