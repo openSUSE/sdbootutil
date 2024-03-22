@@ -294,10 +294,56 @@ remove_kernel()
 	update_predictions=1
 }
 
+remove_oldest_kernel()
+{
+	local snapshot="${1:?}"
+	local root_snapshot="${2:?}"
+	local efi_kernel_dir="$boot_root/$entry_token"
+	local loader_entries_dir="$boot_root/loader/entries"
+	find_kernels "$snapshot"
+	local snapshot_kernels=("${!found_kernels[@]}")
+	find_kernels "$root_snapshot"
+	declare -A kernels=()
+	local id
+	for kernel in "${snapshot_kernels[@]}" "${!found_kernels[@]}"; do
+		kernels["$kernel"]=1
+	done
+
+
+	local bootable_kernels=($(ls "$efi_kernel_dir" | sort -V))
+
+	local oldest_removable_kernel=""
+	for kernel in "${bootable_kernels[@]}"; do
+		if [[ ! ${kernels[$kernel]+_} ]]; then
+			oldest_removable_kernel="$kernel"
+			break
+		fi
+	done
+
+	if [[ -z "$oldest_removable_kernel" ]]; then
+		log_info "Not enough disk space & no kernels to remove."
+		return 1
+	fi
+
+	local conf_pattern="$loader_entries_dir/$entry_token-$oldest_removable_kernel-*.conf"
+	for conf_file in $conf_pattern; do
+		if [[ -e "$conf_file" ]]; then
+			id=$(basename "$conf_file")
+			bootctl unlink "$id"
+			log_info "Unlinked .conf file for ID: $id"
+		fi
+	done
+}
+
 install_with_rollback()
 {
 	local src="${1:?}"
-	local dst="${2:?}"
+	local dst="$boot_root/${2:?}"
+	local snapshot="${3:?}"
+	local root_snapshot="${4:?}"
+
+	local src_size_kb
+	local available_space_kb
 
 	if [ -e "$dst" ]; then
 		if cmp -s "$src" "$dst"; then
@@ -307,6 +353,27 @@ install_with_rollback()
 		mv "$dst" "$dst.bak" || return "$?"
 	fi
 	rollback+=("$dst")
+
+	src_size_kb=$(du -k "$src" | { read size _; echo "$size"; })
+	mkdir -p "${dst%/*}" 2>/dev/null || :
+	if [ -d "${dst%/*}" ]; then
+		read -r available_space_bytes < <(findmnt -n -b -o AVAIL --target "${dst%/*}")
+		available_space_kb=$((available_space_bytes / 1024))
+	else
+		log_info "Directory doesn't exist: ${dst%/*}"
+		available_space_kb=0
+	fi
+
+	while [ "$available_space_kb" -lt "$src_size_kb" ]; do
+		log_info "Not enough space available in ${dst%/*}"
+		remove_oldest_kernel "$snapshot" "$root_snapshot" || return "$?"
+		if [ ! -d "${dst%/*}" ]; then
+			mkdir -p "${dst%/*}"  2>/dev/null || :
+		fi
+		if [ -d "${dst%/*}" ]; then
+			available_space_kb=$(df -k "${dst%/*}" | awk 'NR==2 {print $4}')
+		fi
+	done
 	install -p -m 0644 "$src" "$dst" || return "$?"
 	chown root:root "$dst" 2>/dev/null || :
 	log_info "installed $dst"
@@ -426,8 +493,6 @@ install_kernel()
 
 	local initrd="${src%/*}/initrd"
 
-	mkdir -p "$boot_root${dst%/*}"
-
 	if [ -e "$initrd" ]; then
 		ln -s "$initrd" "$tmpdir/initrd-0"
 	elif [ -d "$initrddir" ] && [ -x "/usr/bin/mkmoduleinitrd" ]; then
@@ -499,7 +564,7 @@ install_kernel()
 
 	local failed=
 	if [ ! -e "$boot_root$dst" ]; then
-		install_with_rollback "$src" "$boot_root$dst" || failed=kernel
+		install_with_rollback "$src" "$dst" "$snapshot" "$root_snapshot" || failed=kernel
 	else
 		log_info "reusing $boot_root$dst"
 	fi
@@ -507,15 +572,15 @@ install_kernel()
 		i=0
 		while [ -e "$tmpdir/initrd-$i" ]; do
 			if [ ! -e "$boot_root${dstinitrd[$i]}" ]; then
-				install_with_rollback "$tmpdir/initrd-$i" "$boot_root${dstinitrd[$i]}" || { failed=initrd; break; }
+				install_with_rollback "$tmpdir/initrd-$i" "${dstinitrd[$i]}" "$snapshot" "$root_snapshot" || { failed=initrd; break; }
 				rm -f "$tmpdir/initrd-$i"
 			fi
 			((++i))
 		done
 	fi
 	if [ -z "$failed" ]; then
-		loader_entry="$boot_root/loader/entries/$entry_token-$kernel_version-$snapshot.conf"
-		install_with_rollback "$tmpdir/entry.conf" "$loader_entry" || failed="bootloader entry"
+		loader_entry="/loader/entries/$entry_token-$kernel_version-$snapshot.conf"
+		install_with_rollback "$tmpdir/entry.conf" "$loader_entry" "$snapshot" "$root_snapshot" || failed="bootloader entry"
 		rm -f "$tmpdir/entry.conf"
 	fi
 	[ -z "$failed" ] || err "Failed to install $failed"
