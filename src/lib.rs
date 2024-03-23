@@ -1,4 +1,5 @@
 pub mod cli;
+pub mod ui;
 
 pub trait MessagePrinter {
     fn print_message(&self, message: &str);
@@ -107,11 +108,6 @@ pub fn command_force_update(printer: &dyn MessagePrinter) {
 
 pub fn command_update_predictions(printer: &dyn MessagePrinter) {
     let message = "UpdatePredictions command called";
-    printer.print_message(message);
-}
-
-pub fn command_empty(printer: &dyn MessagePrinter) {
-    let message = "No command called";
     printer.print_message(message);
 }
 
