@@ -53,7 +53,9 @@ impl Menu {
     }
 }
 
-fn exit_menu(terminal: &mut Terminal<CrosstermBackend<impl Write>>) -> std::result::Result<(), Box<dyn std::error::Error>> {
+fn exit_menu(
+    terminal: &mut Terminal<CrosstermBackend<impl Write>>,
+) -> std::result::Result<(), Box<dyn std::error::Error>> {
     disable_raw_mode()?;
     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
     terminal.show_cursor()?;
@@ -103,12 +105,18 @@ pub fn show_menu() -> Result<(), Box<dyn std::error::Error>> {
                 Constraint::Percentage(50),
                 Constraint::Percentage(25),
             ];
-            let layout = Layout::default()
+
+            let vertical_layout = Layout::default()
                 .direction(Direction::Vertical)
                 .constraints(constraints.as_ref())
                 .split(size);
 
-            f.render_stateful_widget(menu_list, layout[1], &mut list_state);
+            let horizontal_layout = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints(constraints.as_ref())
+                .split(vertical_layout[1]);
+
+            f.render_stateful_widget(menu_list, horizontal_layout[1], &mut list_state);
         })?;
 
         match rx.recv()? {
