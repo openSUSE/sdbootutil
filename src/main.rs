@@ -1,4 +1,5 @@
 mod cli;
+mod ui;
 
 use cli::{parse_args, Commands};
 use sdbootutil as lib;
@@ -28,6 +29,6 @@ fn main() {
         Some(Commands::Update {}) => lib::command_update(&console_printer),
         Some(Commands::ForceUpdate {}) => lib::command_force_update(&console_printer),
         Some(Commands::UpdatePredictions {}) => lib::command_update_predictions(&console_printer),
-        None => lib::command_empty(&console_printer),
+        None => ui::show_menu().expect("Failed to display the menu"),
     }
 }
