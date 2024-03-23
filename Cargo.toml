@@ -2,7 +2,7 @@
 name = "sdbootutil"
 version = "0.1.0"
 edition = "2021"
-author = "Tobias Görgens"
+author = ["Tobias Görgens <tobi.goergens@gmail.com>"]
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
@@ -13,3 +13,8 @@ ratatui = "0.26.1"
 
 [dev-dependencies]
 mockall = "0.12.1"
+
+[dependencies.cursive]
+version = "0.20.0"
+default-features = false
+features = ["crossterm-backend"]
