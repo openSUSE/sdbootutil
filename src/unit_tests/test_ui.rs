@@ -1,25 +1,31 @@
 use super::super::ui::*;
+use mockall::predicate::*;
+use super::test_lib;
+
 #[test]
-fn test_menu_navigation() {
-    let mut menu = Menu::new(vec!["Item 1", "Item 2", "Item 3"]);
-    assert_eq!(menu.selected_index, 0);
-
-    // Navigate down
-    menu.handle_input(KeyCode::Down);
-    assert_eq!(menu.selected_index, 1);
-
-    // Navigate down wraps around
-    menu.handle_input(KeyCode::Down);
-    menu.handle_input(KeyCode::Down);
-    assert_eq!(menu.selected_index, 0);
-
-    // Navigate up wraps around
-    menu.handle_input(KeyCode::Up);
-    assert_eq!(menu.selected_index, 2);
+fn test_handle_menu_action() {
+    assert_eq!(handle_menu_action(0), "Kernels action triggered");
+    assert_eq!(handle_menu_action(1), "Snapshots action triggered");
+    assert_eq!(handle_menu_action(999), "Unknown action");
 }
 
 #[test]
-fn test_get_selected_action() {
-    let menu = Menu::new(vec!["Action 1", "Action 2"]);
-    assert_eq!(menu.get_selected_action(), Some("Action 1"));
+fn test_menu_new_and_into_select_view() {
+    let items = vec!["Item1", "Item2"];
+    let menu = Menu::new(items.clone());
+    assert_eq!(menu.items, items);
+
+    let select_view = menu.into_select_view();
+    assert_eq!(select_view.len(), items.len());
+}
+
+#[test]
+fn test_on_menu_select() {
+    let mut mock_printer = test_lib::MockPrinter::new();
+    mock_printer
+        .expect_print_message()
+        .with(eq("Kernels action triggered"))
+        .times(1)
+        .returning(|_| ());
+    on_menu_select(&"0".to_string(), &mock_printer);
 }

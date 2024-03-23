@@ -3,7 +3,7 @@ use mockall::predicate::*;
 use mockall::*;
 
 mock! {
-    Printer {}
+    pub(crate) Printer {}
     impl MessagePrinter for Printer {
         fn print_message(&self, message: &str);
     }
