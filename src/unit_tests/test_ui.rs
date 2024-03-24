@@ -23,7 +23,7 @@ fn test_menu_new_and_into_select_view() {
 fn test_on_menu_select() {
     let mut mock_printer = test_lib::MockPrinter::new();
     mock_printer
-        .expect_print_message()
+        .expect_log_info()
         .with(eq("Kernels action triggered"))
         .times(1)
         .returning(|_| ());
