@@ -1,5 +1,5 @@
 
-pub(crate) use cursive::views::{Dialog, SelectView};
+pub(crate) use cursive::views::{Dialog, SelectView, TextView, LinearLayout};
 pub(crate) use cursive::traits::*;
 pub(crate) use cursive::event::Event;
 pub(crate) use super::{MessagePrinter, ConsolePrinter};
@@ -46,10 +46,17 @@ pub fn show_main_menu() {
     let console_printer = ConsolePrinter;
     let mut siv = cursive::default();
 
+    let title = TextView::new("Systemd-boot").center();
     let select_view = menu.into_select_view().on_submit(move |_, idx| {
         on_menu_select(idx, &console_printer);
     });
-    siv.add_layer(Dialog::around(select_view.scrollable()).title("sdbootutil"));
+
+    let dialog = Dialog::around(select_view.scrollable()).title("Main Menu");
+    let layout = LinearLayout::vertical()
+        .child(title)
+        .child(dialog);
+
+    siv.add_layer(layout);
     siv.add_global_callback(Event::Char('q'), |s| s.quit());
     siv.run();
 }
