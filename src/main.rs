@@ -1,10 +1,13 @@
 use sdbootutil::cli::{parse_args, Commands};
 use sdbootutil as lib;
+use sdbootutil::fs;
+use sdbootutil::MessagePrinter;
 
 fn main() {
     let args = parse_args();
     let _snapshot = args.snapshot.unwrap_or_else(lib::get_root_snapshot);
     let console_printer = lib::ConsolePrinter;
+    let command_executor = lib::RealCommandExecutor;
 
     match args.cmd {
         Some(Commands::Kernels {}) => lib::command_kernels(&console_printer),
@@ -27,5 +30,12 @@ fn main() {
         Some(Commands::ForceUpdate {}) => lib::command_force_update(&console_printer),
         Some(Commands::UpdatePredictions {}) => lib::command_update_predictions(&console_printer),
         None => lib::ui::show_main_menu(),
+    }
+
+    if fs::is_transactional(&command_executor).expect("Failed to check if filesystem is transactional") {
+        console_printer.log_info("It is a transactional system")
+    }
+    else {
+        console_printer.log_info("It is not a transactional system")
     }
 }
