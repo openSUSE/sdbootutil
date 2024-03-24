@@ -19,7 +19,7 @@ pub fn handle_menu_action(idx: usize) -> &'static str {
 pub(crate) fn on_menu_select(idx: &String, printer: &dyn MessagePrinter) {
     let idx = idx.parse::<usize>().unwrap_or_default();
     let message = handle_menu_action(idx);
-    printer.print_message(&message);
+    printer.log_info(&message);
 }
 
 impl Menu {
