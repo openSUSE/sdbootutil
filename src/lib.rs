@@ -1,5 +1,42 @@
 pub mod cli;
 pub mod ui;
+pub mod fs;
+
+use std::process::Command;
+use std::error::Error;
+
+
+pub trait CommandExecutor {
+    fn get_command_output(&self, command: &str, args: &[&str]) -> Result<String, Box<dyn std::error::Error>>;
+}
+
+
+/// Executes a specified command with arguments and returns its output as a String.
+///
+/// # Arguments
+///
+/// * `command` - A string slice that holds the command to execute.
+/// * `args` - A slice of string slices that holds the arguments to the command.
+/// * `path` - An optional path to run the command against.
+///
+/// # Returns
+///
+/// The command's output as a `String` if successful, or an `Error` if the command fails.
+pub struct RealCommandExecutor;
+impl CommandExecutor for RealCommandExecutor {
+    fn get_command_output(&self, command: &str, args: &[&str]) -> Result<String, Box<dyn std::error::Error>> {
+        let mut command = Command::new(command);
+    
+        command.args(args);
+    
+        let output = command.output()?;
+    
+        // Convert the output to a String
+        let output_str = String::from_utf8(output.stdout)?.trim().to_string();
+    
+        Ok(output_str)
+    }
+}
 
 pub trait MessagePrinter {
     fn log_info(&self, message: &str);
