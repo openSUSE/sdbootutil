@@ -1,6 +1,7 @@
 # sdbootutil
 
 [![Coverage Status](https://coveralls.io/repos/github/TobiPeterG/sdbootutil/badge.svg?branch=rust)](https://coveralls.io/github/TobiPeterG/sdbootutil?branch=rust)
+![Workflow Status](https://github.com/TobiPeterG/sdbootutil/actions/workflows/rust.yml/badge.svg?branch=rust)
 
 **sdbootutil** is a tool designed to manage systemd-boot
 in a btrfs based, snapper managed system. It provides
