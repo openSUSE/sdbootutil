@@ -2,6 +2,7 @@ use sdbootutil::cli::{parse_args, Commands};
 use sdbootutil as lib;
 use sdbootutil::fs;
 use sdbootutil::MessagePrinter;
+use std::path::PathBuf;
 
 fn main() {
     let args = parse_args();
@@ -38,4 +39,10 @@ fn main() {
     else {
         console_printer.log_info("It is not a transactional system")
     }
+    let (_temp_dir, _tmpdir_path) = fs::create_temp_dir();
+    let rollback_items = vec![
+        fs::RollbackItem::new(PathBuf::from("/path/to/file1")),
+        fs::RollbackItem::new(PathBuf::from("/path/to/file2")),
+    ];
+    fs::cleanup_rollback_items(&rollback_items);
 }

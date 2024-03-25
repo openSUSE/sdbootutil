@@ -46,6 +46,10 @@ fn print_message(message: &str) {
     println!("{}", message);
 }
 
+pub fn print_error(message: &str) {
+    eprintln!("{}", message);
+}
+
 pub struct ConsolePrinter;
 impl MessagePrinter for ConsolePrinter {
     fn log_info(&self, message: &str) {
