@@ -1,55 +1,57 @@
 use sdbootutil as lib;
 use sdbootutil::cli::{ensure_root_permissions, parse_args, Commands};
 use sdbootutil::fs;
-use sdbootutil::MessagePrinter;
+use sdbootutil::io;
 use std::path::PathBuf;
 
 fn main() {
     if let Err(e) = ensure_root_permissions() {
         let message = format!("Failed to get root privileges: {}", e);
-        lib::print_error(&message);
+        io::print_error(&message);
         std::process::exit(1);
     }
     let args = parse_args();
-    let _snapshot = args.snapshot.unwrap_or_else(lib::get_root_snapshot);
-    let console_printer = lib::ConsolePrinter;
-    let command_executor = lib::RealCommandExecutor;
-
-    match args.cmd {
-        Some(Commands::Kernels {}) => lib::command_kernels(&console_printer),
-        Some(Commands::Snapshots {}) => lib::command_snapshots(&console_printer),
-        Some(Commands::Entries {}) => lib::command_entries(&console_printer),
-        Some(Commands::Bootloader {}) => lib::command_bootloader(&console_printer),
-        Some(Commands::AddKernel { kernel_version }) => {
-            lib::command_add_kernel(&console_printer, &kernel_version)
+    match fs::get_root_snapshot_info() {
+        Ok((prefix, snapshot_id, full_path)) => {
+            io::log_info(&format!(
+                "Prefix: {}, Snapshot ID: {}, Full Path: {}",
+                prefix, snapshot_id, full_path), 1
+            );
         }
-        Some(Commands::AddAllKernels {}) => lib::command_add_all_kernels(&console_printer),
-        Some(Commands::Mkinitrd {}) => lib::command_mkinitrd(&console_printer),
-        Some(Commands::RemoveKernel { kernel_version }) => {
-            lib::command_remove_kernel(&console_printer, &kernel_version)
+        Err(e) => {
+            io::print_error(&format!("Error: {}", e));
         }
-        Some(Commands::RemoveAllKernels {}) => lib::command_remove_all_kernels(&console_printer),
-        Some(Commands::ListKernels {}) => lib::command_list_kernels(&console_printer),
-        Some(Commands::ListEntries {}) => lib::command_list_entries(&console_printer),
-        Some(Commands::ListSnapshots {}) => lib::command_list_snapshots(&console_printer),
-        Some(Commands::SetDefaultSnapshot {}) => {
-            lib::command_set_default_snapshot(&console_printer)
-        }
-        Some(Commands::IsBootable {}) => lib::command_is_bootable(&console_printer),
-        Some(Commands::Install {}) => lib::command_install(&console_printer),
-        Some(Commands::NeedsUpdate {}) => lib::command_needs_update(&console_printer),
-        Some(Commands::Update {}) => lib::command_update(&console_printer),
-        Some(Commands::ForceUpdate {}) => lib::command_force_update(&console_printer),
-        Some(Commands::UpdatePredictions {}) => lib::command_update_predictions(&console_printer),
-        None => lib::ui::show_main_menu(),
     }
 
-    if fs::is_transactional(&command_executor)
-        .expect("Failed to check if filesystem is transactional")
-    {
-        console_printer.log_info("It is a transactional system", 1)
+    let _result = match args.cmd {
+        Some(Commands::Kernels {}) => lib::command_kernels(),
+        Some(Commands::Snapshots {}) => lib::command_snapshots(),
+        Some(Commands::Entries {}) => lib::command_entries(),
+        Some(Commands::Bootloader {}) => lib::command_bootloader(),
+        Some(Commands::AddKernel { kernel_version }) => lib::command_add_kernel(&kernel_version),
+        Some(Commands::AddAllKernels {}) => lib::command_add_all_kernels(),
+        Some(Commands::Mkinitrd {}) => lib::command_mkinitrd(),
+        Some(Commands::RemoveKernel { kernel_version }) => {
+            lib::command_remove_kernel(&kernel_version)
+        }
+        Some(Commands::RemoveAllKernels {}) => lib::command_remove_all_kernels(),
+        Some(Commands::ListKernels {}) => lib::command_list_kernels(),
+        Some(Commands::ListEntries {}) => lib::command_list_entries(),
+        Some(Commands::ListSnapshots {}) => lib::command_list_snapshots(),
+        Some(Commands::SetDefaultSnapshot {}) => lib::command_set_default_snapshot(),
+        Some(Commands::IsBootable {}) => lib::command_is_bootable(),
+        Some(Commands::Install {}) => lib::command_install(),
+        Some(Commands::NeedsUpdate {}) => lib::command_needs_update(),
+        Some(Commands::Update {}) => lib::command_update(),
+        Some(Commands::ForceUpdate {}) => lib::command_force_update(),
+        Some(Commands::UpdatePredictions {}) => lib::command_update_predictions(),
+        None => lib::ui::show_main_menu(),
+    };
+
+    if fs::is_transactional().expect("Failed to check if filesystem is transactional") {
+        io::log_info("It is a transactional system", 1)
     } else {
-        console_printer.log_info("It is not a transactional system", 1)
+        io::log_info("It is not a transactional system", 1)
     }
     let (_temp_dir, _tmpdir_path) = fs::create_temp_dir();
     let rollback_items = vec![

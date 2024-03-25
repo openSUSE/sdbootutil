@@ -1,6 +1,7 @@
 use super::super::cli::*;
 use clap::error::ErrorKind;
 use clap::CommandFactory;
+use clap::Parser;
 
 #[test]
 fn test_non_empty_string_with_non_empty_input() {

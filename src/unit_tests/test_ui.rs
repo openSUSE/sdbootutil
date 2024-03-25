@@ -1,6 +1,4 @@
 use super::super::ui::*;
-use super::test_lib;
-use mockall::predicate::*;
 
 #[test]
 fn test_handle_menu_action() {
@@ -21,11 +19,19 @@ fn test_menu_new_and_into_select_view() {
 
 #[test]
 fn test_on_menu_select() {
-    let mut mock_printer = test_lib::MockPrinter::new();
-    mock_printer
-        .expect_log_info()
-        .with(eq("Kernels action triggered"), eq(1))
-        .times(1)
-        .returning(|_, _| ());
-    on_menu_select(&"0".to_string(), &mock_printer);
+    assert_eq!(
+        on_menu_select(&"0".to_string()),
+        0,
+        "Should return 0 for Kernels action"
+    );
+    assert_eq!(
+        on_menu_select(&"1".to_string()),
+        1,
+        "Should return 1 for Snapshots action"
+    );
+    assert_eq!(
+        on_menu_select(&"2".to_string()),
+        2,
+        "Should return 2 for unknown actions"
+    );
 }

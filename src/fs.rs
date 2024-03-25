@@ -1,4 +1,6 @@
+use super::io::{get_command_output, log_info, print_error};
 use super::*;
+use libbtrfs::subvolume;
 use std::fs;
 use std::path::PathBuf;
 use tempfile::TempDir;
@@ -39,12 +41,11 @@ impl RollbackItem {
     ///
     /// Returns `Ok(())` if cleanup actions are completed successfully, or an `IoError` if any file operations fail.
     pub fn cleanup(&self) -> std::io::Result<()> {
-        let console_printer = ConsolePrinter;
         let backup_path = self.original_path.with_extension("bak");
         if backup_path.exists() {
             fs::rename(&backup_path, &self.original_path).expect("Failed to restore from backup");
             let message = format!("restored {}", self.original_path.display());
-            console_printer.log_info(&message, 1);
+            log_info(&message, 1);
         } else {
             if self.original_path.exists() {
                 fs::remove_file(&self.original_path).expect("Failed to remove original file");
@@ -53,7 +54,7 @@ impl RollbackItem {
                     "The following file doesn't exist and couldn't be removed: '{}'",
                     self.original_path.display()
                 );
-                console_printer.log_info(&message, 1);
+                log_info(&message, 1);
             }
         }
         Ok(())
@@ -101,7 +102,6 @@ pub fn cleanup_rollback_items(rollback_items: &[RollbackItem]) {
 ///
 /// * `rollback_items` - A mutable reference to a `Vec<RollbackItem>` representing the list of items to be reset.
 pub fn reset_rollback_items(rollback_items: &mut Vec<RollbackItem>) {
-    let console_printer = ConsolePrinter;
     for item in rollback_items.iter() {
         let backup_path = item.original_path.with_extension("bak");
         if backup_path.exists() {
@@ -114,7 +114,7 @@ pub fn reset_rollback_items(rollback_items: &mut Vec<RollbackItem>) {
                 print_error(&message);
             } else {
                 let message = format!("Removed backup file {}", backup_path.display());
-                console_printer.log_info(&message, 1)
+                log_info(&message, 1)
             }
         }
     }
@@ -126,8 +126,35 @@ pub fn reset_rollback_items(rollback_items: &mut Vec<RollbackItem>) {
 /// # Returns
 ///
 /// `Ok(true)` if the filesystem type is `overlayfs`, `Ok(false)` otherwise, or an `Error` if the command execution fails.
-pub fn is_transactional(command_executor: &dyn CommandExecutor) -> Result<bool, Box<dyn Error>> {
-    let filesystem_type =
-        command_executor.get_command_output("stat", &["-f", "-c", "%T", "/etc"])?;
+pub fn is_transactional() -> Result<bool, Box<dyn Error>> {
+    let filesystem_type = get_command_output("stat", &["-f", "-c", "%T", "/etc"])?;
     Ok(filesystem_type == "overlayfs")
+}
+
+/// Retrieves detailed information about the root Btrfs snapshot.
+///
+/// This function extracts and returns the prefix path, the snapshot ID, and the full snapshot path from the system's root directory. It's designed to parse the snapshot path to identify these components, crucial for Btrfs snapshot management.
+///
+/// # Returns
+///
+/// A Result containing a tuple of:
+/// - The prefix path as a String.
+/// - The snapshot ID as a u64.
+/// - The full snapshot path as a String.
+///
+/// # Errors
+///
+/// Returns an error if the snapshot path does not conform to the expected structure or if any parsing fails.
+pub fn get_root_snapshot_info() -> Result<(String, u64, String), Box<dyn std::error::Error>> {
+    let full_path = subvolume::get_subvol_path("/")?;
+    let parts: Vec<&str> = full_path.split("/.snapshots/").collect();
+    let prefix = parts.get(0).ok_or("Prefix not found")?.to_string();
+    let snapshot_part = parts.get(1).ok_or("Snapshot part not found")?;
+    let snapshot_id_str = snapshot_part
+        .split('/')
+        .next()
+        .ok_or("Snapshot ID not found")?;
+    let snapshot_id = snapshot_id_str.parse::<u64>()?;
+
+    Ok((prefix, snapshot_id, full_path))
 }

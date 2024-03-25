@@ -1,7 +1,7 @@
-pub(crate) use super::{ConsolePrinter, MessagePrinter};
-pub(crate) use cursive::event::Event;
-pub(crate) use cursive::traits::*;
-pub(crate) use cursive::views::{Dialog, LinearLayout, SelectView, TextView};
+use super::log_info;
+use cursive::event::Event;
+use cursive::traits::*;
+use cursive::views::{Dialog, LinearLayout, SelectView, TextView};
 
 pub struct Menu {
     pub items: Vec<String>,
@@ -38,10 +38,11 @@ pub fn handle_menu_action(idx: usize) -> &'static str {
 /// # Panics
 ///
 /// This function will panic if `idx` cannot be parsed into a `usize`.
-pub(crate) fn on_menu_select(idx: &String, printer: &dyn MessagePrinter) {
+pub(crate) fn on_menu_select(idx: &String) -> u32 {
     let idx = idx.parse::<usize>().unwrap_or_default();
     let message = handle_menu_action(idx);
-    printer.log_info(&message, 1);
+    log_info(&message, 1);
+    idx.try_into().unwrap()
 }
 
 impl Menu {
@@ -78,15 +79,14 @@ impl Menu {
     }
 }
 
-pub fn show_main_menu() {
+pub fn show_main_menu() -> u32 {
     let menu_items = vec!["Kernels", "Snapshots", "Entries", "Install/Update"];
     let menu = Menu::new(menu_items);
-    let console_printer = ConsolePrinter;
     let mut siv = cursive::default();
 
     let title = TextView::new("Systemd-boot").center();
     let select_view = menu.into_select_view().on_submit(move |_, idx| {
-        on_menu_select(idx, &console_printer);
+        on_menu_select(idx);
     });
 
     let dialog = Dialog::around(select_view.scrollable()).title("Main Menu");
@@ -95,4 +95,5 @@ pub fn show_main_menu() {
     siv.add_layer(layout);
     siv.add_global_callback(Event::Char('q'), |s| s.quit());
     siv.run();
+    0
 }

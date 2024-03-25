@@ -18,20 +18,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v2
-      - uses: Swatinem/rust-cache@v2
-      - name: Compile
-        id: compile
-        uses: rust-build/rust-build.action@v1.4.5
+      - uses: actions-rs/toolchain@v1
         with:
-          RUSTTARGET: x86_64-unknown-linux-musl
-          UPLOAD_MODE: none
-      - name: Upload artifact
-        uses: actions/upload-artifact@v3
-        with:
-          name: Binary
-          path: |
-            ${{ steps.compile.outputs.BUILT_ARCHIVE }}
-            ${{ steps.compile.outputs.BUILT_CHECKSUM }}
+          toolchain: stable
+      - run: cargo build --release --all-features
   security_audit:
     needs: build
     runs-on: ubuntu-latest
