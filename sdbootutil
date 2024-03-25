@@ -444,9 +444,9 @@ install_kernel()
 	elif ! reuse_initrd "$snapshot" "$subvol"; then
 		local snapshot_dir="/.snapshots/$snapshot/snapshot"
 		local dracut_args=()
-		dracut_args=('--force' '--tmpdir' '/var/tmp' '--add-device' "$root_device")
+		dracut_args=('--force' '--tmpdir' '/var/tmp')
 		if [ "$subvol" != "$root_subvol" ] && [ -n "$have_snapshots" ]; then
-			dracut_args+=('--sysroot' "${snapshot_dir}")
+			dracut_args+=('--sysroot' "${snapshot_dir}" '--add-device' "$root_device")
 		fi
 		log_info "generating new initrd"
 
