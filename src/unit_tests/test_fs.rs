@@ -199,3 +199,68 @@ fn test_cleanup_success_content() {
         "Restored file content should match backup content"
     );
 }
+
+#[test]
+fn test_reset_rollback_items() {
+    let (_temp_dir, temp_dir_path) = create_temp_dir();
+
+    let file_names = vec!["testfile1", "testfile2"];
+    let mut rollback_items = Vec::new();
+
+    for file_name in &file_names {
+        let original_file_path = create_original_file(&temp_dir_path, file_name).unwrap();
+        create_backup_file(&temp_dir_path, file_name).unwrap();
+
+        rollback_items.push(RollbackItem::new(original_file_path.clone()));
+    }
+
+    reset_rollback_items(&mut rollback_items);
+
+    assert!(
+        rollback_items.is_empty(),
+        "Rollback items should be cleared after reset"
+    );
+
+    for file_name in &file_names {
+        let original_file_path = temp_dir_path.join(file_name);
+        assert!(
+            original_file_path.exists(),
+            "Original file should still exist after reset"
+        );
+
+        let backup_file_path = original_file_path.with_extension("bak");
+        assert!(
+            !backup_file_path.exists(),
+            "Backup file should be removed after reset"
+        );
+    }
+}
+
+#[test]
+fn test_reset_rollback_items_no_backups() {
+    let (_temp_dir, temp_dir_path) = create_temp_dir();
+
+    let file_names = vec!["testfile1", "testfile2"];
+    let mut rollback_items = Vec::new();
+
+    for file_name in &file_names {
+        let original_file_path = create_original_file(&temp_dir_path, file_name).unwrap();
+
+        rollback_items.push(RollbackItem::new(original_file_path.clone()));
+    }
+
+    reset_rollback_items(&mut rollback_items);
+
+    assert!(
+        rollback_items.is_empty(),
+        "Rollback items should be cleared after reset even if no backups exist"
+    );
+
+    for file_name in &file_names {
+        let original_file_path = temp_dir_path.join(file_name);
+        assert!(
+            original_file_path.exists(),
+            "Original file should still exist after reset without backups"
+        );
+    }
+}
