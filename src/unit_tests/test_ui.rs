@@ -1,6 +1,6 @@
 use super::super::ui::*;
-use mockall::predicate::*;
 use super::test_lib;
+use mockall::predicate::*;
 
 #[test]
 fn test_handle_menu_action() {
@@ -24,8 +24,8 @@ fn test_on_menu_select() {
     let mut mock_printer = test_lib::MockPrinter::new();
     mock_printer
         .expect_log_info()
-        .with(eq("Kernels action triggered"))
+        .with(eq("Kernels action triggered"), eq(1))
         .times(1)
-        .returning(|_| ());
+        .returning(|_, _| ());
     on_menu_select(&"0".to_string(), &mock_printer);
 }

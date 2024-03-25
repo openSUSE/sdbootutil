@@ -1,13 +1,21 @@
-
-pub(crate) use cursive::views::{Dialog, SelectView, TextView, LinearLayout};
-pub(crate) use cursive::traits::*;
+pub(crate) use super::{ConsolePrinter, MessagePrinter};
 pub(crate) use cursive::event::Event;
-pub(crate) use super::{MessagePrinter, ConsolePrinter};
+pub(crate) use cursive::traits::*;
+pub(crate) use cursive::views::{Dialog, LinearLayout, SelectView, TextView};
 
 pub struct Menu {
     pub items: Vec<String>,
 }
 
+/// Handles menu actions based on the selected index.
+///
+/// # Arguments
+///
+/// * `idx` - The index of the selected menu item.
+///
+/// # Returns
+///
+/// A message indicating the action triggered by the selected menu item.
 pub fn handle_menu_action(idx: usize) -> &'static str {
     match idx {
         0 => "Kernels action triggered",
@@ -16,19 +24,49 @@ pub fn handle_menu_action(idx: usize) -> &'static str {
     }
 }
 
+/// Responds to menu selection events by executing an action based on the selected item's index.
+///
+/// This function is typically used as a callback in menu-driven applications. It parses the
+/// selected item's index, determines the appropriate action to take via `handle_menu_action`,
+/// and logs the resulting message.
+///
+/// # Arguments
+///
+/// * `idx` - A string reference to the selected menu item's index. This string is parsed into a `usize`.
+/// * `printer` - An implementation of the `MessagePrinter` trait used to log the action taken.
+///
+/// # Panics
+///
+/// This function will panic if `idx` cannot be parsed into a `usize`.
 pub(crate) fn on_menu_select(idx: &String, printer: &dyn MessagePrinter) {
     let idx = idx.parse::<usize>().unwrap_or_default();
     let message = handle_menu_action(idx);
-    printer.log_info(&message);
+    printer.log_info(&message, 1);
 }
 
 impl Menu {
+    /// Creates a new `Menu` with the given list of items.
+    ///
+    /// # Arguments
+    ///
+    /// * `items` - A vector of strings representing the menu items.
+    ///
+    /// # Returns
+    ///
+    /// A `Menu` instance containing the provided items.
     pub fn new(items: Vec<&str>) -> Self {
         Menu {
             items: items.into_iter().map(String::from).collect(),
         }
     }
 
+    /// Converts the `Menu` into a `cursive::views::SelectView` for use in a `cursive` TUI application.
+    ///
+    /// Each menu item is added to the `SelectView` along with its corresponding index.
+    ///
+    /// # Returns
+    ///
+    /// A `cursive::views::SelectView<String>` populated with the menu's items.
     pub fn into_select_view(self) -> SelectView<String> {
         let mut select_view = SelectView::new().h_align(cursive::align::HAlign::Center);
 
@@ -52,9 +90,7 @@ pub fn show_main_menu() {
     });
 
     let dialog = Dialog::around(select_view.scrollable()).title("Main Menu");
-    let layout = LinearLayout::vertical()
-        .child(title)
-        .child(dialog);
+    let layout = LinearLayout::vertical().child(title).child(dialog);
 
     siv.add_layer(layout);
     siv.add_global_callback(Event::Char('q'), |s| s.quit());
