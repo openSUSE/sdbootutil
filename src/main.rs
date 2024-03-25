@@ -11,16 +11,27 @@ fn main() {
         std::process::exit(1);
     }
     let args = parse_args();
+    let mut root_snapshot = 1;
+    let mut _root_prefix = "";
+    let mut _root_subvol = "";
+    let firmware_arch = "x64";
     match fs::get_root_snapshot_info() {
         Ok((prefix, snapshot_id, full_path)) => {
             io::log_info(&format!(
                 "Prefix: {}, Snapshot ID: {}, Full Path: {}",
                 prefix, snapshot_id, full_path), 1
             );
+            root_snapshot = snapshot_id;
+            _root_prefix = &prefix;
+            _root_subvol = &full_path;
         }
         Err(e) => {
             io::print_error(&format!("Error: {}", e));
         }
+    }
+    match fs::find_bootloader(root_snapshot, firmware_arch, None) {
+        Ok(path) => println!("Bootloader found at: {}", path.display()),
+        Err(e) => println!("Error: {}", e),
     }
 
     let _result = match args.cmd {
