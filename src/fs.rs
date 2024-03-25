@@ -49,6 +49,23 @@ pub fn cleanup_rollback_items(rollback_items: &[RollbackItem]) {
     }
 }
 
+pub fn reset_rollback_items(rollback_items: &mut Vec<RollbackItem>) {
+    let console_printer = ConsolePrinter;
+    for item in rollback_items.iter() {
+        let backup_path = item.original_path.with_extension("bak");
+        if backup_path.exists() {
+            if let Err(e) = fs::remove_file(&backup_path) {
+                let message = format!("Failed to remove backup file {}: {}", backup_path.display(), e);
+                print_error(&message);
+            } else {
+                let message = format!("Removed backup file {}", backup_path.display());
+                console_printer.log_info(&message)
+            }
+        }
+    }
+    rollback_items.clear();
+}
+
 /// Checks if the filesystem type of `/etc` is `overlayfs`.
 ///
 /// # Returns
