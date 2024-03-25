@@ -1,8 +1,9 @@
 use super::io::{get_command_output, log_info, print_error};
 use super::*;
 use libbtrfs::subvolume;
+pub(crate) use std::env::consts::ARCH;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use tempfile::TempDir;
 
 /// A structure representing an item subject to rollback actions.
@@ -157,4 +158,136 @@ pub fn get_root_snapshot_info() -> Result<(String, u64, String), Box<dyn std::er
     let snapshot_id = snapshot_id_str.parse::<u64>()?;
 
     Ok((prefix, snapshot_id, full_path))
+}
+
+/// Finds the path to the systemd-boot EFI file based on a given snapshot and firmware architecture,
+/// with an optional prefix to override the default path for testing or other purposes.
+///
+/// # Arguments
+///
+/// * `snapshot` - A numeric identifier for the snapshot directory.
+/// * `firmware_arch` - The architecture of the firmware, used to construct the EFI file name.
+/// * `prefix_override` - An optional path to override the default "/.snapshots" prefix.
+///
+/// # Returns
+///
+/// Returns the `PathBuf` pointing to the systemd-boot EFI file.
+pub(crate) fn find_sdboot(
+    snapshot: u64,
+    firmware_arch: &str,
+    prefix_override: Option<&Path>,
+) -> PathBuf {
+    // Use the provided prefix if specified, otherwise default to "/.snapshots"
+    let base_prefix = Path::new("/.snapshots");
+    let prefix = prefix_override
+        .unwrap_or(base_prefix)
+        .join(snapshot.to_string())
+        .join("snapshot");
+    let mut sdboot_path = prefix.join(format!(
+        "usr/lib/systemd-boot/systemd-boot{}.efi",
+        firmware_arch
+    ));
+
+    if !sdboot_path.exists() {
+        sdboot_path = prefix.join(format!(
+            "usr/lib/systemd/boot/efi/systemd-boot{}.efi",
+            firmware_arch
+        ));
+    }
+
+    sdboot_path
+}
+
+/// Finds the path to the GRUB2 EFI file based on a given snapshot.
+///
+/// This function constructs a path within a specified snapshot directory to locate the GRUB2 EFI file.
+/// It tries the primary expected location first and falls back to a secondary location if the EFI file is not found.
+/// An optional override prefix can be provided for testing purposes.
+///
+/// # Arguments
+///
+/// * `snapshot` - A numeric identifier for the snapshot directory.
+/// * `override_prefix` - An optional override prefix for the search, used primarily for testing.
+///
+/// # Returns
+///
+/// Returns the `PathBuf` pointing to the GRUB2 EFI file, whether it's in the primary or fallback location.
+pub(crate) fn find_grub2(snapshot: u64, override_prefix: Option<&Path>) -> PathBuf {
+    let base_prefix = Path::new("/.snapshots");
+    let prefix = override_prefix
+        .unwrap_or(base_prefix)
+        .join(snapshot.to_string())
+        .join("snapshot");
+    let mut grub2_path = prefix.join(format!("usr/share/efi/{}/grub.efi", ARCH));
+
+    if !grub2_path.exists() {
+        grub2_path = prefix.join(format!("usr/share/grub2/{}-efi/grub.efi", ARCH));
+    }
+    grub2_path
+}
+
+/// Determines if the systemd-boot bootloader is installed for a given snapshot and firmware architecture.
+///
+/// This function checks for the presence of a systemd-boot EFI file and the absence of a GRUB2 EFI file
+/// to determine if systemd-boot is the installed bootloader.
+///
+/// # Arguments
+///
+/// * `snapshot` - A numeric identifier for the snapshot directory.
+/// * `firmware_arch` - The architecture of the firmware, used to check for the systemd-boot EFI file.
+///
+/// # Returns
+///
+/// Returns `true` if the systemd-boot EFI file exists and the GRUB2 EFI file does not, indicating systemd-boot is installed.
+pub(crate) fn is_sdboot(
+    snapshot: u64,
+    firmware_arch: &str,
+    override_prefix: Option<&Path>,
+) -> bool {
+    let sdboot = find_sdboot(snapshot, firmware_arch, override_prefix);
+    let grub2 = find_grub2(snapshot, override_prefix);
+
+    sdboot.exists() && !grub2.exists()
+}
+
+/// Determines if the GRUB2 bootloader is installed for a given snapshot.
+///
+/// This function checks for the presence of a GRUB2 EFI file to determine if GRUB2 is the installed bootloader.
+///
+/// # Arguments
+///
+/// * `snapshot` - A numeric identifier for the snapshot directory.
+///
+/// # Returns
+///
+/// Returns `true` if the GRUB2 EFI file exists, indicating GRUB2 is installed.
+pub(crate) fn is_grub2(snapshot: u64, override_prefix: Option<&Path>) -> bool {
+    find_grub2(snapshot, override_prefix).exists()
+}
+
+/// Finds the installed bootloader (systemd-boot or GRUB2) for a given snapshot and firmware architecture.
+///
+/// This function attempts to determine which bootloader is installed by checking for the presence of systemd-boot and GRUB2 EFI files.
+/// It favors systemd-boot unless only GRUB2 is found.
+///
+/// # Arguments
+///
+/// * `snapshot` - A numeric identifier for the snapshot directory.
+/// * `firmware_arch` - The architecture of the firmware, used in the search for the systemd-boot EFI file.
+///
+/// # Returns
+///
+/// Returns a `Result` containing a `PathBuf` to the detected bootloader EFI file on success, or an error string if no bootloader is detected.
+pub fn find_bootloader(
+    snapshot: u64,
+    firmware_arch: &str,
+    override_prefix: Option<&Path>,
+) -> Result<PathBuf, &'static str> {
+    if is_sdboot(snapshot, firmware_arch, override_prefix) {
+        Ok(find_sdboot(snapshot, firmware_arch, override_prefix))
+    } else if is_grub2(snapshot, override_prefix) {
+        Ok(find_grub2(snapshot, override_prefix))
+    } else {
+        Err("Bootloader not detected")
+    }
 }
