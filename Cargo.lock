@@ -262,6 +262,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1435fa1053d8b2fbbe9be7e97eca7f33d37b28409959813daefc1446a14247f1"
 
 [[package]]
+name = "elevate"
+version = "0.6.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e8b9e2c51eb43c3abc3a7408dc7274d0e09a778eb6c11053fed2841bcff547c4"
+dependencies = [
+ "libc",
+ "log",
+]
+
+[[package]]
 name = "enum-map"
 version = "2.7.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -631,6 +641,7 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "cursive",
+ "elevate",
  "mockall",
  "tempfile",
 ]

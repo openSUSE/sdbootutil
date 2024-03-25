@@ -1,10 +1,15 @@
 use sdbootutil as lib;
-use sdbootutil::cli::{parse_args, Commands};
+use sdbootutil::cli::{ensure_root_permissions, parse_args, Commands};
 use sdbootutil::fs;
 use sdbootutil::MessagePrinter;
 use std::path::PathBuf;
 
 fn main() {
+    if let Err(e) = ensure_root_permissions() {
+        let message = format!("Failed to get root privileges: {}", e);
+        lib::print_error(&message);
+        std::process::exit(1);
+    }
     let args = parse_args();
     let _snapshot = args.snapshot.unwrap_or_else(lib::get_root_snapshot);
     let console_printer = lib::ConsolePrinter;

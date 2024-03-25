@@ -187,3 +187,13 @@ pub enum Commands {
 pub fn parse_args() -> Args {
     Args::parse()
 }
+
+pub fn ensure_root_permissions() -> Result<(), Box<dyn std::error::Error>> {
+    match elevate::check() {
+        elevate::RunningAs::Root | elevate::RunningAs::Suid => Ok(()),
+        _ => {
+            elevate::escalate_if_needed()?;
+            Ok(())
+        }
+    }
+}

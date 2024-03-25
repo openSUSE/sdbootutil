@@ -9,6 +9,7 @@ author = ["Tobias Görgens <tobi.goergens@gmail.com>"]
 [dependencies]
 clap = { version = "4.5.3", features = ["derive"] }
 cursive = { version = "0.20.0", default-features = false, features = ["crossterm-backend"] }
+elevate = "0.6.1"
 tempfile = "3.10.1"
 
 [dev-dependencies]
