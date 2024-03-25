@@ -19,6 +19,7 @@ arg_all_entries=
 arg_no_variables=
 arg_no_reuse_initrd=
 arg_no_random_seed=
+have_snapshots=
 # for x in vmlinuz image vmlinux linux bzImage uImage Image zImage; do
 image=
 
@@ -234,6 +235,7 @@ is_transactional()
 
 subvol_is_ro()
 {
+	[ -n "$have_snapshots" ] || return 0
 	local subvol="${1:?}"
 	while read -r line; do
 		[ "$line" = "ro=true" ] && return 0
@@ -243,6 +245,7 @@ subvol_is_ro()
 
 detect_parent() {
 	local subvol="$1"
+	[ -n "$have_snapshots" ] || return 0
 	parent_uuid="$(btrfs subvol show "${subvol#"${subvol_prefix}"}" | sed -ne 's/\s*Parent UUID:\s*//p')"
 	[ "$parent_uuid" != '-' ] || parent_uuid=
 	[ -n "$parent_uuid" ] || return 0
@@ -257,7 +260,7 @@ detect_parent() {
 
 sedrootflags()
 {
-	local subvol="${1:?}"
+	local subvol="$1"
 	# - delete BOOT_IMAGE= and initrd=
 	# - make sure root= refers to uuid
 	# - replace or add rootflags to point at correct subvolume
@@ -273,21 +276,19 @@ sedrootflags()
 	# already there). Since we always operate on the same line,
 	# "empty" t jumps are used to reset the condition after very
 	# s///.
-	sed -e "s/[ \t]\+/ /g" \
-		-e "s/\<\(BOOT_IMAGE\|initrd\)=[^ ]* \?//" \
-		-e "ta;:a" \
-		-e "s/\<root=[^ ]*/root=UUID=$root_uuid/;tb;s,\$, root=UUID=$root_uuid,;tc;:c;:b" \
-		-e "s,\<rootflags=subvol=[^ ]*,rootflags=subvol=$subvol,;td;s,\$, rootflags=subvol=$subvol,;te;:e;:d" \
-		-e "s,\<systemd.machine_id=[^ ]*,systemd.machine_id=$machine_id,;tf;s,\$, systemd.machine_id=$machine_id,;tg;:g;:f"
-
+	local sed_arguments=("-e s/[ \t]\+/ /g"\
+		"-e s/\<\(BOOT_IMAGE\|initrd\)=[^ ]* \?//"\
+		"-e s/\<root=[^ ]*/root=UUID=$root_uuid/;tb;s,\$, root=UUID=$root_uuid,;tc;:c;:b"\
+		"-e s,\<systemd.machine_id=[^ ]*,systemd.machine_id=$machine_id,;tf;s,\$, systemd.machine_id=$machine_id,;tg;:g;:f")
+	[ -z "$have_snapshots" ] || sed_arguments+=("-e s,\<rootflags=subvol=[^ ]*,rootflags=subvol=$subvol,;td;s,\$, rootflags=subvol=$subvol,;te;:e;:d")
+	sed "${sed_arguments[@]}"
 }
 
 remove_kernel()
 {
-	local snapshot="${1:?}"
-	local subvol="${subvol_prefix}/.snapshots/${snapshot}/snapshot"
+	local snapshot="$1"
 	local kernel_version="$2"
-	local id="$entry_token-$kernel_version-$snapshot.conf"
+	local id="$entry_token-$kernel_version${snapshot:+-$snapshot}.conf"
 	run_command_output bootctl unlink "$id"
 
 	# This action will require to update the PCR predictions
@@ -319,6 +320,7 @@ update_snapper()
 
 set_snapper_title_and_sortkey()
 {
+	[ -n "$have_snapshots" ] || return 0
 	snapshot="${1:?}"
 	local type date desc important pre_num
 	local snapshot_info
@@ -345,8 +347,8 @@ set_snapper_title_and_sortkey()
 }
 
 reuse_initrd() {
-	local snapshot="${1:?}"
-	local subvol="${2:?}"
+	local snapshot="$1"
+	local subvol="$2"
 
 	[ -z "$arg_no_reuse_initrd" ] || return 1
 
@@ -413,13 +415,14 @@ add_version_to_title()
 
 install_kernel()
 {
-	local snapshot="${1:?}"
-	local subvol="${subvol_prefix}/.snapshots/${snapshot}/snapshot"
+	local snapshot="$1"
+	local subvol=""
+	[ -z "$have_snapshots" ] || subvol="${subvol_prefix}/.snapshots/${snapshot}/snapshot"
 	local kernel_version="$2"
 	local dstinitrd=()
 	local src="${subvol#"${subvol_prefix}"}/lib/modules/$kernel_version/$image"
 	local initrddir="${subvol#"${subvol_prefix}"}/usr/lib/initrd"
-	test -e "$src" || err "Can't find $src"
+	[ -e "$src" ] || err "Can't find $src"
 
 	calc_chksum "$src"
 	local dst="/$entry_token/$kernel_version/linux-$chksum"
@@ -441,8 +444,9 @@ install_kernel()
 	elif ! reuse_initrd "$snapshot" "$subvol"; then
 		local snapshot_dir="/.snapshots/$snapshot/snapshot"
 		local dracut_args=()
-		if [ "$subvol" != "$root_subvol" ]; then
-			dracut_args=('--sysroot' "${snapshot_dir}" '--tmpdir' '/var/tmp' '--add-device' "$root_device")
+		dracut_args=('--force' '--tmpdir' '/var/tmp' '--add-device' "$root_device")
+		if [ "$subvol" != "$root_subvol" ] && [ -n "$have_snapshots" ]; then
+			dracut_args+=('--sysroot' "${snapshot_dir}")
 		fi
 		log_info "generating new initrd"
 
@@ -514,7 +518,7 @@ install_kernel()
 		done
 	fi
 	if [ -z "$failed" ]; then
-		loader_entry="$boot_root/loader/entries/$entry_token-$kernel_version-$snapshot.conf"
+		loader_entry="$boot_root/loader/entries/$entry_token-$kernel_version${snapshot:+-$snapshot}.conf"
 		install_with_rollback "$tmpdir/entry.conf" "$loader_entry" || failed="bootloader entry"
 		rm -f "$tmpdir/entry.conf"
 	fi
@@ -527,7 +531,7 @@ install_kernel()
 
 install_all_kernels()
 {
-	local snapshot="${1:?}"
+	local snapshot="$1"
 	find_kernels "$snapshot"
 	for kv in "${!found_kernels[@]}"; do
 		log_info "installing $kv"
@@ -538,7 +542,7 @@ install_all_kernels()
 
 remove_all_kernels()
 {
-	local snapshot="${1:?}"
+	local snapshot="$1"
 	find_kernels "$snapshot"
 	for kv in "${!found_kernels[@]}"; do
 		remove_kernel "${snapshot}" "$kv"
@@ -604,6 +608,7 @@ list_entries()
 						errors+=("$root/$v does not exist")
 					fi
 				fi
+				[ -n "$have_snapshots" ] || break
 				if [ "$k" = 'options' ]; then
 					local snapshot
 					read -r snapshot <<<"$(echo "$v" | sed -e "s,.*rootflags=subvol=${subvol_prefix}/.snapshots/\([0-9]\+\)/snapshot.*,\1,")"
@@ -739,6 +744,7 @@ show_entry()
 
 list_snapshots()
 {
+	[ -n "$have_snapshots"  ] || { log_info "System does no support snapshots."; return 0; }
 	update_snapper 2>"$tmpfile" || err "$(cat "$tmpfile")"
 
 	local n=0
@@ -756,6 +762,7 @@ list_snapshots()
 
 show_snapper()
 {
+	[ -n "$have_snapshots" ] || { log_info "System does no support snapshots."; return 0; }
 	if ! update_snapper 2>"$tmpfile"; then
 		d --title "Error" --textbox "$tmpfile" 0 0
 		exit 1
@@ -819,7 +826,8 @@ calc_chksum() {
 declare -A found_kernels
 find_kernels()
 {
-	local subvol="${subvol_prefix}/.snapshots/${1:?}/snapshot"
+	local subvol=""
+	[ -z "$have_snapshots" ] || subvol="${subvol_prefix}/.snapshots/${1:?}/snapshot"
 	local fn kv
 	found_kernels=()
 
@@ -840,7 +848,7 @@ declare -A stale_kernels
 is_bootable=
 update_kernels()
 {
-	local snapshot="${1:?}"
+	local snapshot="$1"
 	local path id
 	installed_kernels=()
 	stale_kernels=()
@@ -865,7 +873,8 @@ update_kernels()
 
 list_kernels()
 {
-	local snapshot="${1:?}"
+	local snapshot=""
+	[ -z "$have_snapshots" ] || snapshot="${1:?}"
 	update_kernels "$snapshot"
 	local kernelfiles=("${!installed_kernels[@]}")
 	for k in "${kernelfiles[@]}"; do
@@ -887,7 +896,7 @@ list_kernels()
 
 is_bootable()
 {
-	local snapshot="${1:?}"
+	local snapshot="$1"
 	update_kernels "$snapshot"
 
 	[ "$is_bootable" = 1 ] || return 1
@@ -896,8 +905,9 @@ is_bootable()
 
 show_kernels()
 {
-	local snapshot="${1:?}"
-	subvol="${subvol_prefix}/.snapshots/${1:?}/snapshot"
+	local subvol=""
+	local snapshot="$1"
+	[ -z "$have_snapshots" ] || subvol="${subvol_prefix}/.snapshots/${1:?}/snapshot"
 	while true; do
 		update_kernels "$snapshot"
 		local list=()
@@ -997,7 +1007,8 @@ is_installed()
 
 find_sdboot()
 {
-	local prefix="/.snapshots/${1-$root_snapshot}/snapshot"
+	local prefix=""
+	[ -z "$have_snapshots" ] || prefix="/.snapshots/${1-$root_snapshot}/snapshot"
 	# XXX: this is a hack in case we need to inject a signed
 	# systemd-boot from a separate package
 	local sdboot="$prefix/usr/lib/systemd-boot/systemd-boot$firmware_arch.efi"
@@ -1007,7 +1018,8 @@ find_sdboot()
 
 find_grub2()
 {
-	local prefix="/.snapshots/${1-$root_snapshot}/snapshot"
+	local prefix=""
+	[ -z "$have_snapshots" ] || prefix="/.snapshots/${1-$root_snapshot}/snapshot"
 	local grub2="$prefix/usr/share/efi/$(uname -m)/grub.efi"
 	[ -e "$grub2" ] || grub2="$prefix/usr/share/grub2/$(uname -m)-efi/grub.efi"
 	echo "$grub2"
@@ -1026,8 +1038,12 @@ find_bootloader()
 
 bootloader_needs_update()
 {
-	local snapshot="${1-$root_snapshot}"
-	local prefix="/.snapshots/${snapshot}/snapshot"
+	local prefix=""
+	local snapshot=""
+	if [ -n "$have_snapshots" ]; then
+		snapshot="${1-$root_snapshot}"
+		prefix="/.snapshots/${snapshot}/snapshot"
+	fi
 	local bldr_name
 	local v nv
 	v="$(bootloader_version)"
@@ -1044,8 +1060,12 @@ bootloader_needs_update()
 
 install_bootloader()
 {
-	local snapshot="${1:-$root_snapshot}"
-	local prefix="/.snapshots/${root_snapshot}/snapshot"
+	local snapshot=""
+	local prefix=""
+	if [ -n "$have_snapshots" ]; then
+		snapshot="${1:-$root_snapshot}"
+		prefix="/.snapshots/${root_snapshot}/snapshot"
+	fi
 	local bootloader bldr_name blkpart drive partno
 
 	bootloader=$(find_bootloader "$snapshot")
@@ -1208,6 +1228,7 @@ set_default_entry()
 
 set_default_snapshot()
 {
+	[ -n "$have_snapshots" ] || { log_info "System does no support snapshots."; return 0; }
 	local num="${1:?}"
 	local configs
 	update_entries_for_snapshot "$num"
@@ -1538,8 +1559,13 @@ done
 # XXX: bootctl should have json output for that too
 eval "$(bootctl 2>/dev/null | sed -ne 's/Firmware Arch: *\(\w\+\)/firmware_arch="\1"/p;s/ *token: *\(\w\+\)/entry_token="\1"/p;s, *\$BOOT: *\([^ ]\+\).*,boot_root="\1",p')"
 read -r root_uuid root_device < <(findmnt / -v -r -n -o UUID,SOURCE)
-root_subvol=$(btrfs subvol show / 2>/dev/null|head -1)
-subvol_prefix="${root_subvol%/.snapshots/*}"
+root_subvol=""
+subvol_prefix=""
+if [ "$(stat -f -c %T /)" = "btrfs" ] && [ -d /.snapshots ]; then
+	have_snapshots=1
+	root_subvol=$(btrfs subvol show / 2>/dev/null|head -1)
+	subvol_prefix="${root_subvol%/.snapshots/*}"
+fi
 [ -s /etc/machine-id ] && read -r machine_id < /etc/machine-id
 
 if [ -n "$arg_esp_path" ] && [ "$boot_root" != "$arg_esp_path" ]; then
@@ -1550,7 +1576,7 @@ settle_entry_token
 
 [ -n "$boot_root" ] || err "No ESP detected. Legacy system?"
 [ -n "$root_uuid" ] || err "Can't determine root UUID"
-[ -n "$root_subvol" ] || err "Can't determine root subvolume"
+[ -n "$root_subvol" ] || [ -z "$have_snapshots" ] || err "Can't determine root subvolume"
 [ -n "$root_device" ] || err "Can't determine root device"
 [ -n "$entry_token" ] || err "No entry token. sd-boot not installed?"
 [ -n "$firmware_arch" ] || err "Can't determine firmware arch"
@@ -1560,8 +1586,12 @@ case "$firmware_arch" in
 	*) err "Unsupported architecture $firmware_arch" ;;
 esac
 
-root_snapshot="${root_subvol#"${subvol_prefix}"/.snapshots/}"
-root_snapshot="${root_snapshot%/snapshot}"
+root_snapshot=""
+
+if [ -n "$have_snapshots" ]; then
+	root_snapshot="${root_subvol#"${subvol_prefix}"/.snapshots/}"
+	root_snapshot="${root_snapshot%/snapshot}"
+fi
 
 # XXX: Unify both in /EFI/opensuse?
 if is_sdboot; then
