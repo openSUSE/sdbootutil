@@ -511,3 +511,7 @@ pub(crate) fn is_installed(
 
     Ok(bootloader_version_successful && installed_flag_exists)
 }
+
+pub(crate) fn get_shimdir() -> String {
+    format!("/usr/share/efi/{}", ARCH)
+}

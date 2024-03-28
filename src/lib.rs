@@ -4,9 +4,8 @@ pub mod io;
 pub mod ui;
 
 use cli::ensure_root_permissions;
-use fs::is_installed;
+use fs::{is_installed, get_shimdir};
 use io::log_info;
-use std::error::Error;
 use std::path::{Path, PathBuf};
 
 /// Executes the `Kernels` command.
@@ -512,7 +511,7 @@ pub fn get_system_info() -> Result<(u64, String, String, String, String, String,
             return Err(message);
         }
     };
-    let shimdir = "/usr/share/efi/x86_64".to_string();
+    let shimdir = get_shimdir();
     let boot_root = "/boot/efi".to_string();
 
     Ok((
