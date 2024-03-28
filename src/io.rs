@@ -19,8 +19,8 @@ fn print_message(message: &str) {
 /// # Arguments
 ///
 /// * `message` - A string slice containing the error message to be printed.
-pub fn print_error(message: &str) {
-    eprintln!("{}", message);
+pub(crate) fn print_error(message: &str) {
+    eprintln!("Error: {}", message);
 }
 
 /// Logs an informational message to the console based on the specified verbosity level.
@@ -37,7 +37,7 @@ pub fn print_error(message: &str) {
 ///   indicates higher importance; the message is logged if the application's verbosity level is
 ///   this value or higher.
 ///
-pub fn log_info(message: &str, log_verbosity: u8) {
+pub(crate) fn log_info(message: &str, log_verbosity: u8) {
     let verbosity = cli::parse_args().verbosity;
     if verbosity >= log_verbosity {
         print_message(message)

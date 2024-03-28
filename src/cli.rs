@@ -157,6 +157,9 @@ pub enum Commands {
     #[command(name = "is-bootable")]
     IsBootable {},
 
+    /// Checks if systemd-boot has been installed using this tool
+    IsInstalled {},
+
     /// Install systemd-boot and shim into ESP
     Install {},
 
@@ -188,7 +191,7 @@ pub fn parse_args() -> Args {
     Args::parse()
 }
 
-pub fn ensure_root_permissions() -> Result<(), Box<dyn std::error::Error>> {
+pub(crate) fn ensure_root_permissions() -> Result<(), Box<dyn std::error::Error>> {
     match elevate::check() {
         elevate::RunningAs::Root | elevate::RunningAs::Suid => Ok(()),
         _ => {

@@ -399,6 +399,77 @@ fn test_is_grub2_exists_fallback() {
 }
 
 #[test]
+fn test_determine_boot_dst_only_systemd_boot_exists() {
+    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    let snapshot_dir = temp_dir.path().join("0").join("snapshot");
+
+    let sdboot_efi_path = snapshot_dir.join("usr/lib/systemd-boot/systemd-bootx64.efi");
+    fs::create_dir_all(sdboot_efi_path.parent().unwrap())
+        .expect("Failed to create directory for systemd-boot EFI file");
+    File::create(&sdboot_efi_path)
+        .unwrap()
+        .write_all(b"")
+        .unwrap();
+
+        assert_eq!(determine_boot_dst(0, "x64", Some(temp_dir.path())).unwrap(), "/EFI/systemd", "Failed to get boot_dst");
+}
+
+#[test]
+fn test_determine_boot_dst_systemd_boot_and_grub2_exist() {
+    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    let snapshot_dir = temp_dir.path().join("0").join("snapshot");
+
+    let sdboot_efi_path = snapshot_dir.join("usr/lib/systemd-boot/systemd-bootx64.efi");
+    let grub2_efi_path = snapshot_dir.join(format!("usr/share/grub2/{}-efi/grub.efi", ARCH));
+
+    fs::create_dir_all(sdboot_efi_path.parent().unwrap())
+        .expect("Failed to create directory for systemd-boot EFI file");
+    fs::create_dir_all(grub2_efi_path.parent().unwrap())
+        .expect("Failed to create directory for GRUB2 EFI file");
+
+    File::create(&sdboot_efi_path)
+        .unwrap()
+        .write_all(b"")
+        .unwrap();
+    File::create(&grub2_efi_path)
+        .unwrap()
+        .write_all(b"")
+        .unwrap();
+
+    assert_eq!(determine_boot_dst(0, "x64", Some(temp_dir.path())).unwrap(), "/EFI/opensuse", "Failed to get boot_dst");
+}
+
+#[test]
+fn test_determine_boot_dst_only_grub2_exist() {
+    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    let snapshot_dir = temp_dir.path().join("0").join("snapshot");
+
+    let grub2_efi_path = snapshot_dir.join(format!("usr/share/grub2/{}-efi/grub.efi", ARCH));
+
+    fs::create_dir_all(grub2_efi_path.parent().unwrap())
+        .expect("Failed to create directory for GRUB2 EFI file");
+
+    File::create(&grub2_efi_path)
+        .unwrap()
+        .write_all(b"")
+        .unwrap();
+
+        assert_eq!(determine_boot_dst(0, "x64", Some(temp_dir.path())).unwrap(), "/EFI/opensuse", "Failed to get boot_dst");
+}
+
+#[test]
+fn test_determine_boot_dst_neither_exists() {
+    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+
+    let result = determine_boot_dst(0, "x64", Some(temp_dir.path()));
+    assert!(
+        result.is_err(),
+        "Expected an error for file without version pattern"
+    );
+    assert_eq!(result.unwrap_err(), "Unsupported bootloader or unable to determine bootloader");
+}
+
+#[test]
 fn test_find_bootloader_sdboot_present() {
     let temp_dir = TempDir::new().expect("Failed to create temp dir");
     let snapshot_dir = temp_dir.path().join("0").join("snapshot");
@@ -468,4 +539,342 @@ fn test_find_bootloader_with_both_systemd_and_grub2() {
     let result = find_bootloader(0, "x64", Some(temp_dir.path()));
 
     assert!(matches!(result, Ok(ref path) if path == &grub2_efi_path));
+}
+
+#[test]
+fn test_find_version() {
+    // Simulate a byte slice that contains a version string
+    let content = b"Some text before version: START 1.2.3 END some text after version";
+    // Define the start and end patterns that delimit the version string
+    let start_pattern = b"START ";
+    let end_pattern = b" END";
+
+    // Call the `find_version` function with the content and patterns
+    let version = find_version(content, start_pattern, end_pattern);
+
+    // Assert that the returned version string is as expected
+    assert_eq!(
+        version,
+        Some("1.2.3".to_string()),
+        "The version found does not match the expected value"
+    );
+}
+
+#[test]
+fn test_find_version_no_match() {
+    let content = b"The quick brown fox jumps over the lazy dog";
+    let start_pattern = b"version:";
+    let end_pattern = b";";
+
+    let result = find_version(content, start_pattern, end_pattern);
+    assert!(result.is_none(), "Expected None, but got Some");
+}
+
+#[test]
+fn test_find_version_with_special_characters() {
+    let content = b"Here is the version: \x012.34\x00; and some more text";
+    let start_pattern = b"version: \x01";
+    let end_pattern = b"\x00;";
+
+    let result = find_version(content, start_pattern, end_pattern)
+        .expect("Expected a version string, but none was found");
+
+    assert_eq!(
+        result, "2.34",
+        "The extracted version string does not match the expected value"
+    );
+}
+
+#[test]
+fn test_bootloader_version_custom_systemd_boot() {
+    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    let snapshot_dir = temp_dir.path().join("0").join("snapshot");
+
+    let systemd_boot_path = snapshot_dir.join("EFI").join("systemd");
+    fs::create_dir_all(&systemd_boot_path).expect("Failed to create systemd-boot path");
+    let systemd_boot_test_file = systemd_boot_path.join("systemd-bootx64.efi");
+    fs::copy(
+        PathBuf::from("src/unit_tests/test_files/systemd_boot.efi"),
+        &systemd_boot_test_file,
+    )
+    .expect("Failed to copy systemd-boot test file");
+
+    let version_sdboot =
+        bootloader_version(0, "", "", "", "", Some(systemd_boot_test_file), None).unwrap();
+    assert_eq!(
+        version_sdboot, "255.4+suse.17.gbe772961ad",
+        "Failed to detect systemd-boot version"
+    );
+}
+
+#[test]
+fn test_bootloader_version_custom_grub2() {
+    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    let snapshot_dir = temp_dir.path().join("0").join("snapshot");
+
+    let grub2_path = snapshot_dir.join("EFI").join("opensuse");
+    fs::create_dir_all(&grub2_path).expect("Failed to create GRUB2 path");
+    let grub2_test_file = grub2_path.join("grubx64.efi");
+    fs::copy(
+        PathBuf::from("src/unit_tests/test_files/grub2.efi"),
+        &grub2_test_file,
+    )
+    .expect("Failed to copy GRUB2 test file");
+
+    let version_grub2 = bootloader_version(0, "", "", "", "", Some(grub2_test_file), None).unwrap();
+    assert_eq!(version_grub2, "2.12", "Failed to detect GRUB2 version");
+}
+
+#[test]
+fn test_bootloader_version_systemd_boot() {
+    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    let snapshot_dir = temp_dir.path().join("0").join("snapshot");
+
+    let systemd_boot_test_file = snapshot_dir.join("usr/lib/systemd-boot/systemd-bootx64.efi");
+    let systemd_boot_efi_file = temp_dir
+        .path()
+        .join("boot/efi/EFI/systemd/systemd-bootx64.efi");
+    fs::create_dir_all(systemd_boot_test_file.parent().unwrap())
+        .expect("Failed to create directory for systemd-boot EFI file");
+    fs::create_dir_all(systemd_boot_efi_file.parent().unwrap())
+        .expect("Failed to create directory for systemd-boot EFI file");
+    fs::copy(
+        PathBuf::from("src/unit_tests/test_files/systemd_boot.efi"),
+        &systemd_boot_test_file,
+    )
+    .expect("Failed to copy systemd-boot test file");
+    fs::copy(
+        PathBuf::from("src/unit_tests/test_files/systemd_boot.efi"),
+        &systemd_boot_efi_file,
+    )
+    .expect("Failed to copy systemd-boot efi file");
+
+    let version_sdboot = bootloader_version(
+        0,
+        "x64",
+        "/usr/share/efi/x86_64",
+        "/boot/efi",
+        "/EFI/systemd",
+        None,
+        Some(temp_dir.path()),
+    )
+    .unwrap();
+    assert_eq!(
+        version_sdboot, "255.4+suse.17.gbe772961ad",
+        "Failed to detect systemd-boot version"
+    );
+}
+
+#[test]
+fn test_bootloader_version_grub2() {
+    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    let snapshot_dir = temp_dir.path().join("0").join("snapshot");
+
+    let grub2 = snapshot_dir.join(format!("usr/share/grub2/{}-efi/grub.efi", ARCH));
+    let grub2_efi_file = temp_dir.path().join("boot/efi/EFI/systemd/grub.efi");
+    fs::create_dir_all(grub2.parent().unwrap())
+        .expect("Failed to create directory for grub2 EFI file");
+    fs::create_dir_all(grub2_efi_file.parent().unwrap())
+        .expect("Failed to create directory for grub2 EFI file");
+    fs::copy(PathBuf::from("src/unit_tests/test_files/grub2.efi"), &grub2)
+        .expect("Failed to copy grub2 test file");
+    fs::copy(
+        PathBuf::from("src/unit_tests/test_files/grub2.efi"),
+        &grub2_efi_file,
+    )
+    .expect("Failed to copy grub2 efi file");
+
+    let version_grub2 = bootloader_version(
+        0,
+        "x64",
+        "/usr/share/efi/x86_64",
+        "/boot/efi",
+        "/EFI/systemd",
+        None,
+        Some(temp_dir.path()),
+    )
+    .unwrap();
+    assert_eq!(version_grub2, "2.12", "Failed to detect grub2 version");
+}
+
+#[test]
+fn test_bootloader_version_shim() {
+    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+
+    let shim_test_file = temp_dir.path().join("usr/share/efi/x86_64/shim.efi");
+    let shim_efi_file = temp_dir.path().join("boot/efi/EFI/systemd/grub.efi");
+    fs::create_dir_all(shim_test_file.parent().unwrap())
+        .expect("Failed to create directory for shim EFI file");
+    fs::create_dir_all(shim_efi_file.parent().unwrap())
+        .expect("Failed to create directory for shim EFI file");
+    File::create(&shim_test_file)
+        .unwrap()
+        .write_all(b"")
+        .unwrap();
+    fs::copy(
+        PathBuf::from("src/unit_tests/test_files/systemd_boot.efi"),
+        &shim_efi_file,
+    )
+    .expect("Failed to copy shim efi file");
+
+    let version_sdboot = bootloader_version(
+        0,
+        "x64",
+        "/usr/share/efi/x86_64",
+        "/boot/efi",
+        "/EFI/systemd",
+        None,
+        Some(temp_dir.path()),
+    )
+    .unwrap();
+    assert_eq!(
+        version_sdboot, "255.4+suse.17.gbe772961ad",
+        "Failed to detect shim (systemd-boot) version"
+    );
+}
+
+#[test]
+fn test_bootloader_version_file_not_found() {
+    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    let non_existent_file = temp_dir.path().join("non_existent_file.efi");
+
+    let result = bootloader_version(
+        0,
+        "x64",
+        "/usr/lib",
+        temp_dir.path().to_str().unwrap(),
+        "EFI/nonexistent",
+        Some(non_existent_file),
+        None,
+    );
+
+    assert!(result.is_err(), "Expected an error for non-existent file");
+    assert!(
+        result.unwrap_err().starts_with("File does not exist:"),
+        "Error message did not start with expected text"
+    );
+}
+
+#[test]
+fn test_bootloader_version_no_version_pattern() {
+    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    let file_path = temp_dir.path().join("empty_version_pattern.efi");
+
+    // Create a file with content that doesn't match any version pattern
+    let mut file = fs::File::create(&file_path).expect("Failed to create test file");
+    writeln!(
+        file,
+        "This file does not contain a recognizable version pattern."
+    )
+    .expect("Failed to write to test file");
+
+    let result = bootloader_version(
+        0,
+        "x64",
+        "/usr/lib",
+        temp_dir.path().to_str().unwrap(),
+        "EFI/nonexistent",
+        Some(file_path),
+        None,
+    );
+
+    assert!(
+        result.is_err(),
+        "Expected an error for file without version pattern"
+    );
+    assert_eq!(result.unwrap_err(), "Version not found");
+}
+
+#[test]
+fn test_is_installed_true() {
+    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    let snapshot_dir = temp_dir.path().join("0").join("snapshot");
+
+    let systemd_boot_path = snapshot_dir.join("EFI").join("systemd");
+    let is_installed_file_path = temp_dir.path().join("installed_by_sdbootutil");
+    fs::create_dir_all(&is_installed_file_path.parent().unwrap())
+        .expect("Failed to create installed path");
+    fs::create_dir_all(&systemd_boot_path).expect("Failed to create systemd-boot path");
+    let systemd_boot_test_file = systemd_boot_path.join("systemd-bootx64.efi");
+    fs::copy(
+        PathBuf::from("src/unit_tests/test_files/systemd_boot.efi"),
+        &systemd_boot_test_file,
+    )
+    .expect("Failed to copy systemd-boot test file");
+    File::create(&is_installed_file_path)
+        .unwrap()
+        .write_all(b"")
+        .unwrap();
+
+    let is_installed = is_installed(
+        0,
+        "",
+        "",
+        "",
+        "",
+        Some(systemd_boot_test_file),
+        Some(temp_dir.path()),
+    );
+    assert_eq!(is_installed, true, "Expected is_installed to return true")
+}
+
+#[test]
+fn test_is_installed_false_bootloader() {
+    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    let snapshot_dir = temp_dir.path().join("0").join("snapshot");
+
+    let systemd_boot_path = snapshot_dir.join("EFI").join("systemd");
+    let is_installed_file_path = temp_dir.path().join("installed_by_sdbootutil");
+    fs::create_dir_all(&is_installed_file_path.parent().unwrap())
+        .expect("Failed to create installed path");
+    fs::create_dir_all(&systemd_boot_path).expect("Failed to create systemd-boot path");
+    let systemd_boot_test_file = systemd_boot_path.join("systemd-bootx64.efi");
+    File::create(&systemd_boot_test_file)
+        .unwrap()
+        .write_all(b"")
+        .unwrap();
+    File::create(&is_installed_file_path)
+        .unwrap()
+        .write_all(b"")
+        .unwrap();
+
+    let is_installed = is_installed(
+        0,
+        "",
+        "",
+        "",
+        "",
+        Some(systemd_boot_test_file),
+        Some(temp_dir.path()),
+    );
+    assert_eq!(is_installed, false, "Expected is_installed to return true")
+}
+
+#[test]
+fn test_is_installed_false_flag() {
+    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    let snapshot_dir = temp_dir.path().join("0").join("snapshot");
+
+    let systemd_boot_path = snapshot_dir.join("EFI").join("systemd");
+    let is_installed_file_path = temp_dir.path().join("installed_by_sdbootutil");
+    fs::create_dir_all(&is_installed_file_path.parent().unwrap())
+        .expect("Failed to create installed path");
+    fs::create_dir_all(&systemd_boot_path).expect("Failed to create systemd-boot path");
+    let systemd_boot_test_file = systemd_boot_path.join("systemd-bootx64.efi");
+    fs::copy(
+        PathBuf::from("src/unit_tests/test_files/systemd_boot.efi"),
+        &systemd_boot_test_file,
+    )
+    .expect("Failed to copy systemd-boot test file");
+
+    let is_installed = is_installed(
+        0,
+        "",
+        "",
+        "",
+        "",
+        Some(systemd_boot_test_file),
+        Some(temp_dir.path()),
+    );
+    assert_eq!(is_installed, false, "Expected is_installed to return true")
 }
