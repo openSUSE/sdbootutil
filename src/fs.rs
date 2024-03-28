@@ -327,6 +327,25 @@ pub(crate) fn find_bootloader(
     }
 }
 
+/// Extracts a version string from binary content based on start and end patterns.
+///
+/// This function searches the given binary content for a sequence that starts with the specified
+/// `start_pattern` and ends with the `end_pattern`. It extracts and returns the bytes found between these two patterns
+/// as a UTF-8 string. The function is useful for parsing version information from binary files, such as firmware images
+/// or compiled executables, where version strings are embedded within the binary data.
+///
+/// # Arguments
+///
+/// * `content` - A slice of bytes representing the binary content to be searched.
+/// * `start_pattern` - A slice of bytes representing the pattern that marks the beginning of the version string.
+/// * `end_pattern` - A slice of bytes representing the pattern that marks the end of the version string.
+///
+/// # Returns
+///
+/// Returns an `Option<String>`:
+/// - `Some(String)` containing the extracted version string if both start and end patterns are found
+/// and the content between them is valid UTF-8.
+/// - `None` if either pattern is not found, or if the content between the patterns is not valid UTF-8.
 pub(crate) fn find_version(
     content: &[u8],
     start_pattern: &[u8],
@@ -348,6 +367,31 @@ pub(crate) fn find_version(
     None
 }
 
+/// Determines the version of the installed bootloader by analyzing the binary content of the bootloader file.
+///
+/// This function attempts to find and read the bootloader file specified by the `filename` argument, or by constructing
+/// a path based on provided parameters. It then searches the file's content for known version string patterns specific to 
+/// either systemd-boot or GRUB2 bootloaders. The function is designed to work with binary files where version information 
+/// is embedded within the data.
+///
+/// # Arguments
+///
+/// * `snapshot` - A numeric identifier for the snapshot directory, used when constructing the default path to the bootloader file.
+/// * `firmware_arch` - The architecture of the firmware (e.g., "x64"), used in path construction and potentially in selecting
+/// version patterns.
+/// * `shimdir` - Directory containing the bootloader shim, which is part of the path if the default bootloader file is used.
+/// * `boot_root` - The root directory for boot files, forming the base of the constructed path to the bootloader file.
+/// * `boot_dst` - The destination directory for boot files, relative to `boot_root`, further specifying the constructed path.
+/// * `filename` - An optional specific filename to directly check for the bootloader version. If provided, other path parameters
+/// are ignored.
+/// * `override_prefix` - An optional path override that, if provided, replaces the `boot_root` in the constructed path to
+/// the bootloader file.
+///
+/// # Returns
+///
+/// Returns a `Result` with:
+/// - `Ok(String)` containing the extracted version string if a known version pattern is found within the bootloader file's content.
+/// - `Err(String)` with an appropriate error message if the file does not exist, cannot be read, or if no known version pattern is found.
 pub(crate) fn bootloader_version(
     snapshot: u64,
     firmware_arch: &str,
@@ -399,6 +443,27 @@ pub(crate) fn bootloader_version(
     Err("Version not found".to_string())
 }
 
+/// Checks whether systemd-boot is installed and marked by `sdbootutil`.
+///
+/// This function verifies if systemd-boot is installed by checking two criteria: the successful detection of the
+/// bootloader version and the presence of a flag file indicating that `sdbootutil` was used for the installation.
+/// It constructs the path to the flag file based on given parameters and checks for its existence.
+///
+/// # Arguments
+///
+/// * `snapshot` - A numeric identifier for the snapshot directory, used in determining the bootloader version.
+/// * `firmware_arch` - The architecture of the firmware, such as "x64" or "arm64".
+/// * `shimdir` - The directory containing the bootloader shim, part of the path if the default bootloader file is used.
+/// * `boot_root` - The root directory for boot files, used in constructing the path to the flag file.
+/// * `boot_dst` - The destination directory for boot files, relative to `boot_root`, used in constructing the path.
+/// * `filename` - An optional specific filename to check for the bootloader version. If provided, other path parameters are ignored.
+/// * `override_prefix` - An optional path override that replaces `boot_root` in the constructed path to the flag file.
+///
+/// # Returns
+///
+/// Returns `Ok(true)` if both the bootloader version is successfully detected and the installation flag file exists,
+/// indicating systemd-boot was installed using `sdbootutil`. Returns `Ok(false)` otherwise.
+/// Returns `Err(String)` with an error message if any operation (like reading the bootloader file) fails.
 pub(crate) fn is_installed(
     snapshot: u64,
     firmware_arch: &str,

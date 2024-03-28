@@ -461,6 +461,35 @@ pub fn command_update_predictions() -> Result<bool, String> {
     Ok(true)
 }
 
+/// Gathers essential system information required for bootloader management.
+///
+/// This function aggregates various pieces of system information, including snapshot identifier, directory paths,
+/// and firmware architecture. It ensures root privileges are available before proceeding to collect the information.
+/// The function relies on `fs::get_root_snapshot_info` and `fs::determine_boot_dst` to retrieve snapshot-related information
+/// and boot destination directory, respectively.
+///
+/// # Returns
+///
+/// Returns `Ok` with a tuple containing:
+/// - Snapshot identifier (u64).
+/// - Root prefix (String).
+/// - Root subvolume (String).
+/// - Firmware architecture (String, currently hardcoded to "x64").
+/// - Boot destination directory (String).
+/// - Shim directory (String, currently hardcoded).
+/// - Boot root directory (String, currently hardcoded).
+///
+/// Returns `Err(String)` with an error message if any step of information gathering fails.
+///
+/// # Examples
+///
+/// ```
+/// // Commented as it required root permissions
+/// //let system_info = sdbootutil::get_system_info().expect("Failed to get system information");
+///
+/// // Example of destructuring the returned tuple
+/// //let (snapshot, prefix, subvol, arch, boot_dst, shimdir, boot_root) = system_info;
+/// ```
 pub fn get_system_info() -> Result<(u64, String, String, String, String, String, String), String> {
     if let Err(e) = ensure_root_permissions() {
         let message = format!("Failed to get root privileges: {}", e);
