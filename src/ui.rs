@@ -79,7 +79,7 @@ impl Menu {
     }
 }
 
-pub fn show_main_menu() -> u32 {
+pub fn show_main_menu() -> Result<bool, String> {
     let menu_items = vec!["Kernels", "Snapshots", "Entries", "Install/Update"];
     let menu = Menu::new(menu_items);
     let mut siv = cursive::default();
@@ -95,5 +95,5 @@ pub fn show_main_menu() -> u32 {
     siv.add_layer(layout);
     siv.add_global_callback(Event::Char('q'), |s| s.quit());
     siv.run();
-    0
+    Ok(true)
 }

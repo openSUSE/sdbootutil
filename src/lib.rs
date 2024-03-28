@@ -5,7 +5,7 @@ pub mod ui;
 
 use cli::ensure_root_permissions;
 use fs::is_installed;
-use io::{log_info, print_error};
+use io::log_info;
 use std::error::Error;
 use std::path::{Path, PathBuf};
 
@@ -20,13 +20,13 @@ use std::path::{Path, PathBuf};
 /// # Examples
 ///
 /// ```
-/// let status = sdbootutil::command_kernels();
-/// assert_eq!(status, 0);
+/// let status = sdbootutil::command_kernels().unwrap();
+/// assert_eq!(status, true);
 /// ```
-pub fn command_kernels() -> u32 {
+pub fn command_kernels() -> Result<bool, String> {
     let message = "Kernels command called";
     log_info(message, 1);
-    0
+    Ok(true)
 }
 
 /// Executes the `Snapshots` command.
@@ -40,13 +40,13 @@ pub fn command_kernels() -> u32 {
 /// # Examples
 ///
 /// ```
-/// let status = sdbootutil::command_snapshots();
-/// assert_eq!(status, 1);
+/// let status = sdbootutil::command_snapshots().unwrap();
+/// assert_eq!(status, true);
 /// ```
-pub fn command_snapshots() -> u32 {
+pub fn command_snapshots() -> Result<bool, String> {
     let message = "Snapshots command called";
     log_info(message, 1);
-    1
+    Ok(true)
 }
 
 /// Executes the `Entries` command.
@@ -60,13 +60,13 @@ pub fn command_snapshots() -> u32 {
 /// # Examples
 ///
 /// ```
-/// let status = sdbootutil::command_entries();
-/// assert_eq!(status, 2);
+/// let status = sdbootutil::command_entries().unwrap();
+/// assert_eq!(status, true);
 /// ```
-pub fn command_entries() -> u32 {
+pub fn command_entries() -> Result<bool, String> {
     let message = "Entries command called";
     log_info(message, 1);
-    2
+    Ok(true)
 }
 
 /// Executes the `Bootloader` command.
@@ -80,13 +80,13 @@ pub fn command_entries() -> u32 {
 /// # Examples
 ///
 /// ```
-/// let status = sdbootutil::command_bootloader();
-/// assert_eq!(status, 3);
+/// let status = sdbootutil::command_bootloader().unwrap();
+/// assert_eq!(status, true);
 /// ```
-pub fn command_bootloader() -> u32 {
+pub fn command_bootloader() -> Result<bool, String> {
     let message = "Bootloader command called";
     log_info(message, 1);
-    3
+    Ok(true)
 }
 
 /// Executes the `AddKernel` command with a specified kernel version.
@@ -104,13 +104,13 @@ pub fn command_bootloader() -> u32 {
 /// # Example
 ///
 /// ```
-/// let status = sdbootutil::command_add_kernel("5.8.0-53-generic");
-/// assert_eq!(status, 4);
+/// let status = sdbootutil::command_add_kernel("5.8.0-53-generic").unwrap();
+/// assert_eq!(status, true);
 /// ```
-pub fn command_add_kernel(kernel_version: &str) -> u32 {
+pub fn command_add_kernel(kernel_version: &str) -> Result<bool, String> {
     let message = format!("AddKernel command called with version {}", kernel_version);
     log_info(&message, 1);
-    4
+    Ok(true)
 }
 
 /// Executes the `AddAllKernels` command.
@@ -124,13 +124,13 @@ pub fn command_add_kernel(kernel_version: &str) -> u32 {
 /// # Examples
 ///
 /// ```
-/// let status = sdbootutil::command_add_all_kernels();
-/// assert_eq!(status, 5);
+/// let status = sdbootutil::command_add_all_kernels().unwrap();
+/// assert_eq!(status, true);
 /// ```
-pub fn command_add_all_kernels() -> u32 {
+pub fn command_add_all_kernels() -> Result<bool, String> {
     let message = "AddAllKernels command called";
     log_info(message, 1);
-    5
+    Ok(true)
 }
 
 /// Executes the `Mkinitrd` command.
@@ -144,13 +144,13 @@ pub fn command_add_all_kernels() -> u32 {
 /// # Examples
 ///
 /// ```
-/// let status = sdbootutil::command_mkinitrd();
-/// assert_eq!(status, 6);
+/// let status = sdbootutil::command_mkinitrd().unwrap();
+/// assert_eq!(status, true);
 /// ```
-pub fn command_mkinitrd() -> u32 {
+pub fn command_mkinitrd() -> Result<bool, String> {
     let message = "Mkinitrd command called";
     log_info(message, 1);
-    6
+    Ok(true)
 }
 
 /// Executes the `RemoveKernel` command with a specified kernel version.
@@ -168,16 +168,16 @@ pub fn command_mkinitrd() -> u32 {
 /// # Example
 ///
 /// ```
-/// let status = sdbootutil::command_remove_kernel("5.8.0-53-generic");
-/// assert_eq!(status, 7);
+/// let status = sdbootutil::command_remove_kernel("5.8.0-53-generic").unwrap();
+/// assert_eq!(status, true);
 /// ```
-pub fn command_remove_kernel(kernel_version: &str) -> u32 {
+pub fn command_remove_kernel(kernel_version: &str) -> Result<bool, String> {
     let message = format!(
         "RemoveKernel command called with version {}",
         kernel_version
     );
     log_info(&message, 1);
-    7
+    Ok(true)
 }
 
 /// Executes the `RemoveAllKernels` command.
@@ -191,13 +191,13 @@ pub fn command_remove_kernel(kernel_version: &str) -> u32 {
 /// # Examples
 ///
 /// ```
-/// let status = sdbootutil::command_remove_all_kernels();
-/// assert_eq!(status, 8);
+/// let status = sdbootutil::command_remove_all_kernels().unwrap();
+/// assert_eq!(status, true);
 /// ```
-pub fn command_remove_all_kernels() -> u32 {
+pub fn command_remove_all_kernels() -> Result<bool, String> {
     let message = "RemoveAllKernels command called";
     log_info(message, 1);
-    8
+    Ok(true)
 }
 
 /// Executes the `ListKernels` command.
@@ -211,13 +211,13 @@ pub fn command_remove_all_kernels() -> u32 {
 /// # Examples
 ///
 /// ```
-/// let status = sdbootutil::command_list_kernels();
-/// assert_eq!(status, 9);
+/// let status = sdbootutil::command_list_kernels().unwrap();
+/// assert_eq!(status, true);
 /// ```
-pub fn command_list_kernels() -> u32 {
+pub fn command_list_kernels() -> Result<bool, String> {
     let message = "ListKernels command called";
     log_info(message, 1);
-    9
+    Ok(true)
 }
 
 /// Executes the `ListEntries` command.
@@ -231,13 +231,13 @@ pub fn command_list_kernels() -> u32 {
 /// # Examples
 ///
 /// ```
-/// let status = sdbootutil::command_list_entries();
-/// assert_eq!(status, 10);
+/// let status = sdbootutil::command_list_entries().unwrap();
+/// assert_eq!(status, true);
 /// ```
-pub fn command_list_entries() -> u32 {
+pub fn command_list_entries() -> Result<bool, String> {
     let message = "ListEntries command called";
     log_info(message, 1);
-    10
+    Ok(true)
 }
 
 /// Executes the `ListSnapshots` command.
@@ -251,13 +251,13 @@ pub fn command_list_entries() -> u32 {
 /// # Examples
 ///
 /// ```
-/// let status = sdbootutil::command_list_snapshots();
-/// assert_eq!(status, 11);
+/// let status = sdbootutil::command_list_snapshots().unwrap();
+/// assert_eq!(status, true);
 /// ```
-pub fn command_list_snapshots() -> u32 {
+pub fn command_list_snapshots() -> Result<bool, String> {
     let message = "ListSnapshots command called";
     log_info(message, 1);
-    11
+    Ok(true)
 }
 
 /// Executes the `SetDefaultSnapshot` command.
@@ -271,13 +271,13 @@ pub fn command_list_snapshots() -> u32 {
 /// # Examples
 ///
 /// ```
-/// let status = sdbootutil::command_set_default_snapshot();
-/// assert_eq!(status, 12);
+/// let status = sdbootutil::command_set_default_snapshot().unwrap();
+/// assert_eq!(status, true);
 /// ```
-pub fn command_set_default_snapshot() -> u32 {
+pub fn command_set_default_snapshot() -> Result<bool, String> {
     let message = "SetDefaultSnapshot command called";
     log_info(message, 1);
-    12
+    Ok(true)
 }
 
 /// Executes the `IsBootable` command.
@@ -291,13 +291,13 @@ pub fn command_set_default_snapshot() -> u32 {
 /// # Examples
 ///
 /// ```
-/// let status = sdbootutil::command_is_bootable();
-/// assert_eq!(status, 13);
+/// let status = sdbootutil::command_is_bootable().unwrap();
+/// assert_eq!(status, true);
 /// ```
-pub fn command_is_bootable() -> u32 {
+pub fn command_is_bootable() -> Result<bool, String> {
     let message = "IsBootable command called";
     log_info(message, 1);
-    13
+    Ok(true)
 }
 
 /// Checks if systemd-boot is installed by `sdbootutil`.
@@ -331,9 +331,9 @@ pub fn command_is_bootable() -> u32 {
 ///     "EFI/systemd",
 ///     None,
 ///     None,
-/// );
+/// ).is_ok();
 ///
-/// assert!(!installed, "Expected systemd-boot to not be detected as installed");
+/// assert!(installed, "Expected systemd-boot to not be detected as installed");
 /// ```
 pub fn command_is_installed(
     snapshot: u64,
@@ -343,8 +343,8 @@ pub fn command_is_installed(
     boot_dst: &str,
     filename: Option<PathBuf>,
     override_prefix: Option<&Path>,
-) -> bool {
-    return is_installed(
+) -> Result<bool, String> {
+    let result = is_installed(
         snapshot,
         firmware_arch,
         shimdir,
@@ -352,7 +352,13 @@ pub fn command_is_installed(
         boot_dst,
         filename,
         override_prefix,
-    );
+    ).is_ok();
+    if result {
+        log_info("systemd-boot was installed using this tool", 0)
+    } else {
+        log_info("systemd-boot was not installed using this tool", 0)
+    }
+    Ok(result)
 }
 
 /// Executes the `Install` command.
@@ -366,13 +372,13 @@ pub fn command_is_installed(
 /// # Examples
 ///
 /// ```
-/// let status = sdbootutil::command_install();
-/// assert_eq!(status, 14);
+/// let status = sdbootutil::command_install().unwrap();
+/// assert_eq!(status, true);
 /// ```
-pub fn command_install() -> u32 {
+pub fn command_install() -> Result<bool, String> {
     let message = "Install command called";
     log_info(message, 1);
-    14
+    Ok(true)
 }
 
 /// Executes the `NeedsUpdate` command.
@@ -386,13 +392,13 @@ pub fn command_install() -> u32 {
 /// # Examples
 ///
 /// ```
-/// let status = sdbootutil::command_needs_update();
-/// assert_eq!(status, 15);
+/// let status = sdbootutil::command_needs_update().unwrap();
+/// assert_eq!(status, true);
 /// ```
-pub fn command_needs_update() -> u32 {
+pub fn command_needs_update() -> Result<bool, String> {
     let message = "NeedsUpdate command called";
     log_info(message, 1);
-    15
+    Ok(true)
 }
 
 /// Executes the `Update` command.
@@ -406,13 +412,13 @@ pub fn command_needs_update() -> u32 {
 /// # Examples
 ///
 /// ```
-/// let status = sdbootutil::command_update();
-/// assert_eq!(status, 16);
+/// let status = sdbootutil::command_update().unwrap();
+/// assert_eq!(status, true);
 /// ```
-pub fn command_update() -> u32 {
+pub fn command_update() -> Result<bool, String> {
     let message = "Update command called";
     log_info(message, 1);
-    16
+    Ok(true)
 }
 
 /// Executes the `ForceUpdate` command.
@@ -426,13 +432,13 @@ pub fn command_update() -> u32 {
 /// # Examples
 ///
 /// ```
-/// let status = sdbootutil::command_force_update();
-/// assert_eq!(status, 17);
+/// let status = sdbootutil::command_force_update().unwrap();
+/// assert_eq!(status, true);
 /// ```
-pub fn command_force_update() -> u32 {
+pub fn command_force_update() -> Result<bool, String> {
     let message = "ForceUpdate command called";
     log_info(message, 1);
-    17
+    Ok(true)
 }
 
 /// Executes the `UpdatePredictions` command.
@@ -446,45 +452,53 @@ pub fn command_force_update() -> u32 {
 /// # Examples
 ///
 /// ```
-/// let status = sdbootutil::command_update_predictions();
-/// assert_eq!(status, 18);
+/// let status = sdbootutil::command_update_predictions().unwrap();
+/// assert_eq!(status, true);
 /// ```
-pub fn command_update_predictions() -> u32 {
+pub fn command_update_predictions() -> Result<bool, String> {
     let message = "UpdatePredictions command called";
     log_info(message, 1);
-    18
+    Ok(true)
 }
 
+pub fn get_system_info() -> Result<(u64, String, String, String, String, String, String), String> {
+    if let Err(e) = ensure_root_permissions() {
+        let message = format!("Failed to get root privileges: {}", e);
+        return Err(message);
+    }
+    let firmware_arch = "x64".to_string();
+
+    let (root_snapshot, root_prefix, root_subvol) = match fs::get_root_snapshot_info() {
+        Ok((prefix, snapshot_id, full_path)) => (snapshot_id, prefix, full_path),
+        Err(e) => {
+            let message = format!("Failed to get root snapshot info: {}", e);
+            return Err(message);
+        }
+    };
+
+    let boot_dst = match fs::determine_boot_dst(root_snapshot, &firmware_arch, None) {
+        Ok(dst) => dst.to_string(),
+        Err(e) => {
+            let message = format!("Failed to determine boot_dst: {}", e);
+            return Err(message);
+        }
+    };
+    let shimdir = "/usr/share/efi/x86_64".to_string();
+    let boot_root = "/boot/efi".to_string();
+
+    Ok((
+        root_snapshot,
+        root_prefix,
+        root_subvol,
+        firmware_arch,
+        boot_dst,
+        shimdir,
+        boot_root
+    ))
+}
 
 /// only for demonstration purposes
 pub fn test_functions() {
-    if let Err(e) = ensure_root_permissions() {
-        let message = format!("Failed to get root privileges: {}", e);
-        print_error(&message);
-        std::process::exit(1);
-    }
-
-    let mut root_snapshot = 1;
-    let mut _root_prefix = "";
-    let mut _root_subvol = "";
-    let firmware_arch = "x64";
-    match fs::get_root_snapshot_info() {
-        Ok((prefix, snapshot_id, full_path)) => {
-            io::log_info(
-                &format!(
-                    "Prefix: {}, Snapshot ID: {}, Full Path: {}",
-                    prefix, snapshot_id, full_path
-                ),
-                1,
-            );
-            root_snapshot = snapshot_id;
-            _root_prefix = &prefix;
-            _root_subvol = &full_path;
-        }
-        Err(e) => {
-            print_error(&format!("{}", e));
-        }
-    }
     if fs::is_transactional().expect("Failed to check if filesystem is transactional") {
         log_info("It is a transactional system", 1)
     } else {
@@ -497,30 +511,6 @@ pub fn test_functions() {
     ];
     fs::cleanup_rollback_items(&rollback_items);
     fs::reset_rollback_items(&mut rollback_items);
-
-    let boot_dst = match fs::determine_boot_dst(root_snapshot, firmware_arch, None) {
-        Ok(dst) => dst,
-        Err(e) => {
-            print_error(e);
-            "";
-            return;
-        }
-    };
-
-    if command_is_installed(
-        root_snapshot,
-        firmware_arch,
-        "/usr/share/efi/x86_64",
-        "/boot/efi",
-        boot_dst,
-        None,
-        None,
-    ) {
-        log_info("systemd-boot was installed using this tool", 0)
-    }
-    else {
-        log_info("systemd-boot was not installed using this tool", 0)
-    }
 }
 
 #[cfg(test)]

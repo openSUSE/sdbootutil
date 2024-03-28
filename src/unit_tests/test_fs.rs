@@ -814,7 +814,7 @@ fn test_is_installed_true() {
         "",
         Some(systemd_boot_test_file),
         Some(temp_dir.path()),
-    );
+    ).unwrap();
     assert_eq!(is_installed, true, "Expected is_installed to return true")
 }
 
@@ -846,7 +846,7 @@ fn test_is_installed_false_bootloader() {
         "",
         Some(systemd_boot_test_file),
         Some(temp_dir.path()),
-    );
+    ).unwrap();
     assert_eq!(is_installed, false, "Expected is_installed to return true")
 }
 
@@ -875,6 +875,6 @@ fn test_is_installed_false_flag() {
         "",
         Some(systemd_boot_test_file),
         Some(temp_dir.path()),
-    );
+    ).unwrap();
     assert_eq!(is_installed, false, "Expected is_installed to return true")
 }
