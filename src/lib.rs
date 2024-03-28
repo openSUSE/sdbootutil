@@ -323,7 +323,7 @@ pub fn command_is_bootable() -> Result<bool, String> {
 /// use sdbootutil::command_is_installed;
 ///
 /// let installed = command_is_installed(
-///     0,
+///     Some(0),
 ///     "x86_64",
 ///     "/usr/share/efi/x86_64",
 ///     "/boot/efi",
@@ -335,7 +335,7 @@ pub fn command_is_bootable() -> Result<bool, String> {
 /// assert!(installed, "Expected systemd-boot to not be detected as installed");
 /// ```
 pub fn command_is_installed(
-    snapshot: u64,
+    snapshot: Option<u64>,
     firmware_arch: &str,
     shimdir: &str,
     boot_root: &str,
@@ -498,7 +498,7 @@ pub fn command_update_predictions() -> Result<bool, String> {
 /// ```no_run
 /// match sdbootutil::get_system_info() {
 ///     Ok((snapshot, prefix, subvol, arch, boot_dst, shimdir, boot_root, entry_token, root_uuid, root_device)) => {
-///         println!("Snapshot ID: {}", snapshot);
+///         println!("shimdir: {}", shimdir);
 ///         // Additional println! statements for each piece of information...
 ///     },
 ///     Err(e) => eprintln!("Failed to gather system information: {}", e),
@@ -508,9 +508,9 @@ pub fn command_update_predictions() -> Result<bool, String> {
 /// Note: This function requires root privileges to access certain system information and might not be suitable for all environments.
 pub fn get_system_info() -> Result<
     (
-        u64,
-        String,
-        String,
+        Option<u64>,
+        Option<String>,
+        Option<String>,
         String,
         String,
         String,
@@ -525,17 +525,18 @@ pub fn get_system_info() -> Result<
         let message = format!("Failed to get root privileges: {}", e);
         return Err(message);
     }
-
+    
+    let has_snapshots = fs::is_snapshotted().map_err(|e| format!("Couldn't find out if snapshotted: {}", e))?;
     let (firmware_arch, entry_token, boot_root) =
         io::get_bootctl_info().map_err(|e| format!("Couldn't get bootctl info: {}", e))?;
     let (root_uuid, root_device) = io::get_root_filesystem_info()
         .map_err(|e| format!("Couldn't get root filesystem info: {}", e))?;
-    let (root_snapshot, root_prefix, root_subvol) = match fs::get_root_snapshot_info() {
-        Ok((prefix, snapshot_id, full_path)) => (snapshot_id, prefix, full_path),
-        Err(e) => {
-            let message = format!("Failed to get root snapshot info: {}", e);
-            return Err(message);
-        }
+    let (root_snapshot, root_prefix, root_subvol) = if has_snapshots {
+        fs::get_root_snapshot_info()
+            .map(|(prefix, snapshot_id, full_path)| (Some(snapshot_id), Some(prefix), Some(full_path)))
+            .map_err(|e| format!("Failed to get root snapshot info: {}", e))?
+    } else {
+        (None, None, None)
     };
 
     let boot_dst = match fs::determine_boot_dst(root_snapshot, &firmware_arch, None) {
