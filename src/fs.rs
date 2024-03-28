@@ -191,16 +191,19 @@ pub(crate) fn get_root_snapshot_info() -> Result<(String, u64, String), Box<dyn 
 ///
 /// Returns the `PathBuf` pointing to the systemd-boot EFI file.
 pub(crate) fn find_sdboot(
-    snapshot: u64,
+    snapshot: Option<u64>,
     firmware_arch: &str,
     prefix_override: Option<&Path>,
 ) -> PathBuf {
-    // Use the provided prefix if specified, otherwise default to "/.snapshots"
-    let base_prefix = Path::new("/.snapshots");
-    let prefix = prefix_override
-        .unwrap_or(base_prefix)
-        .join(snapshot.to_string())
-        .join("snapshot");
+    let base_prefix = match prefix_override {
+        Some(override_path) => override_path.to_path_buf(),
+        None => Path::new("/.snapshots").to_path_buf(),
+    };
+    let prefix = match snapshot {
+        Some(snap) => base_prefix.join(snap.to_string()).join("snapshot"),
+        None => base_prefix,
+    };
+
     let mut sdboot_path = prefix.join(format!(
         "usr/lib/systemd-boot/systemd-boot{}.efi",
         firmware_arch
@@ -230,12 +233,15 @@ pub(crate) fn find_sdboot(
 /// # Returns
 ///
 /// Returns the `PathBuf` pointing to the GRUB2 EFI file, whether it's in the primary or fallback location.
-pub(crate) fn find_grub2(snapshot: u64, override_prefix: Option<&Path>) -> PathBuf {
-    let base_prefix = Path::new("/.snapshots");
-    let prefix = override_prefix
-        .unwrap_or(base_prefix)
-        .join(snapshot.to_string())
-        .join("snapshot");
+pub(crate) fn find_grub2(snapshot: Option<u64>, prefix_override: Option<&Path>) -> PathBuf {
+    let base_prefix = match prefix_override {
+        Some(override_path) => override_path.to_path_buf(),
+        None => Path::new("/.snapshots").to_path_buf(),
+    };
+    let prefix = match snapshot {
+        Some(snap) => base_prefix.join(snap.to_string()).join("snapshot"),
+        None => base_prefix,
+    };
     let mut grub2_path = prefix.join(format!("usr/share/efi/{}/grub.efi", ARCH));
 
     if !grub2_path.exists() {
@@ -258,7 +264,7 @@ pub(crate) fn find_grub2(snapshot: u64, override_prefix: Option<&Path>) -> PathB
 ///
 /// Returns `true` if the systemd-boot EFI file exists and the GRUB2 EFI file does not, indicating systemd-boot is installed.
 pub(crate) fn is_sdboot(
-    snapshot: u64,
+    snapshot: Option<u64>,
     firmware_arch: &str,
     override_prefix: Option<&Path>,
 ) -> bool {
@@ -279,7 +285,7 @@ pub(crate) fn is_sdboot(
 /// # Returns
 ///
 /// Returns `true` if the GRUB2 EFI file exists, indicating GRUB2 is installed.
-pub(crate) fn is_grub2(snapshot: u64, override_prefix: Option<&Path>) -> bool {
+pub(crate) fn is_grub2(snapshot: Option<u64>, override_prefix: Option<&Path>) -> bool {
     find_grub2(snapshot, override_prefix).exists()
 }
 
@@ -302,7 +308,7 @@ pub(crate) fn is_grub2(snapshot: u64, override_prefix: Option<&Path>) -> bool {
 /// Returns `Ok("/EFI/systemd")` if systemd-boot is detected as the installed bootloader, `Ok("/EFI/opensuse")` if GRUB2 is detected,
 /// or an `Err` with a message indicating that the bootloader is unsupported or could not be determined.
 pub(crate) fn determine_boot_dst(
-    snapshot: u64,
+    snapshot: Option<u64>,
     firmware_arch: &str,
     override_prefix: Option<&Path>,
 ) -> Result<&'static str, &'static str> {
@@ -330,7 +336,7 @@ pub(crate) fn determine_boot_dst(
 /// Returns a `Result` containing a `PathBuf` to the detected bootloader EFI file on success,
 /// or an error string if no bootloader is detected.
 pub(crate) fn find_bootloader(
-    snapshot: u64,
+    snapshot: Option<u64>,
     firmware_arch: &str,
     override_prefix: Option<&Path>,
 ) -> Result<PathBuf, &'static str> {
@@ -409,7 +415,7 @@ pub(crate) fn find_version(
 /// - `Ok(String)` containing the extracted version string if a known version pattern is found within the bootloader file's content.
 /// - `Err(String)` with an appropriate error message if the file does not exist, cannot be read, or if no known version pattern is found.
 pub(crate) fn bootloader_version(
-    snapshot: u64,
+    snapshot: Option<u64>,
     firmware_arch: &str,
     shimdir: &str,
     boot_root: &str,
@@ -481,7 +487,7 @@ pub(crate) fn bootloader_version(
 /// indicating systemd-boot was installed using `sdbootutil`. Returns `Ok(false)` otherwise.
 /// Returns `Err(String)` with an error message if any operation (like reading the bootloader file) fails.
 pub(crate) fn is_installed(
-    snapshot: u64,
+    snapshot: Option<u64>,
     firmware_arch: &str,
     shimdir: &str,
     boot_root: &str,
@@ -514,4 +520,31 @@ pub(crate) fn is_installed(
 
 pub(crate) fn get_shimdir() -> String {
     format!("/usr/share/efi/{}", ARCH)
+}
+
+/// Checks if the filesystem type of `/` is `btrfs` and the directory /.snapshots exists.
+///
+/// # Returns
+///
+/// `Ok(true)` if the filesystem type is `btrfs` and /.snapshots is a directory,
+/// `Ok(false)` otherwise, or an `Error` if an instruction fails.
+pub(crate) fn is_snapshotted() -> Result<bool, String> {
+    let mounts_file = fs::File::open("/proc/mounts").expect("Could not open /proc/mounts");
+    let reader = BufReader::new(mounts_file);
+    let snapshots_dir = Path::new("/.snapshots");
+
+    for line in reader.lines() {
+        let line = line.expect("Error reading line");
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if parts.len() > 2 {
+            let mount_point = parts[1];
+            let fs_type = parts[2];
+
+            if mount_point == "/" {
+                return Ok(fs_type == "btrfs" && snapshots_dir.is_dir());
+            }
+        }
+    }
+
+    Ok(false)
 }
