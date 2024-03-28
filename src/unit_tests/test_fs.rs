@@ -878,3 +878,9 @@ fn test_is_installed_false_flag() {
     ).unwrap();
     assert_eq!(is_installed, false, "Expected is_installed to return true")
 }
+
+#[test]
+    fn test_get_shimdir() {
+        let expected_path = format!("/usr/share/efi/{}", ARCH);
+        assert_eq!(get_shimdir(), expected_path);
+    }
