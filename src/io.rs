@@ -19,7 +19,7 @@ fn print_message(message: &str) {
 /// # Arguments
 ///
 /// * `message` - A string slice containing the error message to be printed.
-pub(crate) fn print_error(message: &str) {
+pub fn print_error(message: &str) {
     eprintln!("Error: {}", message);
 }
 

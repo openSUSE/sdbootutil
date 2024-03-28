@@ -407,7 +407,7 @@ pub(crate) fn is_installed(
     boot_dst: &str,
     filename: Option<PathBuf>,
     override_prefix: Option<&Path>,
-) -> bool {
+) -> Result<bool, String> {
     let prefix = override_prefix.unwrap_or(Path::new(""));
     let bootloader_version_successful = bootloader_version(
         snapshot,
@@ -428,5 +428,5 @@ pub(crate) fn is_installed(
     let installed_flag_path = Path::new(&flag_path);
     let installed_flag_exists = installed_flag_path.exists();
 
-    bootloader_version_successful && installed_flag_exists
+    Ok(bootloader_version_successful && installed_flag_exists)
 }

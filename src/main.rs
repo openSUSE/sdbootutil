@@ -1,9 +1,16 @@
-use lib::test_functions;
 use sdbootutil as lib;
 use sdbootutil::cli::{parse_args, Commands};
+use sdbootutil::io::print_error;
 
-fn main() {
-    test_functions();
+fn main() -> Result<(), String> {
+    let (root_snapshot, _root_prefix, _root_subvol, firmware_arch, boot_dst, shimdir, boot_root) = match lib::get_system_info() {
+        Ok(info) => info,
+        Err(e) => {
+            let message = format!("Error getting system info: {}", e);
+            print_error(&message);
+            return Err(message)
+        }
+    };
     let args = parse_args();
     let _result = match args.cmd {
         Some(Commands::Kernels {}) => lib::command_kernels(),
@@ -22,7 +29,7 @@ fn main() {
         Some(Commands::ListSnapshots {}) => lib::command_list_snapshots(),
         Some(Commands::SetDefaultSnapshot {}) => lib::command_set_default_snapshot(),
         Some(Commands::IsBootable {}) => lib::command_is_bootable(),
-        Some(Commands::IsInstalled {}) => lib::command_install(),
+        Some(Commands::IsInstalled {}) => lib::command_is_installed(root_snapshot, &firmware_arch, &shimdir, &boot_root, &boot_dst, None, None),
         Some(Commands::Install {}) => lib::command_install(),
         Some(Commands::NeedsUpdate {}) => lib::command_needs_update(),
         Some(Commands::Update {}) => lib::command_update(),
@@ -30,4 +37,5 @@ fn main() {
         Some(Commands::UpdatePredictions {}) => lib::command_update_predictions(),
         None => lib::ui::show_main_menu(),
     };
+    Ok(())
 }

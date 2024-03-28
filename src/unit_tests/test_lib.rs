@@ -2,114 +2,114 @@ use super::super::*;
 
 #[test]
 fn test_command_kernels() {
-    let result = command_kernels();
-    assert_eq!(result, 0);
+    let result = command_kernels().unwrap();
+    assert_eq!(result, true);
 }
 
 #[test]
 fn test_command_snapshots() {
-    let result = command_snapshots();
-    assert_eq!(result, 1);
+    let result = command_snapshots().unwrap();
+    assert_eq!(result, true);
 }
 
 #[test]
 fn test_command_entries() {
-    let result = command_entries();
-    assert_eq!(result, 2);
+    let result = command_entries().unwrap();
+    assert_eq!(result, true);
 }
 
 #[test]
 fn test_command_bootloader() {
-    let result = command_bootloader();
-    assert_eq!(result, 3);
+    let result = command_bootloader().unwrap();
+    assert_eq!(result, true);
 }
 
 #[test]
 fn test_command_add_kernel() {
-    let result = command_add_kernel("5.8.0-53-generic");
-    assert_eq!(result, 4);
+    let result = command_add_kernel("5.8.0-53-generic").unwrap();
+    assert_eq!(result, true);
 }
 
 #[test]
 fn test_command_add_all_kernels() {
-    let result = command_add_all_kernels();
-    assert_eq!(result, 5);
+    let result = command_add_all_kernels().unwrap();
+    assert_eq!(result, true);
 }
 
 #[test]
 fn test_command_mkinitrd() {
-    let result = command_mkinitrd();
-    assert_eq!(result, 6);
+    let result = command_mkinitrd().unwrap();
+    assert_eq!(result, true);
 }
 
 #[test]
 fn test_command_remove_kernel() {
-    let result = command_remove_kernel("5.8.0-53-generic");
-    assert_eq!(result, 7);
+    let result = command_remove_kernel("5.8.0-53-generic").unwrap();
+    assert_eq!(result, true);
 }
 
 #[test]
 fn test_command_remove_all_kernels() {
-    let result = command_remove_all_kernels();
-    assert_eq!(result, 8);
+    let result = command_remove_all_kernels().unwrap();
+    assert_eq!(result, true);
 }
 
 #[test]
 fn test_command_list_kernels() {
-    let result = command_list_kernels();
-    assert_eq!(result, 9);
+    let result = command_list_kernels().unwrap();
+    assert_eq!(result, true);
 }
 
 #[test]
 fn test_command_list_entries() {
-    let result = command_list_entries();
-    assert_eq!(result, 10);
+    let result = command_list_entries().unwrap();
+    assert_eq!(result, true);
 }
 
 #[test]
 fn test_command_list_snapshots() {
-    let result = command_list_snapshots();
-    assert_eq!(result, 11);
+    let result = command_list_snapshots().unwrap();
+    assert_eq!(result, true);
 }
 
 #[test]
 fn test_command_set_default_snapshot() {
-    let result = command_set_default_snapshot();
-    assert_eq!(result, 12);
+    let result = command_set_default_snapshot().unwrap();
+    assert_eq!(result, true);
 }
 
 #[test]
 fn test_command_is_bootable() {
-    let result = command_is_bootable();
-    assert_eq!(result, 13);
+    let result = command_is_bootable().unwrap();
+    assert_eq!(result, true);
 }
 
 #[test]
 fn test_command_install() {
-    let result = command_install();
-    assert_eq!(result, 14);
+    let result = command_install().unwrap();
+    assert_eq!(result, true);
 }
 
 #[test]
 fn test_command_needs_update() {
-    let result = command_needs_update();
-    assert_eq!(result, 15);
+    let result = command_needs_update().unwrap();
+    assert_eq!(result, true);
 }
 
 #[test]
 fn test_command_update() {
-    let result = command_update();
-    assert_eq!(result, 16);
+    let result = command_update().unwrap();
+    assert_eq!(result, true);
 }
 
 #[test]
 fn test_command_force_update() {
-    let result = command_force_update();
-    assert_eq!(result, 17);
+    let result = command_force_update().unwrap();
+    assert_eq!(result, true);
 }
 
 #[test]
 fn test_command_update_predictions() {
-    let result = command_update_predictions();
-    assert_eq!(result, 18);
+    let result = command_update_predictions().unwrap();
+    assert_eq!(result, true);
 }
