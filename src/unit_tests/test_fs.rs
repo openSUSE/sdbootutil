@@ -411,7 +411,11 @@ fn test_determine_boot_dst_only_systemd_boot_exists() {
         .write_all(b"")
         .unwrap();
 
-        assert_eq!(determine_boot_dst(0, "x64", Some(temp_dir.path())).unwrap(), "/EFI/systemd", "Failed to get boot_dst");
+    assert_eq!(
+        determine_boot_dst(0, "x64", Some(temp_dir.path())).unwrap(),
+        "/EFI/systemd",
+        "Failed to get boot_dst"
+    );
 }
 
 #[test]
@@ -436,7 +440,11 @@ fn test_determine_boot_dst_systemd_boot_and_grub2_exist() {
         .write_all(b"")
         .unwrap();
 
-    assert_eq!(determine_boot_dst(0, "x64", Some(temp_dir.path())).unwrap(), "/EFI/opensuse", "Failed to get boot_dst");
+    assert_eq!(
+        determine_boot_dst(0, "x64", Some(temp_dir.path())).unwrap(),
+        "/EFI/opensuse",
+        "Failed to get boot_dst"
+    );
 }
 
 #[test]
@@ -454,7 +462,11 @@ fn test_determine_boot_dst_only_grub2_exist() {
         .write_all(b"")
         .unwrap();
 
-        assert_eq!(determine_boot_dst(0, "x64", Some(temp_dir.path())).unwrap(), "/EFI/opensuse", "Failed to get boot_dst");
+    assert_eq!(
+        determine_boot_dst(0, "x64", Some(temp_dir.path())).unwrap(),
+        "/EFI/opensuse",
+        "Failed to get boot_dst"
+    );
 }
 
 #[test]
@@ -466,7 +478,10 @@ fn test_determine_boot_dst_neither_exists() {
         result.is_err(),
         "Expected an error for file without version pattern"
     );
-    assert_eq!(result.unwrap_err(), "Unsupported bootloader or unable to determine bootloader");
+    assert_eq!(
+        result.unwrap_err(),
+        "Unsupported bootloader or unable to determine bootloader"
+    );
 }
 
 #[test]
@@ -814,7 +829,8 @@ fn test_is_installed_true() {
         "",
         Some(systemd_boot_test_file),
         Some(temp_dir.path()),
-    ).unwrap();
+    )
+    .unwrap();
     assert_eq!(is_installed, true, "Expected is_installed to return true")
 }
 
@@ -846,7 +862,8 @@ fn test_is_installed_false_bootloader() {
         "",
         Some(systemd_boot_test_file),
         Some(temp_dir.path()),
-    ).unwrap();
+    )
+    .unwrap();
     assert_eq!(is_installed, false, "Expected is_installed to return true")
 }
 
@@ -875,12 +892,13 @@ fn test_is_installed_false_flag() {
         "",
         Some(systemd_boot_test_file),
         Some(temp_dir.path()),
-    ).unwrap();
+    )
+    .unwrap();
     assert_eq!(is_installed, false, "Expected is_installed to return true")
 }
 
 #[test]
-    fn test_get_shimdir() {
-        let expected_path = format!("/usr/share/efi/{}", ARCH);
-        assert_eq!(get_shimdir(), expected_path);
-    }
+fn test_get_shimdir() {
+    let expected_path = format!("/usr/share/efi/{}", ARCH);
+    assert_eq!(get_shimdir(), expected_path);
+}

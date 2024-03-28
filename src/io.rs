@@ -76,7 +76,7 @@ pub(crate) fn get_command_output(
 /// - The bootloader entry token (`token`)
 /// - The boot root path (`$BOOT`)
 ///
-/// These pieces of information are parsed from the lines that contain their respective identifiers. 
+/// These pieces of information are parsed from the lines that contain their respective identifiers.
 /// The function is designed to handle cases where the information may not be at the start of the line.
 ///
 /// # Returns
@@ -105,22 +105,32 @@ pub(crate) fn get_bootctl_info() -> Result<(String, String, String), String> {
         boot_root: Option<String>,
     }
 
-    let result = output.lines().fold(BootctlInfo::default(), |mut acc, line| {
-        if acc.firmware_arch.is_none() && line.contains("Firmware Arch: ") {
-            acc.firmware_arch = line.split("Firmware Arch: ").nth(1).map(str::to_string);
-        } else if acc.entry_token.is_none() && line.contains("token: ") {
-            acc.entry_token = line.split("token: ").nth(1).map(str::to_string);
-        } else if acc.boot_root.is_none() && line.contains("$BOOT: ") {
-            let start_index = line.find("$BOOT: ").unwrap() + "$BOOT: ".len();
-            let end_index = line[start_index..].find(' ').map_or(line.len(), |i| start_index + i);
-            acc.boot_root = Some(line[start_index..end_index].to_string());
-        }
-        acc
-    });
+    let result = output
+        .lines()
+        .fold(BootctlInfo::default(), |mut acc, line| {
+            if acc.firmware_arch.is_none() && line.contains("Firmware Arch: ") {
+                acc.firmware_arch = line.split("Firmware Arch: ").nth(1).map(str::to_string);
+            } else if acc.entry_token.is_none() && line.contains("token: ") {
+                acc.entry_token = line.split("token: ").nth(1).map(str::to_string);
+            } else if acc.boot_root.is_none() && line.contains("$BOOT: ") {
+                let start_index = line.find("$BOOT: ").unwrap() + "$BOOT: ".len();
+                let end_index = line[start_index..]
+                    .find(' ')
+                    .map_or(line.len(), |i| start_index + i);
+                acc.boot_root = Some(line[start_index..end_index].to_string());
+            }
+            acc
+        });
 
-    let firmware_arch = result.firmware_arch.ok_or_else(|| "Firmware Arch not found".to_string())?;
-    let entry_token = result.entry_token.ok_or_else(|| "Entry token not found".to_string())?;
-    let boot_root = result.boot_root.ok_or_else(|| "Boot root not found".to_string())?;
+    let firmware_arch = result
+        .firmware_arch
+        .ok_or_else(|| "Firmware Arch not found".to_string())?;
+    let entry_token = result
+        .entry_token
+        .ok_or_else(|| "Entry token not found".to_string())?;
+    let boot_root = result
+        .boot_root
+        .ok_or_else(|| "Boot root not found".to_string())?;
 
     Ok((firmware_arch, entry_token, boot_root))
 }

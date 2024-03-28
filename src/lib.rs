@@ -4,7 +4,7 @@ pub mod io;
 pub mod ui;
 
 use cli::ensure_root_permissions;
-use fs::{is_installed, get_shimdir};
+use fs::{get_shimdir, is_installed};
 use io::log_info;
 use std::path::{Path, PathBuf};
 
@@ -351,7 +351,8 @@ pub fn command_is_installed(
         boot_dst,
         filename,
         override_prefix,
-    ).is_ok();
+    )
+    .is_ok();
     if result {
         log_info("systemd-boot was installed using this tool", 0)
     } else {
@@ -505,14 +506,30 @@ pub fn command_update_predictions() -> Result<bool, String> {
 /// ```
 ///
 /// Note: This function requires root privileges to access certain system information and might not be suitable for all environments.
-pub fn get_system_info() -> Result<(u64, String, String, String, String, String, String, String, String, String), String> {
+pub fn get_system_info() -> Result<
+    (
+        u64,
+        String,
+        String,
+        String,
+        String,
+        String,
+        String,
+        String,
+        String,
+        String,
+    ),
+    String,
+> {
     if let Err(e) = ensure_root_permissions() {
         let message = format!("Failed to get root privileges: {}", e);
         return Err(message);
     }
 
-    let (firmware_arch, entry_token, boot_root) = io::get_bootctl_info().map_err(|e| format!("Couldn't get bootctl info: {}", e))?;
-    let (root_uuid, root_device) = io::get_root_filesystem_info().map_err(|e| format!("Couldn't get root filesystem info: {}", e))?;
+    let (firmware_arch, entry_token, boot_root) =
+        io::get_bootctl_info().map_err(|e| format!("Couldn't get bootctl info: {}", e))?;
+    let (root_uuid, root_device) = io::get_root_filesystem_info()
+        .map_err(|e| format!("Couldn't get root filesystem info: {}", e))?;
     let (root_snapshot, root_prefix, root_subvol) = match fs::get_root_snapshot_info() {
         Ok((prefix, snapshot_id, full_path)) => (snapshot_id, prefix, full_path),
         Err(e) => {
@@ -540,7 +557,7 @@ pub fn get_system_info() -> Result<(u64, String, String, String, String, String,
         boot_root,
         entry_token,
         root_uuid,
-        root_device
+        root_device,
     ))
 }
 
