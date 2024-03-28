@@ -1,4 +1,4 @@
 ignore:
-  - "**/.cargo/registry/src/**"
+  - "**/.cargo/**"
 ignore-not-existing: true
 llvm: true
