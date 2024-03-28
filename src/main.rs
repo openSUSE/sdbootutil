@@ -11,6 +11,7 @@ fn main() -> Result<(), String> {
             return Err(message)
         }
     };
+    lib::test_functions();
     let args = parse_args();
     let _result = match args.cmd {
         Some(Commands::Kernels {}) => lib::command_kernels(),

@@ -1,8 +1,8 @@
-use super::io::{get_command_output, log_info, print_error};
-use super::*;
+use super::io::{log_info, print_error};
 use libbtrfs::subvolume;
 pub(crate) use std::env::consts::ARCH;
 use std::fs;
+use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use tempfile::TempDir;
 
@@ -126,10 +126,26 @@ pub(crate) fn reset_rollback_items(rollback_items: &mut Vec<RollbackItem>) {
 ///
 /// # Returns
 ///
-/// `Ok(true)` if the filesystem type is `overlayfs`, `Ok(false)` otherwise, or an `Error` if the command execution fails.
-pub(crate) fn is_transactional() -> Result<bool, Box<dyn Error>> {
-    let filesystem_type = get_command_output("stat", &["-f", "-c", "%T", "/etc"])?;
-    Ok(filesystem_type == "overlayfs")
+/// `Ok(true)` if the filesystem type is `overlayfs`, `Ok(false)` otherwise, or an `Error` if an instruction fails.
+pub(crate) fn is_transactional() -> Result<bool, String> {
+    let mounts_file = fs::File::open("/proc/mounts").expect("Could not open /proc/mounts");
+    let reader = BufReader::new(mounts_file);
+
+    for line in reader.lines() {
+        let line = line.expect("Error reading line");
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if parts.len() > 2 {
+            let mount_point = parts[1];
+            let fs_type = parts[2];
+
+            if mount_point == "/etc" {
+                println!("{}", fs_type);
+                return Ok(fs_type == "overlayfs");
+            }
+        }
+    }
+
+    Ok(false)
 }
 
 /// Retrieves detailed information about the root Btrfs snapshot.
@@ -370,8 +386,8 @@ pub(crate) fn find_version(
 /// Determines the version of the installed bootloader by analyzing the binary content of the bootloader file.
 ///
 /// This function attempts to find and read the bootloader file specified by the `filename` argument, or by constructing
-/// a path based on provided parameters. It then searches the file's content for known version string patterns specific to 
-/// either systemd-boot or GRUB2 bootloaders. The function is designed to work with binary files where version information 
+/// a path based on provided parameters. It then searches the file's content for known version string patterns specific to
+/// either systemd-boot or GRUB2 bootloaders. The function is designed to work with binary files where version information
 /// is embedded within the data.
 ///
 /// # Arguments

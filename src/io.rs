@@ -54,7 +54,7 @@ pub(crate) fn log_info(message: &str, log_verbosity: u8) {
 /// # Returns
 ///
 /// The command's output as a `String` if successful, or an `Error` if the command fails.
-pub(crate) fn get_command_output(
+pub(crate) fn _get_command_output(
     command: &str,
     args: &[&str],
 ) -> Result<String, Box<dyn std::error::Error>> {
