@@ -1,13 +1,11 @@
 use sdbootutil as lib;
 use sdbootutil::cli::{parse_args, Commands};
-use sdbootutil::io::print_error;
 
 fn main() -> Result<(), String> {
-    let (root_snapshot, _root_prefix, _root_subvol, firmware_arch, boot_dst, shimdir, boot_root) = match lib::get_system_info() {
+    let (root_snapshot, _root_prefix, _root_subvol, firmware_arch, boot_dst, shimdir, boot_root, _entry_token, _root_uuid, _root_device) = match lib::get_system_info() {
         Ok(info) => info,
         Err(e) => {
             let message = format!("Error getting system info: {}", e);
-            print_error(&message);
             return Err(message)
         }
     };

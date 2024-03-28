@@ -460,42 +460,59 @@ pub fn command_update_predictions() -> Result<bool, String> {
     Ok(true)
 }
 
-/// Gathers essential system information required for bootloader management.
+/// Gathers comprehensive system information crucial for bootloader management.
 ///
-/// This function aggregates various pieces of system information, including snapshot identifier, directory paths,
-/// and firmware architecture. It ensures root privileges are available before proceeding to collect the information.
-/// The function relies on `fs::get_root_snapshot_info` and `fs::determine_boot_dst` to retrieve snapshot-related information
-/// and boot destination directory, respectively.
+/// This function compiles essential system details, which include the snapshot identifier, various directory paths,
+/// firmware architecture, bootloader entry token, and root filesystem UUID and device. It validates root permissions
+/// before proceeding to ensure the required system information can be safely accessed. This function leverages multiple
+/// helper functions such as `io::get_bootctl_info`, `io::get_root_filesystem_info`, `fs::get_root_snapshot_info`, and
+/// `fs::determine_boot_dst` to gather the necessary information.
 ///
 /// # Returns
 ///
-/// Returns `Ok` with a tuple containing:
-/// - Snapshot identifier (u64).
-/// - Root prefix (String).
-/// - Root subvolume (String).
-/// - Firmware architecture (String, currently hardcoded to "x64").
-/// - Boot destination directory (String).
-/// - Shim directory (String, currently hardcoded).
-/// - Boot root directory (String, currently hardcoded).
+/// A `Result` with either:
+/// - An `Ok` variant containing a tuple with:
+///   - `root_snapshot`: Snapshot identifier (`u64`).
+///   - `root_prefix`: Prefix of the root filesystem (`String`).
+///   - `root_subvol`: Subvolume of the root filesystem (`String`).
+///   - `firmware_arch`: Firmware architecture (`String`), obtained from `bootctl`.
+///   - `boot_dst`: Destination directory for bootloader files (`String`), determined based on the system configuration.
+///   - `shimdir`: Directory containing bootloader shim files (`String`), derived from a standard location and architecture.
+///   - `boot_root`: Root directory for boot files (`String`), obtained from `bootctl`.
+///   - `entry_token`: Bootloader entry token (`String`), obtained from `bootctl`.
+///   - `root_uuid`: UUID of the root filesystem (`String`), obtained from `findmnt`.
+///   - `root_device`: Source device of the root filesystem (`String`), obtained from `findmnt`.
+/// - An `Err` variant with a descriptive error message if any step in gathering information fails.
 ///
-/// Returns `Err(String)` with an error message if any step of information gathering fails.
+/// # Errors
+///
+/// This function may return an error if:
+/// - Root permissions are not granted.
+/// - There is a failure in obtaining information from `bootctl`.
+/// - The root filesystem UUID and source device cannot be determined.
+/// - Snapshot-related information or the boot destination directory cannot be retrieved.
 ///
 /// # Examples
 ///
+/// ```no_run
+/// match sdbootutil::get_system_info() {
+///     Ok((snapshot, prefix, subvol, arch, boot_dst, shimdir, boot_root, entry_token, root_uuid, root_device)) => {
+///         println!("Snapshot ID: {}", snapshot);
+///         // Additional println! statements for each piece of information...
+///     },
+///     Err(e) => eprintln!("Failed to gather system information: {}", e),
+/// }
 /// ```
-/// // Commented as it required root permissions
-/// //let system_info = sdbootutil::get_system_info().expect("Failed to get system information");
 ///
-/// // Example of destructuring the returned tuple
-/// //let (snapshot, prefix, subvol, arch, boot_dst, shimdir, boot_root) = system_info;
-/// ```
-pub fn get_system_info() -> Result<(u64, String, String, String, String, String, String), String> {
+/// Note: This function requires root privileges to access certain system information and might not be suitable for all environments.
+pub fn get_system_info() -> Result<(u64, String, String, String, String, String, String, String, String, String), String> {
     if let Err(e) = ensure_root_permissions() {
         let message = format!("Failed to get root privileges: {}", e);
         return Err(message);
     }
-    let firmware_arch = "x64".to_string();
 
+    let (firmware_arch, entry_token, boot_root) = io::get_bootctl_info().map_err(|e| format!("Couldn't get bootctl info: {}", e))?;
+    let (root_uuid, root_device) = io::get_root_filesystem_info().map_err(|e| format!("Couldn't get root filesystem info: {}", e))?;
     let (root_snapshot, root_prefix, root_subvol) = match fs::get_root_snapshot_info() {
         Ok((prefix, snapshot_id, full_path)) => (snapshot_id, prefix, full_path),
         Err(e) => {
@@ -512,7 +529,6 @@ pub fn get_system_info() -> Result<(u64, String, String, String, String, String,
         }
     };
     let shimdir = get_shimdir();
-    let boot_root = "/boot/efi".to_string();
 
     Ok((
         root_snapshot,
@@ -521,7 +537,10 @@ pub fn get_system_info() -> Result<(u64, String, String, String, String, String,
         firmware_arch,
         boot_dst,
         shimdir,
-        boot_root
+        boot_root,
+        entry_token,
+        root_uuid,
+        root_device
     ))
 }
 
