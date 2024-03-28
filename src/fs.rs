@@ -14,7 +14,7 @@ use tempfile::TempDir;
 /// # Fields
 ///
 /// * `original_path`: The `PathBuf` representing the path to the original file.
-pub struct RollbackItem {
+pub(crate) struct RollbackItem {
     original_path: PathBuf,
 }
 
@@ -28,7 +28,7 @@ impl RollbackItem {
     /// # Returns
     ///
     /// Returns a new instance of `RollbackItem`.
-    pub fn new(original_path: PathBuf) -> Self {
+    pub(crate) fn new(original_path: PathBuf) -> Self {
         RollbackItem { original_path }
     }
 
@@ -41,7 +41,7 @@ impl RollbackItem {
     /// # Returns
     ///
     /// Returns `Ok(())` if cleanup actions are completed successfully, or an `IoError` if any file operations fail.
-    pub fn cleanup(&self) -> std::io::Result<()> {
+    pub(crate) fn cleanup(&self) -> std::io::Result<()> {
         let backup_path = self.original_path.with_extension("bak");
         if backup_path.exists() {
             fs::rename(&backup_path, &self.original_path).expect("Failed to restore from backup");
@@ -71,7 +71,7 @@ impl RollbackItem {
 ///
 /// Returns a tuple containing the `TempDir` object representing the temporary directory and its `PathBuf`.
 /// The `TempDir` object ensures that the directory is deleted when it goes out of scope.
-pub fn create_temp_dir() -> (TempDir, PathBuf) {
+pub(crate) fn create_temp_dir() -> (TempDir, PathBuf) {
     let temp_dir = TempDir::new().expect("Failed to create a temporary directory");
     let temp_dir_path = temp_dir.path().to_path_buf();
     (temp_dir, temp_dir_path)
@@ -85,7 +85,7 @@ pub fn create_temp_dir() -> (TempDir, PathBuf) {
 /// # Arguments
 ///
 /// * `rollback_items` - A slice of `RollbackItem`s to be cleaned up.
-pub fn cleanup_rollback_items(rollback_items: &[RollbackItem]) {
+pub(crate) fn cleanup_rollback_items(rollback_items: &[RollbackItem]) {
     for item in rollback_items {
         if let Err(e) = item.cleanup() {
             let message = format!("Error cleaning up item: {}", e);
@@ -102,7 +102,7 @@ pub fn cleanup_rollback_items(rollback_items: &[RollbackItem]) {
 /// # Arguments
 ///
 /// * `rollback_items` - A mutable reference to a `Vec<RollbackItem>` representing the list of items to be reset.
-pub fn reset_rollback_items(rollback_items: &mut Vec<RollbackItem>) {
+pub(crate) fn reset_rollback_items(rollback_items: &mut Vec<RollbackItem>) {
     for item in rollback_items.iter() {
         let backup_path = item.original_path.with_extension("bak");
         if backup_path.exists() {
@@ -127,14 +127,15 @@ pub fn reset_rollback_items(rollback_items: &mut Vec<RollbackItem>) {
 /// # Returns
 ///
 /// `Ok(true)` if the filesystem type is `overlayfs`, `Ok(false)` otherwise, or an `Error` if the command execution fails.
-pub fn is_transactional() -> Result<bool, Box<dyn Error>> {
+pub(crate) fn is_transactional() -> Result<bool, Box<dyn Error>> {
     let filesystem_type = get_command_output("stat", &["-f", "-c", "%T", "/etc"])?;
     Ok(filesystem_type == "overlayfs")
 }
 
 /// Retrieves detailed information about the root Btrfs snapshot.
 ///
-/// This function extracts and returns the prefix path, the snapshot ID, and the full snapshot path from the system's root directory. It's designed to parse the snapshot path to identify these components, crucial for Btrfs snapshot management.
+/// This function extracts and returns the prefix path, the snapshot ID, and the full snapshot path from the system's
+/// root directory. It's designed to parse the snapshot path to identify these components, crucial for Btrfs snapshot management.
 ///
 /// # Returns
 ///
@@ -146,7 +147,8 @@ pub fn is_transactional() -> Result<bool, Box<dyn Error>> {
 /// # Errors
 ///
 /// Returns an error if the snapshot path does not conform to the expected structure or if any parsing fails.
-pub fn get_root_snapshot_info() -> Result<(String, u64, String), Box<dyn std::error::Error>> {
+pub(crate) fn get_root_snapshot_info() -> Result<(String, u64, String), Box<dyn std::error::Error>>
+{
     let full_path = subvolume::get_subvol_path("/")?;
     let parts: Vec<&str> = full_path.split("/.snapshots/").collect();
     let prefix = parts.get(0).ok_or("Prefix not found")?.to_string();
@@ -265,6 +267,38 @@ pub(crate) fn is_grub2(snapshot: u64, override_prefix: Option<&Path>) -> bool {
     find_grub2(snapshot, override_prefix).exists()
 }
 
+/// Determines the boot destination path based on the installed bootloader for a given snapshot.
+///
+/// This function checks whether the systemd-boot or GRUB2 bootloader is installed for
+/// the specified snapshot and firmware architecture. It returns the appropriate boot destination path
+/// based on the bootloader detected. The function supports overriding the default search prefix through an optional parameter.
+///
+/// # Arguments
+///
+/// * `snapshot` - A numeric identifier for the snapshot directory. This is used to locate the snapshot-specific bootloader files.
+/// * `firmware_arch` - The architecture of the firmware, such as "x64" or "arm64".
+/// This is used to refine the search for the bootloader files.
+/// * `override_prefix` - An optional path override. If provided, this path will be used as the base directory
+/// for searching bootloader files, instead of the default path.
+///
+/// # Returns
+///
+/// Returns `Ok("/EFI/systemd")` if systemd-boot is detected as the installed bootloader, `Ok("/EFI/opensuse")` if GRUB2 is detected,
+/// or an `Err` with a message indicating that the bootloader is unsupported or could not be determined.
+pub(crate) fn determine_boot_dst(
+    snapshot: u64,
+    firmware_arch: &str,
+    override_prefix: Option<&Path>,
+) -> Result<&'static str, &'static str> {
+    if is_sdboot(snapshot, firmware_arch, override_prefix) {
+        Ok("/EFI/systemd")
+    } else if is_grub2(snapshot, override_prefix) {
+        Ok("/EFI/opensuse")
+    } else {
+        Err("Unsupported bootloader or unable to determine bootloader")
+    }
+}
+
 /// Finds the installed bootloader (systemd-boot or GRUB2) for a given snapshot and firmware architecture.
 ///
 /// This function attempts to determine which bootloader is installed by checking for the presence of systemd-boot and GRUB2 EFI files.
@@ -277,8 +311,9 @@ pub(crate) fn is_grub2(snapshot: u64, override_prefix: Option<&Path>) -> bool {
 ///
 /// # Returns
 ///
-/// Returns a `Result` containing a `PathBuf` to the detected bootloader EFI file on success, or an error string if no bootloader is detected.
-pub fn find_bootloader(
+/// Returns a `Result` containing a `PathBuf` to the detected bootloader EFI file on success,
+/// or an error string if no bootloader is detected.
+pub(crate) fn find_bootloader(
     snapshot: u64,
     firmware_arch: &str,
     override_prefix: Option<&Path>,
@@ -290,4 +325,108 @@ pub fn find_bootloader(
     } else {
         Err("Bootloader not detected")
     }
+}
+
+pub(crate) fn find_version(
+    content: &[u8],
+    start_pattern: &[u8],
+    end_pattern: &[u8],
+) -> Option<String> {
+    if let Some(start_pos) = content
+        .windows(start_pattern.len())
+        .position(|window| window == start_pattern)
+    {
+        let version_start_pos = start_pos + start_pattern.len();
+        if let Some(end_pos) = content[version_start_pos..]
+            .windows(end_pattern.len())
+            .position(|window| window == end_pattern)
+        {
+            let version_bytes = &content[version_start_pos..version_start_pos + end_pos];
+            return std::str::from_utf8(version_bytes).ok().map(str::to_string);
+        }
+    }
+    None
+}
+
+pub(crate) fn bootloader_version(
+    snapshot: u64,
+    firmware_arch: &str,
+    shimdir: &str,
+    boot_root: &str,
+    boot_dst: &str,
+    filename: Option<PathBuf>,
+    override_prefix: Option<&Path>,
+) -> Result<String, String> {
+    let prefix = override_prefix.unwrap_or(Path::new(""));
+    let fn_path = match filename {
+        Some(f) => f,
+        None => {
+            if PathBuf::from(format!("{}{}/shim.efi", prefix.display(), shimdir)).exists() {
+                PathBuf::from(format!(
+                    "{}{}{}/grub.efi",
+                    prefix.display(),
+                    boot_root,
+                    boot_dst
+                ))
+            } else {
+                let bootloader = find_bootloader(snapshot, firmware_arch, override_prefix)?;
+                PathBuf::from(format!(
+                    "{}{}{}/{}",
+                    prefix.display(),
+                    boot_root,
+                    boot_dst,
+                    bootloader.file_name().unwrap().to_str().unwrap()
+                ))
+            }
+        }
+    };
+    if !fn_path.exists() {
+        let err = format!("File does not exist: {}", fn_path.display());
+        return Err(err);
+    }
+
+    let content = fs::read(&fn_path).map_err(|_| "Failed to read file")?;
+
+    let patterns = [
+        (&b"LoaderInfo: systemd-boot "[..], &b" ####"[..]),
+        (&b"GNU GRUB  version %s\x00"[..], &b"\x00"[..]),
+    ];
+    for (start, end) in &patterns {
+        if let Some(version) = find_version(&content, start, end) {
+            return Ok(version);
+        }
+    }
+    Err("Version not found".to_string())
+}
+
+pub(crate) fn is_installed(
+    snapshot: u64,
+    firmware_arch: &str,
+    shimdir: &str,
+    boot_root: &str,
+    boot_dst: &str,
+    filename: Option<PathBuf>,
+    override_prefix: Option<&Path>,
+) -> bool {
+    let prefix = override_prefix.unwrap_or(Path::new(""));
+    let bootloader_version_successful = bootloader_version(
+        snapshot,
+        firmware_arch,
+        shimdir,
+        boot_root,
+        boot_dst,
+        filename,
+        override_prefix,
+    )
+    .is_ok();
+    let flag_path = format!(
+        "{}{}{}/installed_by_sdbootutil",
+        prefix.display(),
+        boot_root,
+        boot_dst
+    );
+    let installed_flag_path = Path::new(&flag_path);
+    let installed_flag_exists = installed_flag_path.exists();
+
+    bootloader_version_successful && installed_flag_exists
 }

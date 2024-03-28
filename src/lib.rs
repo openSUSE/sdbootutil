@@ -3,8 +3,11 @@ pub mod fs;
 pub mod io;
 pub mod ui;
 
-use io::log_info;
+use cli::ensure_root_permissions;
+use fs::is_installed;
+use io::{log_info, print_error};
 use std::error::Error;
+use std::path::{Path, PathBuf};
 
 /// Executes the `Kernels` command.
 ///
@@ -297,6 +300,61 @@ pub fn command_is_bootable() -> u32 {
     13
 }
 
+/// Checks if systemd-boot is installed by `sdbootutil`.
+///
+/// This function verifies the installation status of systemd-boot by checking for the presence of a bootloader version file
+/// and an installation flag file. It determines whether systemd-boot was installed using `sdbootutil` based on these criteria.
+///
+/// # Arguments
+/// - `snapshot`: The snapshot identifier used to locate the snapshot-specific bootloader files.
+/// - `firmware_arch`: The architecture of the firmware, such as "x86_64" or "arm64", used to refine the search for bootloader files.
+/// - `shimdir`: The directory containing the bootloader shim, if any. This is used in constructing the path to check for a shim EFI file.
+/// - `boot_root`: The root directory for boot files. This path is used as the base for constructing the paths to the bootloader version file and the installation flag file.
+/// - `boot_dst`: The destination directory for boot files, relative to `boot_root`. This is further used in constructing the path to the installation flag file.
+/// - `filename`: An optional filename for the bootloader version file. If provided, this file will be checked directly; otherwise, the function will attempt to determine the appropriate file based on other parameters.
+/// - `override_prefix`: An optional path override that, if provided, will be used as the base directory for searching the bootloader files instead of the default path.
+///
+/// # Returns
+/// - Returns `true` if both the bootloader version check is successful and the installation flag file is found,
+/// indicating that systemd-boot was likely installed using `sdbootutil`.
+/// - Returns `false` otherwise.
+///
+/// # Examples
+/// ```
+/// use sdbootutil::command_is_installed;
+///
+/// let installed = command_is_installed(
+///     0,
+///     "x86_64",
+///     "/usr/share/efi/x86_64",
+///     "/boot/efi",
+///     "EFI/systemd",
+///     None,
+///     None,
+/// );
+///
+/// assert!(!installed, "Expected systemd-boot to not be detected as installed");
+/// ```
+pub fn command_is_installed(
+    snapshot: u64,
+    firmware_arch: &str,
+    shimdir: &str,
+    boot_root: &str,
+    boot_dst: &str,
+    filename: Option<PathBuf>,
+    override_prefix: Option<&Path>,
+) -> bool {
+    return is_installed(
+        snapshot,
+        firmware_arch,
+        shimdir,
+        boot_root,
+        boot_dst,
+        filename,
+        override_prefix,
+    );
+}
+
 /// Executes the `Install` command.
 ///
 /// This function logs the action and returns a predefined status code.
@@ -395,6 +453,74 @@ pub fn command_update_predictions() -> u32 {
     let message = "UpdatePredictions command called";
     log_info(message, 1);
     18
+}
+
+
+/// only for demonstration purposes
+pub fn test_functions() {
+    if let Err(e) = ensure_root_permissions() {
+        let message = format!("Failed to get root privileges: {}", e);
+        print_error(&message);
+        std::process::exit(1);
+    }
+
+    let mut root_snapshot = 1;
+    let mut _root_prefix = "";
+    let mut _root_subvol = "";
+    let firmware_arch = "x64";
+    match fs::get_root_snapshot_info() {
+        Ok((prefix, snapshot_id, full_path)) => {
+            io::log_info(
+                &format!(
+                    "Prefix: {}, Snapshot ID: {}, Full Path: {}",
+                    prefix, snapshot_id, full_path
+                ),
+                1,
+            );
+            root_snapshot = snapshot_id;
+            _root_prefix = &prefix;
+            _root_subvol = &full_path;
+        }
+        Err(e) => {
+            print_error(&format!("{}", e));
+        }
+    }
+    if fs::is_transactional().expect("Failed to check if filesystem is transactional") {
+        log_info("It is a transactional system", 1)
+    } else {
+        log_info("It is not a transactional system", 1)
+    }
+    let (_temp_dir, _tmpdir_path) = fs::create_temp_dir();
+    let mut rollback_items = vec![
+        fs::RollbackItem::new(PathBuf::from("/path/to/file1")),
+        fs::RollbackItem::new(PathBuf::from("/path/to/file2")),
+    ];
+    fs::cleanup_rollback_items(&rollback_items);
+    fs::reset_rollback_items(&mut rollback_items);
+
+    let boot_dst = match fs::determine_boot_dst(root_snapshot, firmware_arch, None) {
+        Ok(dst) => dst,
+        Err(e) => {
+            print_error(e);
+            "";
+            return;
+        }
+    };
+
+    if command_is_installed(
+        root_snapshot,
+        firmware_arch,
+        "/usr/share/efi/x86_64",
+        "/boot/efi",
+        boot_dst,
+        None,
+        None,
+    ) {
+        log_info("systemd-boot was installed using this tool", 0)
+    }
+    else {
+        log_info("systemd-boot was not installed using this tool", 0)
+    }
 }
 
 #[cfg(test)]
