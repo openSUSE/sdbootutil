@@ -3,8 +3,7 @@ pub mod fs;
 pub mod io;
 pub mod ui;
 
-use cli::ensure_root_permissions;
-use fs::{get_shimdir, is_installed};
+use fs::is_installed;
 use io::log_info;
 use std::path::{Path, PathBuf};
 
@@ -461,52 +460,70 @@ pub fn command_update_predictions() -> Result<bool, String> {
     Ok(true)
 }
 
-/// Gathers comprehensive system information crucial for bootloader management.
+/// Gathers comprehensive system information crucial for bootloader management and system configuration.
 ///
-/// This function compiles essential system details, which include the snapshot identifier, various directory paths,
-/// firmware architecture, bootloader entry token, and root filesystem UUID and device. It validates root permissions
-/// before proceeding to ensure the required system information can be safely accessed. This function leverages multiple
-/// helper functions such as `io::get_bootctl_info`, `io::get_root_filesystem_info`, `fs::get_root_snapshot_info`, and
-/// `fs::determine_boot_dst` to gather the necessary information.
+/// This function compiles essential system details, including the Btrfs snapshot information (if available),
+/// directory paths for bootloader files, firmware architecture, and bootloader entry token. It validates root
+/// permissions before proceeding to ensure the required system information can be safely accessed. The function
+/// uses `io::get_bootctl_info` and `io::get_root_filesystem_info` to gather boot and filesystem information,
+/// `fs::get_root_snapshot_info` for snapshot-related details, and `fs::determine_boot_dst` for the boot destination.
+/// Command-line arguments are processed to override default values where provided.
 ///
 /// # Returns
 ///
 /// A `Result` with either:
 /// - An `Ok` variant containing a tuple with:
-///   - `root_snapshot`: Snapshot identifier (`u64`).
-///   - `root_prefix`: Prefix of the root filesystem (`String`).
-///   - `root_subvol`: Subvolume of the root filesystem (`String`).
-///   - `firmware_arch`: Firmware architecture (`String`), obtained from `bootctl`.
-///   - `boot_dst`: Destination directory for bootloader files (`String`), determined based on the system configuration.
-///   - `shimdir`: Directory containing bootloader shim files (`String`), derived from a standard location and architecture.
-///   - `boot_root`: Root directory for boot files (`String`), obtained from `bootctl`.
-///   - `entry_token`: Bootloader entry token (`String`), obtained from `bootctl`.
+///   - `root_snapshot`: Optional snapshot identifier (`u64`), present if the system uses Btrfs snapshots.
+///   - `root_prefix`: Optional prefix of the root filesystem (`String`), present if snapshots are used.
+///   - `root_subvol`: Optional subvolume of the root filesystem (`String`), present if snapshots are used.
 ///   - `root_uuid`: UUID of the root filesystem (`String`), obtained from `findmnt`.
 ///   - `root_device`: Source device of the root filesystem (`String`), obtained from `findmnt`.
+///   - `firmware_arch`: Firmware architecture (`String`), either specified by the user or obtained from `bootctl`.
+///   - `entry_token`: Bootloader entry token (`String`), either specified by the user or obtained from `bootctl`.
+///   - `boot_dst`: Destination directory for bootloader files (`String`), determined based on the system configuration.
+///   - `boot_root`: Path of the ESP partition (`String`), obtained from `bootctl`.
+///   - `image`: Bootloader image file name (`String`), either specified by the user or derived from the firmware architecture.
+///   - `no_variables`, `regenerate_initrd`, `no_random_seed`, `all`: Boolean flags reflecting command-line options.
+///   - `shimdir`: Directory containing bootloader shim files (`String`), derived from a standard location and architecture.
+///
 /// - An `Err` variant with a descriptive error message if any step in gathering information fails.
 ///
 /// # Errors
 ///
 /// This function may return an error if:
 /// - Root permissions are not granted.
-/// - There is a failure in obtaining information from `bootctl`.
-/// - The root filesystem UUID and source device cannot be determined.
-/// - Snapshot-related information or the boot destination directory cannot be retrieved.
+/// - Essential system information (e.g., from `bootctl` or `findmnt`) cannot be obtained.
+/// - The system uses Btrfs snapshots, but snapshot-related information cannot be retrieved.
+/// - The boot destination directory cannot be determined.
 ///
-/// # Examples
+/// # Example
 ///
 /// ```no_run
-/// match sdbootutil::get_system_info() {
-///     Ok((snapshot, prefix, subvol, arch, boot_dst, shimdir, boot_root, entry_token, root_uuid, root_device)) => {
-///         println!("shimdir: {}", shimdir);
-///         // Additional println! statements for each piece of information...
-///     },
-///     Err(e) => eprintln!("Failed to gather system information: {}", e),
-/// }
-/// ```
+/// let system_info = sdbootutil::process_args_and_get_system_info()
+///     .expect("Failed to gather system information");
 ///
-/// Note: This function requires root privileges to access certain system information and might not be suitable for all environments.
-pub fn get_system_info() -> Result<
+/// let (
+///     root_snapshot,
+///     root_prefix,
+///     root_subvol,
+///     root_uuid,
+///     root_device,
+///     firmware_arch,
+///     entry_token,
+///     boot_root,
+///     boot_dst,
+///     image,
+///     no_variables,
+///     regenerate_initrd,
+///     no_random_seed,
+///     all,
+///     shimdir,
+///     cmd
+/// ) = system_info;
+/// ```
+/// Note that this function should be used with care, as it relies on obtaining root privileges
+/// and accessing various system paths and configuration details.
+pub fn process_args_and_get_system_info() -> Result<
     (
         Option<u64>,
         Option<String>,
@@ -518,17 +535,29 @@ pub fn get_system_info() -> Result<
         String,
         String,
         String,
+        bool,
+        bool,
+        bool,
+        bool,
+        String,
+        Option<cli::Commands>,
     ),
     String,
 > {
-    if let Err(e) = ensure_root_permissions() {
+    if let Err(e) = cli::ensure_root_permissions() {
         let message = format!("Failed to get root privileges: {}", e);
         return Err(message);
     }
 
+    let args = cli::parse_args();
+
+    if let Some(ref path) = args.esp_path {
+        std::env::set_var("SYSTEMD_ESP_PATH", path);
+    }
+
     let has_snapshots =
         fs::is_snapshotted().map_err(|e| format!("Couldn't find out if snapshotted: {}", e))?;
-    let (firmware_arch, entry_token, boot_root) =
+    let (default_firmware_arch, default_entry_token, boot_root) =
         io::get_bootctl_info().map_err(|e| format!("Couldn't get bootctl info: {}", e))?;
     let (root_uuid, root_device) = io::get_root_filesystem_info()
         .map_err(|e| format!("Couldn't get root filesystem info: {}", e))?;
@@ -541,7 +570,22 @@ pub fn get_system_info() -> Result<
     } else {
         (None, None, None)
     };
+    let shimdir = fs::get_shimdir();
 
+    let firmware_arch = args.arch.unwrap_or(default_firmware_arch);
+    let image = match args.image {
+        Some(ref img) => img.clone(),
+        None => match firmware_arch.as_str() {
+            "x64" => "vmlinuz".to_string(),
+            "aa64" => "Image".to_string(),
+            _ => return Err(format!("Unsupported architecture '{}'. Supported are: x64, aa64", firmware_arch)),
+        },
+    };
+    let entry_token = args.entry_token.unwrap_or(default_entry_token);
+    let no_variables = args.no_variables;
+    let regenerate_initrd = args.regenerate_initrd;
+    let no_random_seed = args.no_random_seed;
+    let all = args.all;
     let boot_dst = match fs::determine_boot_dst(root_snapshot, &firmware_arch, None) {
         Ok(dst) => dst.to_string(),
         Err(e) => {
@@ -549,19 +593,30 @@ pub fn get_system_info() -> Result<
             return Err(message);
         }
     };
-    let shimdir = get_shimdir();
+
+    if let Some(ref esp_path) = args.esp_path {
+        if esp_path != &boot_root {
+            return Err("ESP paths don't match".to_string());
+        }
+    }
 
     Ok((
         root_snapshot,
         root_prefix,
         root_subvol,
-        firmware_arch,
-        boot_dst,
-        shimdir,
-        boot_root,
-        entry_token,
         root_uuid,
         root_device,
+        firmware_arch,
+        entry_token,
+        boot_root,
+        boot_dst,
+        image,
+        no_variables,
+        regenerate_initrd,
+        no_random_seed,
+        all,
+        shimdir,
+        args.cmd,
     ))
 }
 
