@@ -3,7 +3,7 @@ pub mod fs;
 pub mod io;
 pub mod ui;
 
-use fs::is_installed;
+use fs::{is_installed, settle_system_tokens};
 use io::log_info;
 use std::path::{Path, PathBuf};
 
@@ -625,7 +625,7 @@ pub fn process_args_and_get_system_info() -> Result<
             }
         },
     };
-    let entry_token = args.entry_token.unwrap_or(default_entry_token);
+    let arg_entry_token = args.entry_token.unwrap_or(default_entry_token);
     let no_variables = args.no_variables;
     let regenerate_initrd = args.regenerate_initrd;
     let no_random_seed = args.no_random_seed;
@@ -651,7 +651,7 @@ pub fn process_args_and_get_system_info() -> Result<
         root_uuid,
         root_device,
         firmware_arch,
-        entry_token,
+        arg_entry_token,
         boot_root,
         boot_dst,
         image,
@@ -666,11 +666,19 @@ pub fn process_args_and_get_system_info() -> Result<
 
 /// only for demonstration purposes
 pub fn test_functions() {
-    if fs::is_transactional(None).expect("Failed to check if filesystem is transactional") {
-        log_info("It is a transactional system", 1)
-    } else {
-        log_info("It is not a transactional system", 1)
-    }
+    let (entry_token, machine_id, os_release_id, os_release_version_id, os_release_pretty_name) =
+        match settle_system_tokens(None, None, None, None) {
+            Ok(info) => info,
+            Err(_e) => (
+                "".to_string(),
+                "".to_string(),
+                Some("".to_string()),
+                Some("".to_string()),
+                Some("".to_string()),
+            ),
+        };
+    let message = format!("entry_token: {}, machine_id: {}, os_release_id: {}, os_release_version_id: {}, os_release_pretty_name: {}", entry_token, machine_id, os_release_id.unwrap_or_default(), os_release_version_id.unwrap_or_default(), os_release_pretty_name.unwrap_or_default());
+    log_info(&message, 1);
     let (_temp_dir, _tmpdir_path) = fs::create_temp_dir();
     let mut rollback_items = vec![
         fs::RollbackItem::new(PathBuf::from("/path/to/file1")),
