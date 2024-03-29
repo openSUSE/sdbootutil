@@ -595,7 +595,7 @@ pub fn process_args_and_get_system_info() -> Result<
     }
 
     let has_snapshots =
-        fs::is_snapshotted().map_err(|e| format!("Couldn't find out if snapshotted: {}", e))?;
+        fs::is_snapshotted(None).map_err(|e| format!("Couldn't find out if snapshotted: {}", e))?;
     let (default_firmware_arch, default_entry_token, boot_root) =
         io::get_bootctl_info().map_err(|e| format!("Couldn't get bootctl info: {}", e))?;
     let (root_uuid, root_device) = io::get_root_filesystem_info()
