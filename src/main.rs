@@ -9,6 +9,7 @@ fn main() -> Result<(), String> {
         _root_uuid,
         _root_device,
         firmware_arch,
+        snapshot,
         _arg_entry_token,
         boot_root,
         boot_dst,
@@ -28,9 +29,7 @@ fn main() -> Result<(), String> {
         Some(Commands::Kernels {}) => lib::command_kernels(),
         Some(Commands::Snapshots {}) => lib::command_snapshots(),
         Some(Commands::Entries {}) => lib::command_entries(),
-        Some(Commands::Bootloader {}) => {
-            lib::command_bootloader(root_snapshot, &firmware_arch, None)
-        }
+        Some(Commands::Bootloader {}) => lib::command_bootloader(snapshot, &firmware_arch, None),
         Some(Commands::AddKernel { kernel_version }) => lib::command_add_kernel(&kernel_version),
         Some(Commands::AddAllKernels {}) => lib::command_add_all_kernels(),
         Some(Commands::Mkinitrd {}) => lib::command_mkinitrd(),
@@ -44,7 +43,7 @@ fn main() -> Result<(), String> {
         Some(Commands::SetDefaultSnapshot {}) => lib::command_set_default_snapshot(),
         Some(Commands::IsBootable {}) => lib::command_is_bootable(),
         Some(Commands::IsInstalled {}) => lib::command_is_installed(
-            root_snapshot,
+            snapshot,
             &firmware_arch,
             &shimdir,
             &boot_root,
@@ -53,7 +52,15 @@ fn main() -> Result<(), String> {
             None,
         ),
         Some(Commands::Install {}) => lib::command_install(),
-        Some(Commands::NeedsUpdate {}) => lib::command_needs_update(),
+        Some(Commands::NeedsUpdate {}) => lib::command_needs_update(
+            snapshot,
+            root_snapshot,
+            &firmware_arch,
+            &shimdir,
+            &boot_root,
+            &boot_dst,
+            None,
+        ),
         Some(Commands::Update {}) => lib::command_update(),
         Some(Commands::ForceUpdate {}) => lib::command_force_update(),
         Some(Commands::UpdatePredictions {}) => lib::command_update_predictions(),
