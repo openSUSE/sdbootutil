@@ -28,11 +28,11 @@ fn main() -> Result<(), String> {
 
     lib::test_functions();
 
-    let _result = match cmd {
+    let result = match cmd {
         Some(Commands::Kernels {}) => lib::command_kernels(),
         Some(Commands::Snapshots {}) => lib::command_snapshots(),
         Some(Commands::Entries {}) => lib::command_entries(),
-        Some(Commands::Bootloader {}) => lib::command_bootloader(),
+        Some(Commands::Bootloader {}) => lib::command_bootloader(root_snapshot, &firmware_arch, None),
         Some(Commands::AddKernel { kernel_version }) => lib::command_add_kernel(&kernel_version),
         Some(Commands::AddAllKernels {}) => lib::command_add_all_kernels(),
         Some(Commands::Mkinitrd {}) => lib::command_mkinitrd(),
@@ -61,5 +61,11 @@ fn main() -> Result<(), String> {
         Some(Commands::UpdatePredictions {}) => lib::command_update_predictions(),
         None => lib::ui::show_main_menu(),
     };
-    Ok(())
+    match result {
+        Ok(_value) => Ok(()),
+        Err(e) => {
+            let message = format!("Command failed: {}", e);
+            Err(message)
+        }
+    }
 }
