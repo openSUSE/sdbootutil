@@ -1,5 +1,6 @@
 use super::io::{log_info, print_error};
 use libbtrfs::subvolume;
+
 use std::env::consts::ARCH;
 use std::fs;
 use std::fs::File;
@@ -602,10 +603,24 @@ pub(crate) fn get_shimdir() -> String {
 ///
 /// `Ok(true)` if the filesystem type is `btrfs` and /.snapshots is a directory,
 /// `Ok(false)` otherwise, or an `Error` if an instruction fails.
-pub(crate) fn is_snapshotted() -> Result<bool, String> {
-    let mounts_file = fs::File::open("/proc/mounts").expect("Could not open /proc/mounts");
+pub(crate) fn is_snapshotted(prefix: Option<&str>) -> Result<bool, String> {
+    let mounts_file_path = match prefix {
+        Some(prefix) => PathBuf::from(prefix)
+            .join("proc/mounts")
+            .to_string_lossy()
+            .into_owned(),
+        None => "/proc/mounts".to_string(),
+    };
+    let mounts_file = fs::File::open(mounts_file_path).expect("Could not open /proc/mounts");
     let reader = BufReader::new(mounts_file);
-    let snapshots_dir = Path::new("/.snapshots");
+    let snapshots_dir_path = match prefix {
+        Some(prefix) => PathBuf::from(prefix)
+            .join(".snapshots")
+            .to_string_lossy()
+            .into_owned(),
+        None => "/.snapshots".to_string(),
+    };
+    let snapshots_dir = Path::new(&snapshots_dir_path);
 
     for line in reader.lines() {
         let line = line.expect("Error reading line");
@@ -619,6 +634,5 @@ pub(crate) fn is_snapshotted() -> Result<bool, String> {
             }
         }
     }
-
     Ok(false)
 }

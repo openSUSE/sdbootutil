@@ -204,7 +204,10 @@ fn test_is_transactional_with_overlayfs() {
     writeln!(mounts_file, "overlayfs /etc overlayfs rw,relatime,lowerdir=/path/to/lower,upperdir=/path/to/upper,workdir=/path/to/work 0 0").unwrap();
 
     let result = is_transactional(Some(temp_dir.path().to_str().unwrap()));
-    assert!(result.unwrap(), "Expected /etc to be transactional (overlayfs)");
+    assert!(
+        result.unwrap(),
+        "Expected /etc to be transactional (overlayfs)"
+    );
 }
 
 #[test]
@@ -218,7 +221,10 @@ fn test_is_transactional_without_overlayfs() {
     writeln!(mounts_file, "ext4 /etc ext4 rw,relatime 0 0").unwrap();
 
     let result = is_transactional(Some(temp_dir.path().to_str().unwrap()));
-    assert!(!result.unwrap(), "Expected /etc not to be transactional (not overlayfs)");
+    assert!(
+        !result.unwrap(),
+        "Expected /etc not to be transactional (not overlayfs)"
+    );
 }
 
 #[test]
@@ -265,7 +271,6 @@ fn test_find_sdboot_fallback() {
         found_path, fallback_efi_path,
         "The found path did not match the expected fallback path"
     );
-
 }
 
 #[test]
@@ -337,7 +342,6 @@ fn test_find_sdboot_fallback_no_snapshot() {
         found_path, fallback_efi_path,
         "The found path did not match the expected fallback path"
     );
-
 }
 
 #[test]
@@ -1060,4 +1064,77 @@ fn test_is_installed_false_flag() {
 fn test_get_shimdir() {
     let expected_path = format!("/usr/share/efi/{}", ARCH);
     assert_eq!(get_shimdir(), expected_path);
+}
+
+#[test]
+fn test_is_snapshotted_with_btrfs_and_snapshots() {
+    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    let proc_mounts_path = temp_dir.path().join("proc/mounts");
+
+    fs::create_dir_all(proc_mounts_path.parent().unwrap()).unwrap();
+    let mut mounts_file = File::create(&proc_mounts_path).unwrap();
+
+    writeln!(mounts_file, "btrfs / btrfs rw,relatime 0 0").unwrap();
+
+    let snapshots_dir_path = temp_dir.path().join(".snapshots");
+    fs::create_dir(&snapshots_dir_path).unwrap();
+
+    let result = is_snapshotted(Some(temp_dir.path().to_str().unwrap()));
+    assert!(
+        result.unwrap(),
+        "Expected system to be snapshotted with btrfs and .snapshots directory"
+    );
+}
+
+#[test]
+fn test_is_snapshotted_with_btrfs_without_snapshots() {
+    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    let proc_mounts_path = temp_dir.path().join("proc/mounts");
+
+    fs::create_dir_all(proc_mounts_path.parent().unwrap()).unwrap();
+    let mut mounts_file = File::create(&proc_mounts_path).unwrap();
+
+    writeln!(mounts_file, "btrfs / btrfs rw,relatime 0 0").unwrap();
+
+    let result = is_snapshotted(Some(temp_dir.path().to_str().unwrap()));
+    assert!(
+        !result.unwrap(),
+        "Expected system not to be snapshotted with btrfs and without .snapshots directory"
+    );
+}
+
+#[test]
+fn test_is_snapshotted_without_btrfs_with_snapshots() {
+    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    let proc_mounts_path = temp_dir.path().join("proc/mounts");
+
+    fs::create_dir_all(proc_mounts_path.parent().unwrap()).unwrap();
+    let mut mounts_file = File::create(&proc_mounts_path).unwrap();
+
+    writeln!(mounts_file, "ext4 / ext4 rw,relatime 0 0").unwrap();
+    let snapshots_dir_path = temp_dir.path().join(".snapshots");
+    fs::create_dir(&snapshots_dir_path).unwrap();
+
+    let result = is_snapshotted(Some(temp_dir.path().to_str().unwrap()));
+    assert!(
+        !result.unwrap(),
+        "Expected system not to be snapshotted without btrfs and with .snapshots directory"
+    );
+}
+
+#[test]
+fn test_is_snapshotted_without_btrfs_or_snapshots() {
+    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    let proc_mounts_path = temp_dir.path().join("proc/mounts");
+
+    fs::create_dir_all(proc_mounts_path.parent().unwrap()).unwrap();
+    let mut mounts_file = File::create(&proc_mounts_path).unwrap();
+
+    writeln!(mounts_file, "ext4 / ext4 rw,relatime 0 0").unwrap();
+
+    let result = is_snapshotted(Some(temp_dir.path().to_str().unwrap()));
+    assert!(
+        !result.unwrap(),
+        "Expected system not to be snapshotted without btrfs or .snapshots directory"
+    );
 }
