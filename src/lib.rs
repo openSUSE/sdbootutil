@@ -67,24 +67,55 @@ pub fn command_entries() -> Result<bool, String> {
     Ok(true)
 }
 
-/// Executes the `Bootloader` command.
+/// Identifies and logs the detected bootloader type, then returns a boolean indicating
+/// if the detected bootloader is systemd-boot.
 ///
-/// This function logs the action and returns a predefined status code.
+/// This function attempts to determine the installed bootloader by invoking `fs::bootloader_name`
+/// with the provided snapshot, firmware architecture, and an optional path prefix. It logs
+/// the detected bootloader type. If the detected bootloader is systemd-boot, it returns `true`;
+/// otherwise, it returns `false`. In case of an error during bootloader detection, it returns
+/// an error message.
+///
+/// # Arguments
+///
+/// * `snapshot` - An optional snapshot identifier. If provided, the function checks for the
+///   bootloader configuration specific to this snapshot.
+/// * `firmware_arch` - The architecture of the firmware (e.g., "x64", "aa64"). This parameter
+///   is crucial for locating architecture-specific EFI files.
+/// * `override_prefix` - An optional path prefix for locating bootloader files, useful in
+///   scenarios like testing or operating within chroot environments.
 ///
 /// # Returns
 ///
-/// Always returns `3`, indicating a specific status after execution.
+/// * `Ok(true)` if the detected bootloader is systemd-boot.
+/// * `Ok(false)` if another bootloader is detected.
+/// * `Err(String)` with an error message if the detection process fails.
 ///
 /// # Examples
 ///
 /// ```
-/// let status = sdbootutil::command_bootloader().unwrap();
-/// assert_eq!(status, true);
+/// let result = sdbootutil::command_bootloader(Some(0), "x64", None);
+/// assert!(result.is_err(), "Expected an error from command_bootloader");
 /// ```
-pub fn command_bootloader() -> Result<bool, String> {
-    let message = "Bootloader command called";
-    log_info(message, 1);
-    Ok(true)
+pub fn command_bootloader(
+    snapshot: Option<u64>,
+    firmware_arch: &str,
+    override_prefix: Option<&Path>,
+) -> Result<bool, String> {
+    match fs::bootloader_name(snapshot, firmware_arch, override_prefix) {
+        Ok(bootloader) => {
+            log_info(&format!("Detected bootloader: {}", bootloader), 0);
+            if bootloader == "systemd-boot" {
+                Ok(true)
+            } else {
+                Ok(false)
+            }
+        }
+        Err(e) => {
+            let message = format!("Error detecting bootloader: {}", e);
+            Err(message)
+        }
+    }
 }
 
 /// Executes the `AddKernel` command with a specified kernel version.
@@ -350,14 +381,22 @@ pub fn command_is_installed(
         boot_dst,
         filename,
         override_prefix,
-    )
-    .is_ok();
-    if result {
-        log_info("systemd-boot was installed using this tool", 0)
-    } else {
-        log_info("systemd-boot was not installed using this tool", 0)
+    );
+    match result {
+        Ok(bool) => {
+            if bool {
+                log_info("Bootloader was installed using this tool", 0);
+                Ok(true)
+            } else {
+                log_info("Bootloader was not installed using this tool", 0);
+                Ok(false)
+            }
+        }
+        Err(e) => {
+            let message = format!("Can't determine if bootloader is installed: {}", e);
+            Err(message)
+        }
     }
-    Ok(result)
 }
 
 /// Executes the `Install` command.
@@ -578,7 +617,12 @@ pub fn process_args_and_get_system_info() -> Result<
         None => match firmware_arch.as_str() {
             "x64" => "vmlinuz".to_string(),
             "aa64" => "Image".to_string(),
-            _ => return Err(format!("Unsupported architecture '{}'. Supported are: x64, aa64", firmware_arch)),
+            _ => {
+                return Err(format!(
+                    "Unsupported architecture '{}'. Supported are: x64, aa64",
+                    firmware_arch
+                ))
+            }
         },
     };
     let entry_token = args.entry_token.unwrap_or(default_entry_token);
@@ -622,7 +666,7 @@ pub fn process_args_and_get_system_info() -> Result<
 
 /// only for demonstration purposes
 pub fn test_functions() {
-    if fs::is_transactional().expect("Failed to check if filesystem is transactional") {
+    if fs::is_transactional(None).expect("Failed to check if filesystem is transactional") {
         log_info("It is a transactional system", 1)
     } else {
         log_info("It is not a transactional system", 1)

@@ -2,10 +2,8 @@ use super::super::io::*;
 
 #[test]
 fn test_non_existent_command() {
-    // Attempt to execute a command that (hopefully) doesn't exist.
     let result = get_command_output("command_that_does_not_exist", &["arg1"]);
 
-    // Assert that the result is an error.
     assert!(
         result.is_err(),
         "Expected an error when executing a non-existent command"

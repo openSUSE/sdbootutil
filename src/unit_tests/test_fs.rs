@@ -1,4 +1,5 @@
 use super::super::fs::*;
+use std::env::consts::ARCH;
 use std::fs;
 use std::fs::File;
 use std::io::{Read, Write};
@@ -25,13 +26,11 @@ fn create_original_file(temp_dir_path: &PathBuf, filename: &str) -> std::io::Res
 fn test_restore_from_backup() {
     let (_temp_dir, temp_dir_path) = create_temp_dir();
 
-    // Use the helper function to create the original file and its backup
     let original_file_path = temp_dir_path.join("testfile");
     create_backup_file(&temp_dir_path, "testfile").unwrap();
 
     let rollback_item = RollbackItem::new(original_file_path.clone());
 
-    // Perform cleanup
     rollback_item.cleanup().unwrap();
 
     assert!(
@@ -44,7 +43,6 @@ fn test_restore_from_backup() {
 fn test_remove_original_no_backup() {
     let (_temp_dir, temp_dir_path) = create_temp_dir();
 
-    // Use the helper function to create only the original file without a backup
     let original_file_path = create_original_file(&temp_dir_path, "testfile").unwrap();
 
     let rollback_item = RollbackItem::new(original_file_path.clone());
@@ -61,7 +59,6 @@ fn test_remove_original_no_backup() {
 fn test_no_file_no_backup() {
     let (_temp_dir, temp_dir_path) = create_temp_dir();
 
-    // Define a path for a non-existent file
     let non_existent_file_path = temp_dir_path.join("nonexistentfile");
     let rollback_item = RollbackItem::new(non_existent_file_path.clone());
 
@@ -78,16 +75,13 @@ fn test_no_file_no_backup() {
 fn test_cleanup_success() {
     let (_temp_dir, temp_dir_path) = create_temp_dir();
 
-    // Create a dummy original file and a backup
     let original_file_path = create_original_file(&temp_dir_path, "testfile").unwrap();
     create_backup_file(&temp_dir_path, "testfile").unwrap();
 
-    // Create a RollbackItem and perform cleanup
     let rollback_item = RollbackItem::new(original_file_path.clone());
     let rollback_items = vec![rollback_item];
     cleanup_rollback_items(&rollback_items);
 
-    // Assert that the original file has been restored from the backup
     assert!(
         original_file_path.exists(),
         "Original file should exist after cleanup"
@@ -102,23 +96,18 @@ fn test_cleanup_success() {
 fn test_cleanup_success_content() {
     let (_temp_dir, temp_dir_path) = create_temp_dir();
 
-    // Define the content for the backup file
     let backup_content = "Backup content";
 
-    // Create a dummy original file and a backup with specific content
     let original_file_path = create_original_file(&temp_dir_path, "testfile").unwrap();
     let backup_file_path = create_backup_file(&temp_dir_path, "testfile").unwrap();
 
-    // Write the defined content to the backup file
     let mut backup_file = File::create(backup_file_path).unwrap();
     writeln!(backup_file, "{}", backup_content).unwrap();
 
-    // Create a RollbackItem and perform cleanup
     let rollback_item = RollbackItem::new(original_file_path.clone());
     let rollback_items = vec![rollback_item];
     cleanup_rollback_items(&rollback_items);
 
-    // Assert that the original file has been restored from the backup
     assert!(
         original_file_path.exists(),
         "Original file should exist after cleanup"
@@ -128,12 +117,10 @@ fn test_cleanup_success_content() {
         "Backup file should not exist after cleanup"
     );
 
-    // Read the content of the restored file
     let mut restored_content = String::new();
     let mut restored_file = File::open(original_file_path).unwrap();
     restored_file.read_to_string(&mut restored_content).unwrap();
 
-    // Assert that the content of the restored file matches the backup content
     assert_eq!(
         restored_content.trim(),
         backup_content,
@@ -207,6 +194,34 @@ fn test_reset_rollback_items_no_backups() {
 }
 
 #[test]
+fn test_is_transactional_with_overlayfs() {
+    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    let proc_mounts_path = temp_dir.path().join("proc/mounts");
+
+    fs::create_dir_all(proc_mounts_path.parent().unwrap()).unwrap();
+    let mut mounts_file = File::create(&proc_mounts_path).unwrap();
+
+    writeln!(mounts_file, "overlayfs /etc overlayfs rw,relatime,lowerdir=/path/to/lower,upperdir=/path/to/upper,workdir=/path/to/work 0 0").unwrap();
+
+    let result = is_transactional(Some(temp_dir.path().to_str().unwrap()));
+    assert!(result.unwrap(), "Expected /etc to be transactional (overlayfs)");
+}
+
+#[test]
+fn test_is_transactional_without_overlayfs() {
+    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    let proc_mounts_path = temp_dir.path().join("proc/mounts");
+
+    fs::create_dir_all(proc_mounts_path.parent().unwrap()).unwrap();
+    let mut mounts_file = File::create(&proc_mounts_path).unwrap();
+
+    writeln!(mounts_file, "ext4 /etc ext4 rw,relatime 0 0").unwrap();
+
+    let result = is_transactional(Some(temp_dir.path().to_str().unwrap()));
+    assert!(!result.unwrap(), "Expected /etc not to be transactional (not overlayfs)");
+}
+
+#[test]
 fn test_is_subvol_ro_empty() {
     let result = is_subvol_ro(None).unwrap();
 
@@ -215,7 +230,6 @@ fn test_is_subvol_ro_empty() {
 
 #[test]
 fn test_find_sdboot() {
-    // Create a temporary directory to simulate the snapshot structure
     let temp_dir = TempDir::new().expect("Failed to create temp dir");
     let snapshot_dir = temp_dir.path().join("0").join("snapshot");
     fs::create_dir_all(&snapshot_dir.join("usr/lib/systemd-boot"))
@@ -233,31 +247,25 @@ fn test_find_sdboot() {
 
 #[test]
 fn test_find_sdboot_fallback() {
-    // Create a temporary directory to simulate the snapshot structure
     let temp_dir = TempDir::new().expect("Failed to create temp dir");
     let snapshot_dir = temp_dir.path().join("1").join("snapshot");
 
-    // Create only the fallback directory structure without the primary EFI file
     fs::create_dir_all(&snapshot_dir.join("usr/lib/systemd-boot"))
         .expect("Failed to create systemd-boot path");
     let fallback_dir = snapshot_dir.join("usr/lib/systemd/boot/efi");
     fs::create_dir_all(&fallback_dir).expect("Failed to create systemd-boot EFI fallback path");
 
-    // Create a dummy EFI file in the fallback location
     let fallback_efi_path = fallback_dir.join("systemd-bootx64.efi");
     File::create(&fallback_efi_path)
         .expect("Failed to create dummy systemd-boot EFI file in fallback location");
 
-    // Call the function with the temporary directory as the prefix
     let found_path = find_sdboot(Some(1), "x64", Some(temp_dir.path()));
 
-    // Assert that the returned path matches the fallback EFI file's path
     assert_eq!(
         found_path, fallback_efi_path,
         "The found path did not match the expected fallback path"
     );
 
-    // TempDir is automatically cleaned up
 }
 
 #[test]
@@ -294,7 +302,6 @@ fn test_find_grub2_fallback_path() {
 
 #[test]
 fn test_find_sdboot_no_snapshot() {
-    // Create a temporary directory to simulate the snapshot structure
     let temp_dir = TempDir::new().expect("Failed to create temp dir");
     fs::create_dir_all(temp_dir.path().join("usr/lib/systemd-boot"))
         .expect("Failed to create systemd-boot path");
@@ -313,30 +320,24 @@ fn test_find_sdboot_no_snapshot() {
 
 #[test]
 fn test_find_sdboot_fallback_no_snapshot() {
-    // Create a temporary directory to simulate the snapshot structure
     let temp_dir = TempDir::new().expect("Failed to create temp dir");
 
-    // Create only the fallback directory structure without the primary EFI file
     fs::create_dir_all(temp_dir.path().join("usr/lib/systemd-boot"))
         .expect("Failed to create systemd-boot path");
     let fallback_dir = temp_dir.path().join("usr/lib/systemd/boot/efi");
     fs::create_dir_all(&fallback_dir).expect("Failed to create systemd-boot EFI fallback path");
 
-    // Create a dummy EFI file in the fallback location
     let fallback_efi_path = fallback_dir.join("systemd-bootx64.efi");
     File::create(&fallback_efi_path)
         .expect("Failed to create dummy systemd-boot EFI file in fallback location");
 
-    // Call the function with the temporary directory as the prefix
     let found_path = find_sdboot(None, "x64", Some(temp_dir.path()));
 
-    // Assert that the returned path matches the fallback EFI file's path
     assert_eq!(
         found_path, fallback_efi_path,
         "The found path did not match the expected fallback path"
     );
 
-    // TempDir is automatically cleaned up
 }
 
 #[test]
@@ -447,7 +448,6 @@ fn test_is_grub2_exists_primary() {
     let temp_dir = TempDir::new().expect("Failed to create temp dir");
     let snapshot_dir = temp_dir.path().join("0").join("snapshot");
 
-    // Create the GRUB2 EFI file in the primary expected location
     let grub2_efi_path = snapshot_dir.join(format!("usr/share/efi/{}/grub.efi", ARCH));
     fs::create_dir_all(grub2_efi_path.parent().unwrap())
         .expect("Failed to create directory for GRUB2 EFI file");
@@ -471,7 +471,6 @@ fn test_is_grub2_exists_fallback() {
     let temp_dir = TempDir::new().expect("Failed to create temp dir");
     let snapshot_dir = temp_dir.path().join("0").join("snapshot");
 
-    // Create the GRUB2 EFI file in the fallback location
     let grub2_efi_fallback_path =
         snapshot_dir.join(format!("usr/share/grub2/{}-efi/grub.efi", ARCH));
     fs::create_dir_all(grub2_efi_fallback_path.parent().unwrap())
@@ -644,16 +643,12 @@ fn test_find_bootloader_with_both_systemd_and_grub2() {
 
 #[test]
 fn test_find_version() {
-    // Simulate a byte slice that contains a version string
     let content = b"Some text before version: START 1.2.3 END some text after version";
-    // Define the start and end patterns that delimit the version string
     let start_pattern = b"START ";
     let end_pattern = b" END";
 
-    // Call the `find_version` function with the content and patterns
     let version = find_version(content, start_pattern, end_pattern);
 
-    // Assert that the returned version string is as expected
     assert_eq!(
         version,
         Some("1.2.3".to_string()),
@@ -862,7 +857,6 @@ fn test_bootloader_version_no_version_pattern() {
     let temp_dir = TempDir::new().expect("Failed to create temp dir");
     let file_path = temp_dir.path().join("empty_version_pattern.efi");
 
-    // Create a file with content that doesn't match any version pattern
     let mut file = fs::File::create(&file_path).expect("Failed to create test file");
     writeln!(
         file,
@@ -885,6 +879,84 @@ fn test_bootloader_version_no_version_pattern() {
         "Expected an error for file without version pattern"
     );
     assert_eq!(result.unwrap_err(), "Version not found");
+}
+
+#[test]
+fn test_bootloader_name_only_systemd_boot_exists() {
+    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    let snapshot_dir = temp_dir.path().join("0").join("snapshot");
+
+    let sdboot_efi_path = snapshot_dir.join("usr/lib/systemd-boot/systemd-bootx64.efi");
+    fs::create_dir_all(sdboot_efi_path.parent().unwrap())
+        .expect("Failed to create directory for systemd-boot EFI file");
+    File::create(&sdboot_efi_path)
+        .unwrap()
+        .write_all(b"")
+        .unwrap();
+
+    assert_eq!(
+        bootloader_name(Some(0), "x64", Some(temp_dir.path())).unwrap(),
+        "systemd-boot".to_string(),
+        "Expected 'systemd-boot'"
+    );
+}
+
+#[test]
+fn test_bootloader_name_systemd_boot_and_grub2_exist() {
+    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    let snapshot_dir = temp_dir.path().join("0").join("snapshot");
+
+    let sdboot_efi_path = snapshot_dir.join("usr/lib/systemd-boot/systemd-bootx64.efi");
+    let grub2_efi_path = snapshot_dir.join(format!("usr/share/grub2/{}-efi/grub.efi", ARCH));
+
+    fs::create_dir_all(sdboot_efi_path.parent().unwrap())
+        .expect("Failed to create directory for systemd-boot EFI file");
+    fs::create_dir_all(grub2_efi_path.parent().unwrap())
+        .expect("Failed to create directory for GRUB2 EFI file");
+
+    File::create(&sdboot_efi_path)
+        .unwrap()
+        .write_all(b"")
+        .unwrap();
+    File::create(&grub2_efi_path)
+        .unwrap()
+        .write_all(b"")
+        .unwrap();
+
+    assert_eq!(
+        bootloader_name(Some(0), "x64", Some(temp_dir.path())).unwrap(),
+        "grub2".to_string(),
+        "Expected 'grub2'"
+    );
+}
+
+#[test]
+fn test_bootloader_name_only_grub2_exist() {
+    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    let snapshot_dir = temp_dir.path().join("0").join("snapshot");
+
+    let grub2_efi_path = snapshot_dir.join(format!("usr/share/grub2/{}-efi/grub.efi", ARCH));
+
+    fs::create_dir_all(grub2_efi_path.parent().unwrap())
+        .expect("Failed to create directory for GRUB2 EFI file");
+
+    File::create(&grub2_efi_path)
+        .unwrap()
+        .write_all(b"")
+        .unwrap();
+
+    assert_eq!(
+        bootloader_name(Some(0), "x64", Some(temp_dir.path())).unwrap(),
+        "grub2".to_string(),
+        "Expected 'grub2'"
+    );
+}
+
+#[test]
+fn test_bootloader_name_neither_exists() {
+    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+
+    assert!(bootloader_name(Some(0), "x64", Some(temp_dir.path())).is_err());
 }
 
 #[test]

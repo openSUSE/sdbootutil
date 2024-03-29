@@ -1,7 +1,8 @@
 use super::io::{log_info, print_error};
 use libbtrfs::subvolume;
-pub(crate) use std::env::consts::ARCH;
+use std::env::consts::ARCH;
 use std::fs;
+use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use tempfile::TempDir;
@@ -127,19 +128,25 @@ pub(crate) fn reset_rollback_items(rollback_items: &mut Vec<RollbackItem>) {
 /// # Returns
 ///
 /// `Ok(true)` if the filesystem type is `overlayfs`, `Ok(false)` otherwise, or an `Error` if an instruction fails.
-pub(crate) fn is_transactional() -> Result<bool, String> {
-    let mounts_file = fs::File::open("/proc/mounts").expect("Could not open /proc/mounts");
+pub(crate) fn is_transactional(prefix: Option<&str>) -> Result<bool, String> {
+    let mounts_file_path = match prefix {
+        Some(prefix) => PathBuf::from(prefix)
+            .join("proc/mounts")
+            .to_string_lossy()
+            .into_owned(),
+        None => "/proc/mounts".to_string(),
+    };
+    let mounts_file = File::open(mounts_file_path).map_err(|e| e.to_string())?;
     let reader = BufReader::new(mounts_file);
 
     for line in reader.lines() {
-        let line = line.expect("Error reading line");
+        let line = line.map_err(|e| e.to_string())?;
         let parts: Vec<&str> = line.split_whitespace().collect();
         if parts.len() > 2 {
             let mount_point = parts[1];
             let fs_type = parts[2];
 
             if mount_point == "/etc" {
-                println!("{}", fs_type);
                 return Ok(fs_type == "overlayfs");
             }
         }
@@ -494,6 +501,42 @@ pub(crate) fn bootloader_version(
         }
     }
     Err("Version not found".to_string())
+}
+
+/// Identifies the installed bootloader type for a given system setup.
+///
+/// This function determines which bootloader is currently installed by checking the presence and configuration
+/// of systemd-boot and GRUB2. It returns the name of the detected bootloader as a string. The function uses
+/// the `is_sdboot` and `is_grub2` helper functions to ascertain the bootloader type based on the snapshot,
+/// firmware architecture, and optionally provided path prefix.
+///
+/// # Arguments
+///
+/// * `snapshot` - An optional snapshot identifier. If provided, the function checks the snapshot-specific
+///   bootloader configuration instead of the system's current configuration.
+/// * `firmware_arch` - The architecture of the firmware (e.g., "x64", "aa64"). This parameter is used to
+///   locate the EFI files specific to the architecture.
+/// * `override_prefix` - An optional path prefix that overrides the default path used to locate bootloader
+///   files. This can be useful for testing or when working with chroot environments.
+///
+/// # Returns
+///
+/// A `Result` containing:
+/// - `Ok(String)` with the bootloader name ("systemd-boot" or "grub2") if a bootloader is detected.
+/// - `Err(&'static str)` with an error message ("Bootloader not detected") if neither systemd-boot nor GRUB2
+///   configurations are found.
+pub(crate) fn bootloader_name(
+    snapshot: Option<u64>,
+    firmware_arch: &str,
+    override_prefix: Option<&Path>,
+) -> Result<String, &'static str> {
+    if is_sdboot(snapshot, firmware_arch, override_prefix) {
+        Ok("systemd-boot".to_string())
+    } else if is_grub2(snapshot, override_prefix) {
+        Ok("grub2".to_string())
+    } else {
+        Err("Bootloader not detected")
+    }
 }
 
 /// Checks whether systemd-boot is installed and marked by `sdbootutil`.
