@@ -207,6 +207,13 @@ fn test_reset_rollback_items_no_backups() {
 }
 
 #[test]
+fn test_is_subvol_ro_empty() {
+    let result = is_subvol_ro(None).unwrap();
+
+    assert_eq!(result, false);
+}
+
+#[test]
 fn test_find_sdboot() {
     // Create a temporary directory to simulate the snapshot structure
     let temp_dir = TempDir::new().expect("Failed to create temp dir");
@@ -281,6 +288,90 @@ fn test_find_grub2_fallback_path() {
         .expect("Failed to create dummy GRUB2 EFI file in fallback location");
 
     let found_path = find_grub2(Some(0), Some(temp_dir.path()));
+
+    assert_eq!(found_path, grub2_efi_fallback_path);
+}
+
+#[test]
+fn test_find_sdboot_no_snapshot() {
+    // Create a temporary directory to simulate the snapshot structure
+    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    fs::create_dir_all(temp_dir.path().join("usr/lib/systemd-boot"))
+        .expect("Failed to create systemd-boot path");
+    fs::create_dir_all(temp_dir.path().join("usr/lib/systemd/boot/efi"))
+        .expect("Failed to create systemd-boot EFI fallback path");
+
+    let sdboot_efi_path = temp_dir
+        .path()
+        .join("usr/lib/systemd-boot/systemd-bootx64.efi");
+    fs::write(&sdboot_efi_path, "").expect("Failed to create dummy systemd-boot EFI file");
+
+    let found_path = find_sdboot(None, "x64", Some(temp_dir.path()));
+
+    assert_eq!(found_path, sdboot_efi_path);
+}
+
+#[test]
+fn test_find_sdboot_fallback_no_snapshot() {
+    // Create a temporary directory to simulate the snapshot structure
+    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+
+    // Create only the fallback directory structure without the primary EFI file
+    fs::create_dir_all(temp_dir.path().join("usr/lib/systemd-boot"))
+        .expect("Failed to create systemd-boot path");
+    let fallback_dir = temp_dir.path().join("usr/lib/systemd/boot/efi");
+    fs::create_dir_all(&fallback_dir).expect("Failed to create systemd-boot EFI fallback path");
+
+    // Create a dummy EFI file in the fallback location
+    let fallback_efi_path = fallback_dir.join("systemd-bootx64.efi");
+    File::create(&fallback_efi_path)
+        .expect("Failed to create dummy systemd-boot EFI file in fallback location");
+
+    // Call the function with the temporary directory as the prefix
+    let found_path = find_sdboot(None, "x64", Some(temp_dir.path()));
+
+    // Assert that the returned path matches the fallback EFI file's path
+    assert_eq!(
+        found_path, fallback_efi_path,
+        "The found path did not match the expected fallback path"
+    );
+
+    // TempDir is automatically cleaned up
+}
+
+#[test]
+fn test_find_grub2_primary_path_no_snapshot() {
+    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    fs::create_dir_all(temp_dir.path().join(format!("usr/share/efi/{}/", ARCH)))
+        .expect("Failed to create GRUB2 path");
+
+    let grub2_efi_path = temp_dir
+        .path()
+        .join(format!("usr/share/efi/{}/grub.efi", ARCH));
+    fs::write(&grub2_efi_path, "").expect("Failed to create dummy GRUB2 EFI file");
+
+    let found_path = find_grub2(None, Some(temp_dir.path()));
+
+    assert_eq!(found_path, grub2_efi_path);
+}
+
+#[test]
+fn test_find_grub2_fallback_path_no_snapshot() {
+    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    fs::create_dir_all(
+        temp_dir
+            .path()
+            .join(format!("usr/share/grub2/{}-efi/", ARCH)),
+    )
+    .expect("Failed to create GRUB2 fallback path");
+
+    let grub2_efi_fallback_path = temp_dir
+        .path()
+        .join(format!("usr/share/grub2/{}-efi/grub.efi", ARCH));
+    fs::write(&grub2_efi_fallback_path, "")
+        .expect("Failed to create dummy GRUB2 EFI file in fallback location");
+
+    let found_path = find_grub2(None, Some(temp_dir.path()));
 
     assert_eq!(found_path, grub2_efi_fallback_path);
 }
@@ -631,7 +722,8 @@ fn test_bootloader_version_custom_grub2() {
     )
     .expect("Failed to copy GRUB2 test file");
 
-    let version_grub2 = bootloader_version(Some(0), "", "", "", "", Some(grub2_test_file), None).unwrap();
+    let version_grub2 =
+        bootloader_version(Some(0), "", "", "", "", Some(grub2_test_file), None).unwrap();
     assert_eq!(version_grub2, "2.12", "Failed to detect GRUB2 version");
 }
 
