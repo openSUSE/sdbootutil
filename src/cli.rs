@@ -43,38 +43,46 @@ pub(crate) fn non_empty_string(s: &str) -> Result<String, &'static str> {
 pub struct Args {
     /// Manually specify snapshot
     #[arg(short, long)]
-    pub snapshot: Option<u64>,
+    pub(crate) snapshot: Option<u64>,
 
     /// Manually specify path to ESP
     #[arg(short = 'p', long = "esp-path", value_parser = non_empty_string)]
-    pub esp_path: Option<String>,
+    pub(crate) esp_path: Option<String>,
 
     /// Manually set architecture
     #[arg(short, long, value_parser = non_empty_string)]
-    pub arch: Option<String>,
+    pub(crate) arch: Option<String>,
 
     /// Override entry token
     #[arg(short = 't', long = "entry-token", value_parser = non_empty_string)]
-    pub entry_token: Option<String>,
+    pub(crate) entry_token: Option<String>,
 
     /// Specify Linux kernel file name
     #[arg(short, long, value_parser = non_empty_string)]
-    pub image: Option<String>,
+    pub(crate) image: Option<String>,
 
     /// Do not update UEFI variables
     #[arg(short = 'n', long = "no-variables")]
-    pub no_variables: bool,
+    pub(crate) no_variables: bool,
 
     /// Always regenerate initrd
     #[arg(short = 'r', long = "regenerate-initrd")]
-    pub regenerate_initrd: bool,
+    pub(crate) regenerate_initrd: bool,
+
+    /// Do not use random seed
+    #[arg(short = 'S', long = "no-random-seed")]
+    pub(crate) no_random_seed: bool,
 
     /// More verbose output
     #[arg(short, long, action = ArgAction::Count)]
-    pub verbosity: u8,
+    pub(crate) verbosity: u8,
+
+    /// Show all entries
+    #[arg(short = 'A', long = "all")]
+    pub(crate) all: bool,
 
     #[command(subcommand)]
-    pub cmd: Option<Commands>,
+    pub(crate) cmd: Option<Commands>,
 }
 
 #[derive(Subcommand, Debug, Clone)]

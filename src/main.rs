@@ -1,17 +1,34 @@
 use sdbootutil as lib;
-use sdbootutil::cli::{parse_args, Commands};
+use sdbootutil::cli::Commands;
 
 fn main() -> Result<(), String> {
-    let (root_snapshot, _root_prefix, _root_subvol, firmware_arch, boot_dst, shimdir, boot_root, _entry_token, _root_uuid, _root_device) = match lib::get_system_info() {
-        Ok(info) => info,
-        Err(e) => {
-            let message = format!("Error getting system info: {}", e);
-            return Err(message)
-        }
-    };
+    let (
+        root_snapshot,
+        _root_prefix,
+        _root_subvol,
+        _root_uuid,
+        _root_device,
+        firmware_arch,
+        _entry_token,
+        boot_root,
+        boot_dst,
+        _image,
+        _no_variables,
+        _regenerate_initrd,
+        _no_random_seed,
+        _all,
+        shimdir,
+        cmd,
+    ) = lib::process_args_and_get_system_info().map_err(|e| {
+        format!(
+            "An error occurred while fetching system information: {}",
+            e
+        )
+    })?;
+
     lib::test_functions();
-    let args = parse_args();
-    let _result = match args.cmd {
+
+    let _result = match cmd {
         Some(Commands::Kernels {}) => lib::command_kernels(),
         Some(Commands::Snapshots {}) => lib::command_snapshots(),
         Some(Commands::Entries {}) => lib::command_entries(),
@@ -28,7 +45,15 @@ fn main() -> Result<(), String> {
         Some(Commands::ListSnapshots {}) => lib::command_list_snapshots(),
         Some(Commands::SetDefaultSnapshot {}) => lib::command_set_default_snapshot(),
         Some(Commands::IsBootable {}) => lib::command_is_bootable(),
-        Some(Commands::IsInstalled {}) => lib::command_is_installed(root_snapshot, &firmware_arch, &shimdir, &boot_root, &boot_dst, None, None),
+        Some(Commands::IsInstalled {}) => lib::command_is_installed(
+            root_snapshot,
+            &firmware_arch,
+            &shimdir,
+            &boot_root,
+            &boot_dst,
+            None,
+            None,
+        ),
         Some(Commands::Install {}) => lib::command_install(),
         Some(Commands::NeedsUpdate {}) => lib::command_needs_update(),
         Some(Commands::Update {}) => lib::command_update(),
