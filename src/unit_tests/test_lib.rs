@@ -253,9 +253,256 @@ fn test_command_install() {
 }
 
 #[test]
-fn test_command_needs_update() {
-    let result = command_needs_update().unwrap();
-    assert_eq!(result, true);
+fn test_command_needs_update_no_systemd_boot() {
+    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    let snapshot_dir = temp_dir.path().join("0").join("snapshot");
+
+    let systemd_boot_test_file = snapshot_dir.join("usr/lib/systemd-boot/systemd-bootx64.efi");
+    let systemd_boot_efi_file = temp_dir
+        .path()
+        .join("boot/efi/EFI/systemd/systemd-bootx64.efi");
+    fs::create_dir_all(systemd_boot_test_file.parent().unwrap())
+        .expect("Failed to create directory for systemd-boot EFI file");
+    fs::create_dir_all(systemd_boot_efi_file.parent().unwrap())
+        .expect("Failed to create directory for systemd-boot EFI file");
+    fs::copy(
+        PathBuf::from("src/unit_tests/test_files/systemd_boot.efi"),
+        &systemd_boot_test_file,
+    )
+    .expect("Failed to copy systemd-boot test file");
+    fs::copy(
+        PathBuf::from("src/unit_tests/test_files/systemd_boot.efi"),
+        &systemd_boot_efi_file,
+    )
+    .expect("Failed to copy systemd-boot efi file");
+
+    let needs_update = command_needs_update(
+        Some(0),
+        Some(0),
+        "x64",
+        "/usr/share/efi/x86_64",
+        "/boot/efi",
+        "/EFI/systemd",
+        Some(temp_dir.path()),
+    )
+    .unwrap();
+    assert!(!needs_update);
+}
+
+#[test]
+fn test_command_needs_update_no_grub2() {
+    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    let snapshot_dir = temp_dir.path().join("0").join("snapshot");
+
+    let grub2 = snapshot_dir.join(format!("usr/share/grub2/{}-efi/grub.efi", ARCH));
+    let grub2_efi_file = temp_dir.path().join("boot/efi/EFI/systemd/grub.efi");
+    fs::create_dir_all(grub2.parent().unwrap())
+        .expect("Failed to create directory for grub2 EFI file");
+    fs::create_dir_all(grub2_efi_file.parent().unwrap())
+        .expect("Failed to create directory for grub2 EFI file");
+    fs::copy(PathBuf::from("src/unit_tests/test_files/grub2.efi"), &grub2)
+        .expect("Failed to copy grub2 test file");
+    fs::copy(
+        PathBuf::from("src/unit_tests/test_files/grub2.efi"),
+        &grub2_efi_file,
+    )
+    .expect("Failed to copy grub2 efi file");
+
+    let needs_update = command_needs_update(
+        Some(0),
+        Some(0),
+        "x64",
+        "/usr/share/efi/x86_64",
+        "/boot/efi",
+        "/EFI/systemd",
+        Some(temp_dir.path()),
+    )
+    .unwrap();
+    assert!(!needs_update);
+}
+
+#[test]
+fn test_command_needs_update_shim_systemd_boot() {
+    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    let snapshot_dir = temp_dir.path().join("0").join("snapshot");
+
+    let systemd_boot_test_file = snapshot_dir.join("usr/lib/systemd-boot/systemd-bootx64.efi");
+    let systemd_boot_efi_file = temp_dir
+        .path()
+        .join("boot/efi/EFI/systemd/systemd-bootx64.efi");
+    fs::create_dir_all(systemd_boot_test_file.parent().unwrap())
+        .expect("Failed to create directory for systemd-boot EFI file");
+    fs::create_dir_all(systemd_boot_efi_file.parent().unwrap())
+        .expect("Failed to create directory for systemd-boot EFI file");
+    fs::copy(
+        PathBuf::from("src/unit_tests/test_files/systemd_boot.efi"),
+        &systemd_boot_test_file,
+    )
+    .expect("Failed to copy systemd-boot test file");
+    let shim_test_file = temp_dir.path().join("usr/share/efi/x86_64/shim.efi");
+    let shim_efi_file = temp_dir.path().join("boot/efi/EFI/systemd/grub.efi");
+    fs::create_dir_all(shim_test_file.parent().unwrap())
+        .expect("Failed to create directory for shim EFI file");
+    fs::create_dir_all(shim_efi_file.parent().unwrap())
+        .expect("Failed to create directory for shim EFI file");
+    File::create(&shim_test_file)
+        .unwrap()
+        .write_all(b"")
+        .unwrap();
+    File::create(&shim_efi_file)
+        .unwrap()
+        .write_all(b"#### LoaderInfo: systemd-boot 253.4+suse.17.gbe772961ad ####")
+        .unwrap();
+
+    let needs_update = command_needs_update(
+        Some(0),
+        Some(0),
+        "x64",
+        "/usr/share/efi/x86_64",
+        "/boot/efi",
+        "/EFI/systemd",
+        Some(temp_dir.path()),
+    )
+    .unwrap();
+    assert!(needs_update);
+}
+
+#[test]
+fn test_command_needs_update_no_shim_systemd_boot() {
+    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    let snapshot_dir = temp_dir.path().join("0").join("snapshot");
+
+    let systemd_boot_test_file = snapshot_dir.join("usr/lib/systemd-boot/systemd-bootx64.efi");
+    let systemd_boot_efi_file = temp_dir
+        .path()
+        .join("boot/efi/EFI/systemd/systemd-bootx64.efi");
+    fs::create_dir_all(systemd_boot_test_file.parent().unwrap())
+        .expect("Failed to create directory for systemd-boot EFI file");
+    fs::create_dir_all(systemd_boot_efi_file.parent().unwrap())
+        .expect("Failed to create directory for systemd-boot EFI file");
+    fs::copy(
+        PathBuf::from("src/unit_tests/test_files/systemd_boot.efi"),
+        &systemd_boot_test_file,
+    )
+    .expect("Failed to copy systemd-boot test file");
+    let shim_test_file = temp_dir.path().join("usr/share/efi/x86_64/shim.efi");
+    let shim_efi_file = temp_dir.path().join("boot/efi/EFI/systemd/grub.efi");
+    fs::create_dir_all(shim_test_file.parent().unwrap())
+        .expect("Failed to create directory for shim EFI file");
+    fs::create_dir_all(shim_efi_file.parent().unwrap())
+        .expect("Failed to create directory for shim EFI file");
+    File::create(&shim_test_file)
+        .unwrap()
+        .write_all(b"")
+        .unwrap();
+    File::create(&shim_efi_file)
+        .unwrap()
+        .write_all(b"#### LoaderInfo: systemd-boot 256.4+suse.17.gbe772961ad ####")
+        .unwrap();
+
+    let needs_update = command_needs_update(
+        Some(0),
+        Some(0),
+        "x64",
+        "/usr/share/efi/x86_64",
+        "/boot/efi",
+        "/EFI/systemd",
+        Some(temp_dir.path()),
+    )
+    .unwrap();
+    assert!(!needs_update);
+}
+
+#[test]
+fn test_command_needs_update_shim_grub2() {
+    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    let snapshot_dir = temp_dir.path().join("0").join("snapshot");
+
+    let grub2 = snapshot_dir.join(format!("usr/share/grub2/{}-efi/grub.efi", ARCH));
+    let grub2_efi_file = temp_dir.path().join("boot/efi/EFI/systemd/grub.efi");
+    fs::create_dir_all(grub2.parent().unwrap())
+        .expect("Failed to create directory for grub2 EFI file");
+    fs::create_dir_all(grub2_efi_file.parent().unwrap())
+        .expect("Failed to create directory for grub2 EFI file");
+    fs::copy(PathBuf::from("src/unit_tests/test_files/grub2.efi"), &grub2)
+        .expect("Failed to copy grub2 test file");
+    fs::copy(
+        PathBuf::from("src/unit_tests/test_files/grub2.efi"),
+        &grub2_efi_file,
+    )
+    .expect("Failed to copy grub2 efi file");
+    let shim_test_file = temp_dir.path().join("usr/share/efi/x86_64/shim.efi");
+    let shim_efi_file = temp_dir.path().join("boot/efi/EFI/systemd/grub.efi");
+    fs::create_dir_all(shim_test_file.parent().unwrap())
+        .expect("Failed to create directory for shim EFI file");
+    fs::create_dir_all(shim_efi_file.parent().unwrap())
+        .expect("Failed to create directory for shim EFI file");
+    File::create(&shim_test_file)
+        .unwrap()
+        .write_all(b"")
+        .unwrap();
+    File::create(&shim_efi_file)
+        .unwrap()
+        .write_all(b"GNU GRUB  version %s\x002.10\x00prefixESC at any time exits.")
+        .unwrap();
+
+    let needs_update = command_needs_update(
+        Some(0),
+        Some(0),
+        "x64",
+        "/usr/share/efi/x86_64",
+        "/boot/efi",
+        "/EFI/systemd",
+        Some(temp_dir.path()),
+    )
+    .unwrap();
+    assert!(needs_update);
+}
+
+#[test]
+fn test_command_needs_update_no_shim_grub2() {
+    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    let snapshot_dir = temp_dir.path().join("0").join("snapshot");
+
+    let grub2 = snapshot_dir.join(format!("usr/share/grub2/{}-efi/grub.efi", ARCH));
+    let grub2_efi_file = temp_dir.path().join("boot/efi/EFI/systemd/grub.efi");
+    fs::create_dir_all(grub2.parent().unwrap())
+        .expect("Failed to create directory for grub2 EFI file");
+    fs::create_dir_all(grub2_efi_file.parent().unwrap())
+        .expect("Failed to create directory for grub2 EFI file");
+    fs::copy(PathBuf::from("src/unit_tests/test_files/grub2.efi"), &grub2)
+        .expect("Failed to copy grub2 test file");
+    fs::copy(
+        PathBuf::from("src/unit_tests/test_files/grub2.efi"),
+        &grub2_efi_file,
+    )
+    .expect("Failed to copy grub2 efi file");
+    let shim_test_file = temp_dir.path().join("usr/share/efi/x86_64/shim.efi");
+    let shim_efi_file = temp_dir.path().join("boot/efi/EFI/systemd/grub.efi");
+    fs::create_dir_all(shim_test_file.parent().unwrap())
+        .expect("Failed to create directory for shim EFI file");
+    fs::create_dir_all(shim_efi_file.parent().unwrap())
+        .expect("Failed to create directory for shim EFI file");
+    File::create(&shim_test_file)
+        .unwrap()
+        .write_all(b"")
+        .unwrap();
+    File::create(&shim_efi_file)
+        .unwrap()
+        .write_all(b"GNU GRUB  version %s\x002.13\x00prefixESC at any time exits.")
+        .unwrap();
+
+    let needs_update = command_needs_update(
+        Some(0),
+        Some(0),
+        "x64",
+        "/usr/share/efi/x86_64",
+        "/boot/efi",
+        "/EFI/systemd",
+        Some(temp_dir.path()),
+    )
+    .unwrap();
+    assert!(!needs_update);
 }
 
 #[test]

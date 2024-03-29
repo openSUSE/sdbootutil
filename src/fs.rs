@@ -1,6 +1,7 @@
 use super::io::{log_info, print_error};
 use libbtrfs::subvolume;
 
+use super::utils;
 use std::collections::HashMap;
 use std::env::consts::ARCH;
 use std::fs;
@@ -503,6 +504,66 @@ pub(crate) fn bootloader_version(
         }
     }
     Err("Version not found".to_string())
+}
+
+/// Determines if the installed bootloader needs an update by comparing its version with the system version.
+///
+/// This function retrieves the currently deployed bootloader version and compares it with the system's bootloader version.
+/// It determines whether an update is necessary based on the comparison result.
+///
+/// # Arguments
+///
+/// * `snapshot` - Optional snapshot identifier used for specifying a particular system snapshot for version comparison.
+/// * `firmware_arch` - The architecture of the firmware, such as "x64" or "arm64", used to determine the appropriate bootloader file.
+/// * `shimdir` - Directory containing bootloader shim files, used in constructing the path to the bootloader file if a default filename is not provided.
+/// * `boot_root` - The root directory where boot files are located, used in constructing the path to the bootloader file.
+/// * `boot_dst` - Destination directory for boot files relative to `boot_root`, used in constructing the path.
+/// * `override_prefix` - An optional path override that replaces `boot_root` in the constructed path to the bootloader file.
+///
+/// # Returns
+///
+/// Returns `Ok(true)` if the installed bootloader is older than the system's bootloader version and needs an update.
+/// Returns `Ok(false)` if the installed bootloader is up-to-date with the system's version.
+/// Returns `Err(String)` with an error message if the operation fails, such as when the bootloader version cannot be determined.
+pub fn bootloader_needs_update(
+    snapshot: Option<u64>,
+    root_snapshot: Option<u64>,
+    firmware_arch: &str,
+    shimdir: &str,
+    boot_root: &str,
+    boot_dst: &str,
+    override_prefix: Option<&Path>,
+) -> Result<bool, String> {
+    let deployed_version = bootloader_version(
+        root_snapshot,
+        firmware_arch,
+        shimdir,
+        boot_root,
+        boot_dst,
+        None,
+        override_prefix,
+    )?;
+    log_info(&format!("deployed version {}", deployed_version), 1);
+
+    let system_bootloader = find_bootloader(snapshot, firmware_arch, override_prefix)
+        .map_err(|e| format!("Couldn't find current bootloader: {}", e))?;
+
+    let system_version = bootloader_version(
+        snapshot,
+        firmware_arch,
+        shimdir,
+        boot_root,
+        boot_dst,
+        Some(system_bootloader),
+        override_prefix,
+    )?;
+    log_info(&format!("system version {}", system_version), 1);
+
+    if utils::compare_versions(&deployed_version, &system_version) {
+        Ok(true)
+    } else {
+        Ok(false)
+    }
 }
 
 /// Identifies the installed bootloader type for a given system setup.

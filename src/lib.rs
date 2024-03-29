@@ -2,8 +2,9 @@ pub mod cli;
 pub mod fs;
 pub mod io;
 pub mod ui;
+pub mod utils;
 
-use fs::{is_installed, settle_system_tokens};
+use fs::{bootloader_name, bootloader_needs_update, is_installed, settle_system_tokens};
 use io::log_info;
 use std::path::{Path, PathBuf};
 
@@ -354,7 +355,7 @@ pub fn command_is_bootable() -> Result<bool, String> {
 ///
 /// let installed = command_is_installed(
 ///     Some(0),
-///     "x86_64",
+///     "x64",
 ///     "/usr/share/efi/x86_64",
 ///     "/boot/efi",
 ///     "EFI/systemd",
@@ -419,24 +420,77 @@ pub fn command_install() -> Result<bool, String> {
     Ok(true)
 }
 
-/// Executes the `NeedsUpdate` command.
+/// Executes the `NeedsUpdate` command to check if the bootloader needs an update.
 ///
-/// This function logs the action and returns a predefined status code.
+/// This command invokes the `bootloader_needs_update` function to determine if the installed bootloader is outdated
+/// compared to the system's bootloader version. It logs the result of the operation, indicating whether an update is necessary.
+///
+/// # Arguments
+///
+/// * `snapshot` - Optional snapshot identifier used for specifying a particular system snapshot for version comparison.
+/// * `firmware_arch` - The architecture of the firmware, such as "x64" or "arm64", used to determine the appropriate bootloader file.
+/// * `shimdir` - Directory containing bootloader shim files, used in constructing the path to the bootloader file if a default filename is not provided.
+/// * `boot_root` - The root directory where boot files are located, used in constructing the path to the bootloader file.
+/// * `boot_dst` - Destination directory for boot files relative to `boot_root`, used in constructing the path.
+/// * `override_prefix` - An optional path override that replaces `boot_root` in the constructed path to the bootloader file.
 ///
 /// # Returns
 ///
-/// Always returns `15`, indicating a specific status after execution.
+/// Returns `Ok(true)` if the bootloader needs an update.
+/// Returns `Ok(false)` if the bootloader is up-to-date.
+/// Returns `Err(String)` with an error message if the operation fails, such as when the bootloader version cannot be determined.
 ///
 /// # Examples
 ///
 /// ```
-/// let status = sdbootutil::command_needs_update().unwrap();
-/// assert_eq!(status, true);
+/// let result = sdbootutil::command_needs_update(
+///     Some(0),
+///     Some(0),
+///     "x64",
+///     "/usr/share/efi/x86_64",
+///     "/boot/efi",
+///     "EFI/systemd",
+///     None,
+/// );
+/// assert!(result.is_err(), "Expected an error from command_needs_update");
 /// ```
-pub fn command_needs_update() -> Result<bool, String> {
-    let message = "NeedsUpdate command called";
-    log_info(message, 1);
-    Ok(true)
+pub fn command_needs_update(
+    snapshot: Option<u64>,
+    root_snapshot: Option<u64>,
+    firmware_arch: &str,
+    shimdir: &str,
+    boot_root: &str,
+    boot_dst: &str,
+    override_prefix: Option<&Path>,
+) -> Result<bool, String> {
+    let bootloader_name = bootloader_name(snapshot, firmware_arch, override_prefix)
+        .map_err(|e| format!("Needs Update - Can't determine bootloader name: {}", e))?;
+    let result = bootloader_needs_update(
+        snapshot,
+        root_snapshot,
+        firmware_arch,
+        shimdir,
+        boot_root,
+        boot_dst,
+        override_prefix,
+    );
+    match result {
+        Ok(bool) => {
+            if bool {
+                let message = format!("Bootloader '{}' needs to be updated", bootloader_name);
+                log_info(&message, 0);
+                Ok(true)
+            } else {
+                let message = format!("Bootloader '{}' is up-to-date", bootloader_name);
+                log_info(&message, 0);
+                Ok(false)
+            }
+        }
+        Err(e) => {
+            let message = format!("Can't determine if bootloader needs update: {}", e);
+            Err(message)
+        }
+    }
 }
 
 /// Executes the `Update` command.
@@ -548,6 +602,7 @@ pub fn command_update_predictions() -> Result<bool, String> {
 ///     root_uuid,
 ///     root_device,
 ///     firmware_arch,
+///     snapshot,
 ///     entry_token,
 ///     boot_root,
 ///     boot_dst,
@@ -570,6 +625,7 @@ pub fn process_args_and_get_system_info() -> Result<
         String,
         String,
         String,
+        Option<u64>,
         String,
         String,
         String,
@@ -625,6 +681,7 @@ pub fn process_args_and_get_system_info() -> Result<
             }
         },
     };
+    let snapshot = args.snapshot.or(root_snapshot);
     let arg_entry_token = args.entry_token.unwrap_or(default_entry_token);
     let no_variables = args.no_variables;
     let regenerate_initrd = args.regenerate_initrd;
@@ -651,6 +708,7 @@ pub fn process_args_and_get_system_info() -> Result<
         root_uuid,
         root_device,
         firmware_arch,
+        snapshot,
         arg_entry_token,
         boot_root,
         boot_dst,
