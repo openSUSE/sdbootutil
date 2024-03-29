@@ -23,7 +23,7 @@ pub(crate) fn non_empty_string(s: &str) -> Result<String, &'static str> {
 
 /// Tool to manage systemd-boot in a btrfs based, snapper managed system
 #[derive(Parser, Debug)]
-#[command(author, version, about, long_about = None)]
+#[command(version, about, long_about = None)]
 /// Represents command-line arguments parsed for the application.
 ///
 /// This struct is derived from `clap::Parser`, which automates the process of parsing
