@@ -178,6 +178,37 @@ pub(crate) fn get_root_snapshot_info() -> Result<(String, u64, String), Box<dyn 
     Ok((prefix, snapshot_id, full_path))
 }
 
+/// Determines if a specified Btrfs subvolume is set to read-only mode.
+///
+/// This function checks the read-only status of a given Btrfs subvolume.
+///
+/// # Parameters
+///
+/// - `subvol`: An `Option<String>` representing the path to the subvolume. If `None`, the function
+///   assumes there's no subvolume to check and returns `Ok(false)`.
+///
+/// # Returns
+///
+/// - `Ok(true)`: If the subvolume is found and is set to read-only.
+/// - `Ok(false)`: If the subvolume is not set to read-only or if `None` is passed as the subvolume path.
+/// - `Err(e)`: If there's an error checking the read-only status of the subvolume, wrapped in a `Box<dyn Error>`.
+///   The error includes a custom message indicating the failure to retrieve the read-only status, along with
+///   the original error message.
+pub(crate) fn is_subvol_ro(subvol: Option<String>) -> Result<bool, Box<dyn std::error::Error>> {
+    match subvol {
+        Some(subvol) => {
+            let is_ro = subvolume::get_readonly(&subvol).map_err(|e| {
+                Box::<dyn std::error::Error>::from(format!(
+                    "Failed to get readonly status for subvolume '{}': {}",
+                    subvol, e
+                ))
+            })?;
+            Ok(is_ro)
+        }
+        None => Ok(false),
+    }
+}
+
 /// Finds the path to the systemd-boot EFI file based on a given snapshot and firmware architecture,
 /// with an optional prefix to override the default path for testing or other purposes.
 ///

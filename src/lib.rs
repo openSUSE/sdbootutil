@@ -525,15 +525,18 @@ pub fn get_system_info() -> Result<
         let message = format!("Failed to get root privileges: {}", e);
         return Err(message);
     }
-    
-    let has_snapshots = fs::is_snapshotted().map_err(|e| format!("Couldn't find out if snapshotted: {}", e))?;
+
+    let has_snapshots =
+        fs::is_snapshotted().map_err(|e| format!("Couldn't find out if snapshotted: {}", e))?;
     let (firmware_arch, entry_token, boot_root) =
         io::get_bootctl_info().map_err(|e| format!("Couldn't get bootctl info: {}", e))?;
     let (root_uuid, root_device) = io::get_root_filesystem_info()
         .map_err(|e| format!("Couldn't get root filesystem info: {}", e))?;
     let (root_snapshot, root_prefix, root_subvol) = if has_snapshots {
         fs::get_root_snapshot_info()
-            .map(|(prefix, snapshot_id, full_path)| (Some(snapshot_id), Some(prefix), Some(full_path)))
+            .map(|(prefix, snapshot_id, full_path)| {
+                (Some(snapshot_id), Some(prefix), Some(full_path))
+            })
             .map_err(|e| format!("Failed to get root snapshot info: {}", e))?
     } else {
         (None, None, None)
@@ -576,6 +579,12 @@ pub fn test_functions() {
     ];
     fs::cleanup_rollback_items(&rollback_items);
     fs::reset_rollback_items(&mut rollback_items);
+
+    if fs::is_subvol_ro(None).expect("Failed to check if filesystem is ro") {
+        log_info("It is ro", 1)
+    } else {
+        log_info("Subvol is not ro", 1)
+    }
 }
 
 #[cfg(test)]
