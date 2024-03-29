@@ -1,6 +1,7 @@
 use super::io::{log_info, print_error};
 use libbtrfs::subvolume;
 
+use std::collections::HashMap;
 use std::env::consts::ARCH;
 use std::fs;
 use std::fs::File;
@@ -635,4 +636,230 @@ pub(crate) fn is_snapshotted(prefix: Option<&str>) -> Result<bool, String> {
         }
     }
     Ok(false)
+}
+
+/// Reads and parses the OS release information from standard locations.
+///
+/// This function attempts to read the OS release information from either `/usr/lib/os-release`
+/// or `/etc/os-release`, preferring the first if both exist. It can also adjust the base path
+/// using an optional subvolume path and an optional override prefix, making it suitable for
+/// use in environments where the root filesystem is not mounted at `/`.
+///
+/// # Arguments
+///
+/// * `subvol` - An optional path to a subvolume that should be used as the root for reading the OS release information.
+/// * `override_prefix` - An optional path prefix that overrides the base path for reading the OS release files.
+///
+/// # Returns
+///
+/// A `Result` containing a tuple with the following optional elements, or an error message if the files cannot be read:
+///
+/// * `ID` - The OS identifier, e.g., "ubuntu".
+/// * `VERSION_ID` - The OS version identifier, e.g., "20.04".
+/// * `PRETTY_NAME` - A pretty name for the OS, e.g., "Ubuntu 20.04 LTS".
+/// * `IMAGE_ID` - An optional identifier for the OS image used, if available.
+///
+/// # Errors
+///
+/// Returns an error if both `/usr/lib/os-release` and `/etc/os-release` are not found or cannot be opened.
+pub(crate) fn read_os_release(
+    subvol: Option<&Path>,
+    override_prefix: Option<&Path>,
+) -> Result<
+    (
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+    ),
+    String,
+> {
+    let prefix = override_prefix.unwrap_or(Path::new("/"));
+    let paths = subvol.map_or(
+        vec![
+            prefix.join("usr/lib/os-release"),
+            prefix.join("etc/os-release"),
+        ],
+        |subvol_path| {
+            let relative_subvol = subvol_path.strip_prefix("/").unwrap_or(subvol_path);
+            vec![
+                prefix.join(relative_subvol).join("usr/lib/os-release"),
+                prefix.join(relative_subvol).join("etc/os-release"),
+            ]
+        },
+    );
+
+    for path in &paths {
+        if path.exists() {
+            let file = File::open(path).map_err(|e| format!("Couldn't open file: {}", e))?;
+            let reader = BufReader::new(file);
+            let mut info = HashMap::new();
+
+            for line in reader.lines() {
+                let line = line.map_err(|e| format!("Couldn't read line: {}", e))?;
+                if let Some((key, value)) = line.split_once('=') {
+                    info.insert(
+                        key.trim_start_matches("os_release_").to_string(),
+                        value.trim_matches('"').to_string(),
+                    );
+                }
+            }
+            let os_release_id = info.get("ID").cloned();
+            let os_release_version_id = info.get("VERSION_ID").cloned();
+            let os_release_pretty_name = info.get("PRETTY_NAME").cloned();
+            let os_release_image_id = info.get("IMAGE_ID").cloned();
+
+            return Ok((
+                os_release_id,
+                os_release_version_id,
+                os_release_pretty_name,
+                os_release_image_id,
+            ));
+        }
+    }
+
+    Err("OS release file not found".to_string())
+}
+
+/// Reads the machine ID from the system or specified subvolume.
+///
+/// This function reads the machine ID from `/etc/machine-id`. In a transactional update scenario,
+/// it might also read from `/var/lib/overlay/<snapshot>/etc/machine-id` if the system is determined
+/// to be transactional. It supports reading from an alternate root via an optional subvolume path
+/// and an override prefix, making it adaptable for different environment setups.
+///
+/// # Arguments
+///
+/// * `subvol` - An optional path to a subvolume that should be used as the root for reading the machine ID.
+/// * `snapshot` - An optional snapshot identifier, used in transactional environments to specify the snapshot
+///   layer from which to read the machine ID.
+/// * `override_prefix` - An optional path prefix that overrides the base path for reading the machine ID file.
+///
+/// # Returns
+///
+/// A `Result` containing the machine ID as a `String`, or an error message if the file does not exist,
+/// cannot be opened, or is empty.
+///
+/// # Errors
+///
+/// Returns an error if the machine ID file does not exist, cannot be opened, or is empty.
+pub(crate) fn read_machine_id(
+    subvol: Option<&Path>,
+    snapshot: Option<u64>,
+    override_prefix: Option<&Path>,
+) -> Result<String, String> {
+    let prefix = override_prefix.unwrap_or(Path::new("/"));
+    let mut paths = Vec::new();
+
+    if is_transactional(override_prefix.map(|p| p.to_str().unwrap_or("")))
+        .map_err(|e| format!("Couldn't get transactional status: {}", e))?
+    {
+        if let Some(snap) = snapshot {
+            paths.push(prefix.join(format!("var/lib/overlay/{}/etc/machine-id", snap)));
+        }
+    }
+
+    if let Some(subvol_path) = subvol {
+        let relative_subvol = subvol_path.strip_prefix("/").unwrap_or(subvol_path);
+        paths.push(prefix.join(relative_subvol).join("etc/machine-id"));
+    } else {
+        paths.push(prefix.join("etc/machine-id"));
+    }
+
+    for path in paths {
+        if path.exists()
+            && path
+                .metadata()
+                .map_err(|e| format!("Machine ID file has invalid metadata: {}", e))?
+                .len()
+                > 0
+        {
+            let file = File::open(path).map_err(|e| format!("Couldn't open file: {}", e))?;
+            let mut reader = BufReader::new(file);
+            let mut machine_id = String::new();
+            reader
+                .read_line(&mut machine_id)
+                .map_err(|e| format!("Couldn't read line: {}", e))?;
+            return Ok(machine_id.trim().to_string());
+        }
+    }
+
+    Err("Machine ID file not found".to_string())
+}
+
+/// Determines the system's entry token based on various criteria and system files.
+///
+/// This function reads the OS release information and the machine ID from the system or specified subvolume,
+/// and determines the entry token to use for the bootloader based on the given `arg_entry_token` parameter.
+/// The entry token can be explicitly set to use the machine ID, the OS ID (from `/etc/os-release`),
+/// an OS image ID, or a custom token. If `arg_entry_token` is set to "auto" or not provided,
+/// the function attempts to read the entry token from `/etc/kernel/entry-token`; if the file does not exist,
+/// it falls back to using the machine ID.
+///
+/// # Arguments
+///
+/// * `subvol` - An optional path to the subvolume from which to read the OS release information and machine ID.
+///   If not provided, the function reads from the system's root.
+/// * `snapshot` - An optional snapshot identifier used when determining the machine ID in a transactional environment.
+/// * `arg_entry_token` - An optional argument that specifies how to determine the entry token. It can be "auto",
+///   "machine-id", "os-id", "os-image", or a custom token. If "auto" or not provided, the function uses the default
+///   mechanism described above.
+/// * `override_prefix` - An optional path prefix that overrides the base path for reading system files. This is useful
+///   for testing or when operating in a chroot environment.
+///
+/// # Returns
+///
+/// A `Result` containing:
+///
+/// * A tuple with the following elements:
+///   - `entry_token`: The determined entry token.
+///   - `machine_id`: The machine ID of the system.
+///   - `os_release_id`: The OS ID from `/etc/os-release`, if available.
+///   - `os_release_version_id`: The OS version ID from `/etc/os-release`, if available.
+///   - `os_release_pretty_name`: The pretty name of the OS from `/etc/os-release`, if available.
+/// * An `Err` with a string describing the error if the function fails to read required files or if the specified
+///   `arg_entry_token` requires data that is not available.
+pub(crate) fn settle_system_tokens(
+    subvol: Option<&Path>,
+    snapshot: Option<u64>,
+    arg_entry_token: Option<&str>,
+    override_prefix: Option<&Path>,
+) -> Result<
+    (
+        String,
+        String,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+    ),
+    String,
+> {
+    let prefix = override_prefix.unwrap_or(Path::new("/"));
+    let (os_release_id, os_release_version_id, os_release_pretty_name, os_release_image_id) =
+        read_os_release(subvol, override_prefix)?;
+    let machine_id = read_machine_id(subvol, snapshot, override_prefix)?;
+
+    let entry_token = match arg_entry_token {
+        Some("auto") | None => {
+            if let Ok(token) = fs::read_to_string(prefix.join("etc/kernel/entry-token")) {
+                token.trim_end_matches('\n').to_string()
+            } else {
+                machine_id.clone()
+            }
+        }
+        Some("machine-id") => machine_id.clone(),
+        Some("os-id") => os_release_id
+            .clone()
+            .ok_or_else(|| "Missing ID".to_string())?,
+        Some("os-image") => os_release_image_id.ok_or_else(|| "Missing IMAGE_ID".to_string())?,
+        Some(token) => token.to_string(),
+    };
+
+    Ok((
+        entry_token,
+        machine_id,
+        os_release_id,
+        os_release_version_id,
+        os_release_pretty_name,
+    ))
 }

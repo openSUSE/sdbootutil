@@ -3,6 +3,7 @@ use std::env::consts::ARCH;
 use std::fs;
 use std::fs::File;
 use std::io::{Read, Write};
+use std::path::Path;
 use std::path::PathBuf;
 use tempfile::TempDir;
 
@@ -1136,5 +1137,342 @@ fn test_is_snapshotted_without_btrfs_or_snapshots() {
     assert!(
         !result.unwrap(),
         "Expected system not to be snapshotted without btrfs or .snapshots directory"
+    );
+}
+
+#[test]
+fn test_read_os_release() {
+    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    let temp_path = temp_dir.path();
+
+    let custom_usr_lib_os_release = temp_path.join("usr/lib/os-release");
+    let custom_etc_os_release = temp_path.join("etc/os-release");
+
+    std::fs::create_dir_all(custom_usr_lib_os_release.parent().unwrap()).unwrap();
+    std::fs::create_dir_all(custom_etc_os_release.parent().unwrap()).unwrap();
+
+    let mut file = File::create(&custom_usr_lib_os_release).unwrap();
+    writeln!(file, "ID=custom-linux").unwrap();
+    writeln!(file, "VERSION_ID=1.0").unwrap();
+    writeln!(file, "PRETTY_NAME=\"Custom Linux 1.0\"").unwrap();
+
+    let result = read_os_release(None, Some(temp_path)).unwrap();
+
+    assert_eq!(result.0, Some("custom-linux".to_string()));
+    assert_eq!(result.1, Some("1.0".to_string()));
+    assert_eq!(result.2, Some("Custom Linux 1.0".to_string()));
+
+    assert_eq!(result.3, None);
+}
+
+#[test]
+fn test_read_os_release_with_subvol() {
+    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    let root_fs_temp_path = temp_dir.path();
+    let subvol_path = root_fs_temp_path.join(".snapshots/1/snapshot");
+    std::fs::create_dir_all(&subvol_path).unwrap();
+    let subvol_usr_lib_os_release = subvol_path.join("usr/lib/os-release");
+    let subvol_etc_os_release = subvol_path.join("etc/os-release");
+
+    std::fs::create_dir_all(subvol_usr_lib_os_release.parent().unwrap()).unwrap();
+    std::fs::create_dir_all(subvol_etc_os_release.parent().unwrap()).unwrap();
+
+    let mut file = File::create(&subvol_usr_lib_os_release).unwrap();
+    writeln!(file, "ID=subvol-linux").unwrap();
+    writeln!(file, "VERSION_ID=2.0").unwrap();
+    writeln!(file, "PRETTY_NAME=\"Subvol Linux 2.0\"").unwrap();
+    writeln!(file, "IMAGE_ID=\"subvol-image\"").unwrap();
+
+    let result = read_os_release(
+        Some(&PathBuf::from("/.snapshots/1/snapshot")),
+        Some(root_fs_temp_path),
+    )
+    .unwrap();
+
+    assert_eq!(result.0, Some("subvol-linux".to_string()));
+    assert_eq!(result.1, Some("2.0".to_string()));
+    assert_eq!(result.2, Some("Subvol Linux 2.0".to_string()));
+    assert_eq!(result.3, Some("subvol-image".to_string()));
+}
+
+#[test]
+fn test_read_os_release_missing_in_subvol() {
+    let root_fs_temp_dir = TempDir::new().expect("Failed to create temp dir");
+    let root_fs_temp_path = root_fs_temp_dir.path();
+    let subvol_path = root_fs_temp_path.join(".snapshots/1/snapshot");
+    std::fs::create_dir_all(&subvol_path).unwrap();
+
+    let root_usr_lib_os_release = root_fs_temp_path.join("usr/lib/os-release");
+    let root_etc_os_release = root_fs_temp_path.join("etc/os-release");
+
+    std::fs::create_dir_all(root_usr_lib_os_release.parent().unwrap()).unwrap();
+    std::fs::create_dir_all(root_etc_os_release.parent().unwrap()).unwrap();
+    let result = read_os_release(
+        Some(&PathBuf::from("/.snapshots/1/snapshot")),
+        Some(root_fs_temp_path),
+    );
+
+    assert!(result.is_err(), "Expected read_os_release function to fail")
+}
+
+#[test]
+fn test_read_machine_id_default_location() {
+    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    let temp_path = temp_dir.path();
+
+    let machine_id_path = temp_path.join("etc/machine-id");
+
+    fs::create_dir_all(machine_id_path.parent().unwrap()).unwrap();
+
+    let mut file = File::create(&machine_id_path).unwrap();
+    writeln!(file, "123456789abcdef").unwrap();
+
+    let transactional_status_path = temp_path.join("proc/mounts");
+    fs::create_dir_all(transactional_status_path.parent().unwrap()).unwrap();
+    let mut mounts_file = File::create(&transactional_status_path).unwrap();
+    writeln!(mounts_file, "").unwrap();
+
+    let result = read_machine_id(None, None, Some(temp_path)).unwrap();
+
+    assert_eq!(result, "123456789abcdef");
+}
+
+#[test]
+fn test_read_machine_id_in_subvol() {
+    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    let temp_path = temp_dir.path();
+
+    let subvol_path = Path::new(".snapshots/1/snapshot");
+    fs::create_dir_all(&subvol_path).unwrap();
+
+    let machine_id_path = temp_path.join(subvol_path).join("etc/machine-id");
+    fs::create_dir_all(machine_id_path.parent().unwrap()).unwrap();
+    let transactional_status_path = temp_path.join("proc/mounts");
+    fs::create_dir_all(transactional_status_path.parent().unwrap()).unwrap();
+    let mut mounts_file = File::create(&transactional_status_path).unwrap();
+    writeln!(mounts_file, "").unwrap();
+
+    let mut file = File::create(&machine_id_path).unwrap();
+    writeln!(file, "987654321fedcba").unwrap();
+
+    let result = read_machine_id(Some(&subvol_path), Some(1), Some(temp_path)).unwrap();
+
+    assert_eq!(result, "987654321fedcba");
+}
+
+#[test]
+fn test_read_machine_id_overlayfs_location() {
+    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    let temp_path = temp_dir.path();
+
+    let overlay_path = temp_path.join("var/lib/overlay/1/etc/machine-id");
+    fs::create_dir_all(overlay_path.parent().unwrap()).unwrap();
+
+    let mut file = File::create(&overlay_path).unwrap();
+    writeln!(file, "overlayfs12345").unwrap();
+
+    // Simulate that the system is transactional
+    let transactional_status_path = temp_path.join("proc/mounts");
+    fs::create_dir_all(transactional_status_path.parent().unwrap()).unwrap();
+    let mut mounts_file = File::create(&transactional_status_path).unwrap();
+    writeln!(mounts_file, "overlayfs /etc overlayfs rw,relatime,lowerdir=/var/lib/overlay/1/etc,upperdir=/etc/upper,workdir=/etc/work 0 0").unwrap();
+
+    let result = read_machine_id(None, Some(1), Some(temp_path)).unwrap();
+
+    assert_eq!(result, "overlayfs12345");
+}
+
+#[test]
+fn test_read_machine_id_missing() {
+    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    let temp_path = temp_dir.path();
+
+    // No machine ID files are created in this test
+
+    let result = read_machine_id(None, None, Some(temp_path));
+
+    assert!(result.is_err(), "Expected read_machine_id function to fail");
+}
+
+#[test]
+fn test_default_entry_token_with_entry_token_file() {
+    let temp_dir = TempDir::new().unwrap();
+    let temp_path = temp_dir.path();
+    let custom_usr_lib_os_release = temp_path.join("usr/lib/os-release");
+    let custom_etc_os_release = temp_path.join("etc/os-release");
+
+    std::fs::create_dir_all(custom_usr_lib_os_release.parent().unwrap()).unwrap();
+    std::fs::create_dir_all(custom_etc_os_release.parent().unwrap()).unwrap();
+
+    let mut file = File::create(&custom_usr_lib_os_release).unwrap();
+    writeln!(file, "ID=custom-linux").unwrap();
+    writeln!(file, "VERSION_ID=1.0").unwrap();
+    writeln!(file, "PRETTY_NAME=\"Custom Linux 1.0\"").unwrap();
+
+    let entry_token_path = temp_dir.path().join("etc/kernel/entry-token");
+    fs::create_dir_all(entry_token_path.parent().unwrap()).unwrap();
+    fs::write(&entry_token_path, "custom-entry-token\n").unwrap();
+
+    let transactional_status_path = temp_path.join("proc/mounts");
+    fs::create_dir_all(transactional_status_path.parent().unwrap()).unwrap();
+    let mut mounts_file = File::create(&transactional_status_path).unwrap();
+    writeln!(mounts_file, "").unwrap();
+
+    let machine_id_path = temp_path.join("etc/machine-id");
+
+    fs::create_dir_all(machine_id_path.parent().unwrap()).unwrap();
+
+    let mut file = File::create(&machine_id_path).unwrap();
+    writeln!(file, "123456789abcdef").unwrap();
+
+    let result = settle_system_tokens(None, None, None, Some(temp_dir.path())).unwrap();
+
+    assert_eq!(result.0, "custom-entry-token");
+}
+
+#[test]
+fn test_default_entry_token_fallback_to_machine_id() {
+    let temp_dir = TempDir::new().unwrap();
+    let temp_path = temp_dir.path();
+    let custom_usr_lib_os_release = temp_path.join("usr/lib/os-release");
+    let custom_etc_os_release = temp_path.join("etc/os-release");
+
+    std::fs::create_dir_all(custom_usr_lib_os_release.parent().unwrap()).unwrap();
+    std::fs::create_dir_all(custom_etc_os_release.parent().unwrap()).unwrap();
+
+    let mut file = File::create(&custom_usr_lib_os_release).unwrap();
+    writeln!(file, "ID=custom-linux").unwrap();
+    writeln!(file, "VERSION_ID=1.0").unwrap();
+    writeln!(file, "PRETTY_NAME=\"Custom Linux 1.0\"").unwrap();
+    let machine_id_path = temp_dir.path().join("etc/machine-id");
+    fs::create_dir_all(machine_id_path.parent().unwrap()).unwrap();
+    fs::write(&machine_id_path, "machine-id-value").unwrap();
+
+    let transactional_status_path = temp_path.join("proc/mounts");
+    fs::create_dir_all(transactional_status_path.parent().unwrap()).unwrap();
+    let mut mounts_file = File::create(&transactional_status_path).unwrap();
+    writeln!(mounts_file, "").unwrap();
+
+    let result = settle_system_tokens(None, None, None, Some(temp_dir.path())).unwrap();
+
+    assert_eq!(result.0, "machine-id-value");
+}
+
+#[test]
+fn test_entry_token_set_to_machine_id() {
+    let temp_dir = TempDir::new().unwrap();
+    let machine_id_path = temp_dir.path().join("etc/machine-id");
+    fs::create_dir_all(machine_id_path.parent().unwrap()).unwrap();
+    fs::write(&machine_id_path, "machine-id-value").unwrap();
+    let temp_path = temp_dir.path();
+    let custom_usr_lib_os_release = temp_path.join("usr/lib/os-release");
+    let custom_etc_os_release = temp_path.join("etc/os-release");
+
+    std::fs::create_dir_all(custom_usr_lib_os_release.parent().unwrap()).unwrap();
+    std::fs::create_dir_all(custom_etc_os_release.parent().unwrap()).unwrap();
+
+    let mut file = File::create(&custom_usr_lib_os_release).unwrap();
+    writeln!(file, "ID=custom-linux").unwrap();
+    writeln!(file, "VERSION_ID=1.0").unwrap();
+    writeln!(file, "PRETTY_NAME=\"Custom Linux 1.0\"").unwrap();
+
+    let transactional_status_path = temp_path.join("proc/mounts");
+    fs::create_dir_all(transactional_status_path.parent().unwrap()).unwrap();
+    let mut mounts_file = File::create(&transactional_status_path).unwrap();
+    writeln!(mounts_file, "").unwrap();
+
+    let result =
+        settle_system_tokens(None, None, Some("machine-id"), Some(temp_dir.path())).unwrap();
+
+    assert_eq!(result.0, "machine-id-value");
+}
+
+#[test]
+fn test_entry_token_set_to_os_id() {
+    let temp_dir = TempDir::new().unwrap();
+    let temp_path = temp_dir.path();
+    let os_release_path = temp_dir.path().join("etc/os-release");
+    fs::create_dir_all(os_release_path.parent().unwrap()).unwrap();
+    fs::write(&os_release_path, "ID=custom-os\n").unwrap();
+
+    let transactional_status_path = temp_path.join("proc/mounts");
+    fs::create_dir_all(transactional_status_path.parent().unwrap()).unwrap();
+    let mut mounts_file = File::create(&transactional_status_path).unwrap();
+    writeln!(mounts_file, "").unwrap();
+    let machine_id_path = temp_dir.path().join("etc/machine-id");
+    fs::create_dir_all(machine_id_path.parent().unwrap()).unwrap();
+    fs::write(&machine_id_path, "machine-id-value").unwrap();
+
+    let result = settle_system_tokens(None, None, Some("os-id"), Some(temp_dir.path())).unwrap();
+
+    assert_eq!(result.0, "custom-os");
+}
+
+#[test]
+fn test_entry_token_set_to_os_image() {
+    let temp_dir = TempDir::new().unwrap();
+    let temp_path = temp_dir.path();
+    let os_release_path = temp_dir.path().join("etc/os-release");
+    fs::create_dir_all(os_release_path.parent().unwrap()).unwrap();
+    fs::write(&os_release_path, "IMAGE_ID=custom-image\n").unwrap();
+
+    let transactional_status_path = temp_path.join("proc/mounts");
+    fs::create_dir_all(transactional_status_path.parent().unwrap()).unwrap();
+    let mut mounts_file = File::create(&transactional_status_path).unwrap();
+    writeln!(mounts_file, "").unwrap();
+    let machine_id_path = temp_dir.path().join("etc/machine-id");
+    fs::create_dir_all(machine_id_path.parent().unwrap()).unwrap();
+    fs::write(&machine_id_path, "machine-id-value").unwrap();
+
+    let result = settle_system_tokens(None, None, Some("os-image"), Some(temp_dir.path())).unwrap();
+
+    assert_eq!(result.0, "custom-image");
+}
+
+#[test]
+fn test_error_when_os_id_missing() {
+    let temp_dir = TempDir::new().unwrap();
+    let os_release_path = temp_dir.path().join("etc/os-release");
+    fs::create_dir_all(os_release_path.parent().unwrap()).unwrap();
+    fs::write(&os_release_path, "NAME=Custom OS\n").unwrap();
+
+    let temp_path = temp_dir.path();
+    let transactional_status_path = temp_path.join("proc/mounts");
+    fs::create_dir_all(transactional_status_path.parent().unwrap()).unwrap();
+    let mut mounts_file = File::create(&transactional_status_path).unwrap();
+    writeln!(mounts_file, "").unwrap();
+    let machine_id_path = temp_dir.path().join("etc/machine-id");
+    fs::create_dir_all(machine_id_path.parent().unwrap()).unwrap();
+    fs::write(&machine_id_path, "machine-id-value").unwrap();
+
+    let result = settle_system_tokens(None, None, Some("os-id"), Some(temp_dir.path()));
+
+    assert!(
+        result.is_err(),
+        "Expected an error due to missing ID in os-release"
+    );
+}
+
+#[test]
+fn test_error_when_os_image_id_missing() {
+    let temp_dir = TempDir::new().unwrap();
+    let os_release_path = temp_dir.path().join("etc/os-release");
+    fs::create_dir_all(os_release_path.parent().unwrap()).unwrap();
+    fs::write(&os_release_path, "ID=custom-os\n").unwrap();
+
+    let temp_path = temp_dir.path();
+    let transactional_status_path = temp_path.join("proc/mounts");
+    fs::create_dir_all(transactional_status_path.parent().unwrap()).unwrap();
+    let mut mounts_file = File::create(&transactional_status_path).unwrap();
+    writeln!(mounts_file, "").unwrap();
+    let machine_id_path = temp_dir.path().join("etc/machine-id");
+    fs::create_dir_all(machine_id_path.parent().unwrap()).unwrap();
+    fs::write(&machine_id_path, "machine-id-value").unwrap();
+
+    let result = settle_system_tokens(None, None, Some("os-image"), Some(temp_dir.path()));
+
+    assert!(
+        result.is_err(),
+        "Expected an error due to missing IMAGE_ID in os-release"
     );
 }

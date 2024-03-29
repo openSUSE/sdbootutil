@@ -9,7 +9,7 @@ fn main() -> Result<(), String> {
         _root_uuid,
         _root_device,
         firmware_arch,
-        _entry_token,
+        _arg_entry_token,
         boot_root,
         boot_dst,
         _image,
@@ -19,12 +19,8 @@ fn main() -> Result<(), String> {
         _all,
         shimdir,
         cmd,
-    ) = lib::process_args_and_get_system_info().map_err(|e| {
-        format!(
-            "An error occurred while fetching system information: {}",
-            e
-        )
-    })?;
+    ) = lib::process_args_and_get_system_info()
+        .map_err(|e| format!("An error occurred while fetching system information: {}", e))?;
 
     lib::test_functions();
 
@@ -32,7 +28,9 @@ fn main() -> Result<(), String> {
         Some(Commands::Kernels {}) => lib::command_kernels(),
         Some(Commands::Snapshots {}) => lib::command_snapshots(),
         Some(Commands::Entries {}) => lib::command_entries(),
-        Some(Commands::Bootloader {}) => lib::command_bootloader(root_snapshot, &firmware_arch, None),
+        Some(Commands::Bootloader {}) => {
+            lib::command_bootloader(root_snapshot, &firmware_arch, None)
+        }
         Some(Commands::AddKernel { kernel_version }) => lib::command_add_kernel(&kernel_version),
         Some(Commands::AddAllKernels {}) => lib::command_add_all_kernels(),
         Some(Commands::Mkinitrd {}) => lib::command_mkinitrd(),
