@@ -328,14 +328,14 @@ find_conf_file() {
 settle_entry_token()
 {
 	local snapshot="$1"
-	set_os_release "${snapshot}"
-	set_machine_id "${snapshot}"
-	[ -n "$machine_id" ] || err "Couldn't determine machine-id"
+	set_os_release "$snapshot"
+	set_machine_id "$snapshot"
 	case "$arg_entry_token" in
 		""|auto)
 			if [ -s '/etc/kernel/entry-token' ]; then
 				read -r entry_token < '/etc/kernel/entry-token'
 			else
+				[ -n "$machine_id" ] || err "Couldn't determine machine-id"
 				entry_token="$machine_id"
 				# bootctl has more here in case the machine id
 				# is random falls back to trying IMAGE_ID and
@@ -343,7 +343,10 @@ settle_entry_token()
 				# a valid machine-id
 			fi
 			;;
-		machine-id) entry_token="$machine_id" ;;
+		machine-id)
+			[ -n "$machine_id" ] || err "Couldn't determine machine-id"
+			entry_token="$machine_id"
+			;;
 		os-id)
 			# shellcheck disable=SC2154
 			entry_token="$os_release_ID"
