@@ -325,10 +325,48 @@ find_conf_file() {
 	return 1
 }
 
+settle_entry_token()
+{
+	local snapshot="$1"
+	set_os_release "$snapshot"
+	set_machine_id "$snapshot"
+	case "$arg_entry_token" in
+		""|auto)
+			if [ -s '/etc/kernel/entry-token' ]; then
+				read -r entry_token < '/etc/kernel/entry-token'
+			else
+				[ -n "$machine_id" ] || err "Couldn't determine machine-id"
+				entry_token="$machine_id"
+				# bootctl has more here in case the machine id
+				# is random falls back to trying IMAGE_ID and
+				# ID, only them machine id. We assume there is
+				# a valid machine-id
+			fi
+			;;
+		machine-id)
+			[ -n "$machine_id" ] || err "Couldn't determine machine-id"
+			entry_token="$machine_id"
+			;;
+		os-id)
+			# shellcheck disable=SC2154
+			entry_token="$os_release_ID"
+			[ -n "$entry_token" ] || err "Missing ID"
+			;;
+		os-image)
+			# shellcheck disable=SC2154
+			entry_token="$os_release_IMAGE_ID"
+			[ -n "$entry_token" ] || err "Missing IMAGE_ID"
+			;;
+		*) entry_token="$arg_entry_token" ;;
+	esac
+	return 0
+}
+
 remove_kernel()
 {
 	local snapshot="$1"
 	local kernel_version="$2"
+	settle_entry_token "${snapshot}"
 	local id="$entry_token-$kernel_version${snapshot:+-$snapshot}.conf"
 	run_command_output bootctl unlink "$id"
 
@@ -387,6 +425,44 @@ set_snapper_title_and_sortkey()
 	sort_key="snapper-$sort_key"
 }
 
+set_os_release()
+{
+	local snapshot="$1"
+	local subvol=""
+	[ -z "$snapshot" ] || subvol="${subvol_prefix}/.snapshots/${snapshot}/snapshot"
+	os_release_files=(
+		"${subvol#"${subvol_prefix}"}/usr/lib/os-release"
+		"${subvol#"${subvol_prefix}"}/etc/os-release"
+	)
+
+	for file in "${os_release_files[@]}"; do
+		[ -f "$file" ] || continue
+		eval $(sed -ne '/^[A-Z_]\+=/s/^/os_release_/p' < "$file")
+		break
+	done
+}
+
+set_machine_id()
+{
+	local snapshot="$1"
+	local subvol=""
+	[ -z "$snapshot" ] || subvol="${subvol_prefix}/.snapshots/${snapshot}/snapshot"
+	machine_id_files=()
+	if is_transactional; then
+		[ -n "$snapshot" ] && machine_id_files+=("/var/lib/overlay/$snapshot/etc/machine-id")
+	fi
+	machine_id_files+=(
+		"${subvol#"${subvol_prefix}"}/etc/machine-id"
+	)
+
+	for file in "${machine_id_files[@]}"; do
+		if [ -s "$file" ]; then
+			read -r machine_id < "$file"
+			break
+		fi
+	done
+}
+
 reuse_initrd() {
 	local snapshot="$1"
 	local subvol="$2"
@@ -394,6 +470,7 @@ reuse_initrd() {
 	local conf
 
 	[ -z "$arg_no_reuse_initrd" ] || return 1
+	settle_entry_token "${snapshot}"
 
 	conf="$(find_conf_file "$kernel_version" "${snapshot}")"
 	local find_conf_status=$?
@@ -403,6 +480,7 @@ reuse_initrd() {
 		# to avoid expensive regeneration
 		detect_parent "$subvol"
 		if [ -n "$parent_subvol" ]; then
+			settle_entry_token "$parent_snapshot"
 			conf="$(find_conf_file "$kernel_version" "$parent_snapshot")"
 			find_conf_status=$?
 		fi
@@ -417,6 +495,7 @@ reuse_initrd() {
 		done < "$conf"
 		[ -z "$dstinitrd" ] || return 0
 	fi
+
 	return 1
 }
 
@@ -462,6 +541,7 @@ install_kernel()
 	[ -e "$src" ] || err "Can't find $src"
 
 	calc_chksum "$src"
+	settle_entry_token "${snapshot}"
 	local dst="/$entry_token/$kernel_version/linux-$chksum"
 
 	local initrd="${src%/*}/initrd"
@@ -825,8 +905,6 @@ show_snapper()
 					d --textbox "$tmpfile" 0 0
 					;;
 				entries)
-					#read -r MACHINE_ID < /etc/machine-id
-					#update_entries jq "[.[]|select(.machineId==\"$MACHINE_ID\")|select(has(\"options\"))|select(.options|match(\"${subvol_prefix}/.snapshots/$n/snapshot\"))]"
 					update_entries_for_snapshot "$n"
 					show_entries "Entries for Snapshot $n"
 					;;
@@ -876,6 +954,7 @@ update_kernels()
 	stale_kernels=()
 	is_bootable=
 	find_kernels "$snapshot"
+	settle_entry_token "${snapshot}"
 	for kv in "${!found_kernels[@]}"; do
 		installed_kernels["/$entry_token/$kv/linux-${found_kernels[$kv]}"]=''
 	done
@@ -1089,6 +1168,7 @@ install_bootloader()
 		prefix="/.snapshots/${root_snapshot}/snapshot"
 	fi
 	local bootloader bldr_name blkpart drive partno
+	settle_entry_token "${snapshot}"
 
 	bootloader=$(find_bootloader "$snapshot")
 	bldr_name=$(bootloader_name "$snapshot")
@@ -1161,37 +1241,6 @@ install_bootloader()
 
 	# This action will require to update the PCR predictions
 	update_predictions=1
-}
-
-settle_entry_token()
-{
-	case "$arg_entry_token" in
-		"") [ -n "$entry_token" ] || entry_token="$machine_id" ;;
-		auto)
-			if [ -s '/etc/kernel/entry-token' ]; then
-				read -r entry_token < '/etc/kernel/entry-token'
-			else
-				entry_token="$machine_id"
-				# bootctl has more here in case the machine id
-				# is random falls back to trying IMAGE_ID and
-				# ID, only them machine id. We assume there is
-				# a valid machine-id
-			fi
-			;;
-		machine-id) entry_token="$machine_id" ;;
-		os-id)
-			# shellcheck disable=SC2154
-			entry_token="$os_release_ID"
-			[ -n "$entry_token" ] || err "Missing ID"
-			;;
-		os-image)
-			# shellcheck disable=SC2154
-			entry_token="$os_release_IMAGE_ID"
-			[ -n "$entry_token" ] || err "Missing IMAGE_ID"
-			;;
-		*) entry_token="$arg_entry_token" ;;
-	esac
-	return 0
 }
 
 hex_to_binary()
@@ -1570,12 +1619,6 @@ case "$1" in
 	*) err "unknown command $1" ;;
 esac
 
-for i in /etc/os-release /usr/lib/os-release; do
-	[ -f "$i" ] || continue
-	eval $(sed -ne '/^[A-Z_]\+=/s/^/os_release_/p' < "$i")
-	break
-done
-
 [ -n "$arg_esp_path" ] && export SYSTEMD_ESP_PATH="$arg_esp_path"
 
 # XXX: bootctl should have json output for that too
@@ -1588,32 +1631,27 @@ if [ "$(stat -f -c %T /)" = "btrfs" ] && [ -d /.snapshots ]; then
 	root_subvol=$(btrfs subvol show / 2>/dev/null|head -1)
 	subvol_prefix="${root_subvol%/.snapshots/*}"
 fi
-[ -s /etc/machine-id ] && read -r machine_id < /etc/machine-id
+root_snapshot=""
+if [ -n "$have_snapshots" ]; then
+	root_snapshot="${root_subvol#"${subvol_prefix}"/.snapshots/}"
+	root_snapshot="${root_snapshot%/snapshot}"
+fi
 
 if [ -n "$arg_esp_path" ] && [ "$boot_root" != "$arg_esp_path" ]; then
 	err "mismatch of esp path"
 fi
 [ -n "$arg_arch" ] && firmware_arch="$arg_arch"
-settle_entry_token
 
 [ -n "$boot_root" ] || err "No ESP detected. Legacy system?"
 [ -n "$root_uuid" ] || err "Can't determine root UUID"
 [ -n "$root_subvol" ] || [ -z "$have_snapshots" ] || err "Can't determine root subvolume"
 [ -n "$root_device" ] || err "Can't determine root device"
-[ -n "$entry_token" ] || err "No entry token. sd-boot not installed?"
 [ -n "$firmware_arch" ] || err "Can't determine firmware arch"
 case "$firmware_arch" in
 	x64) image=vmlinuz ;;
 	aa64) image=Image ;;
 	*) err "Unsupported architecture $firmware_arch" ;;
 esac
-
-root_snapshot=""
-
-if [ -n "$have_snapshots" ]; then
-	root_snapshot="${root_subvol#"${subvol_prefix}"/.snapshots/}"
-	root_snapshot="${root_snapshot%/snapshot}"
-fi
 
 # XXX: Unify both in /EFI/opensuse?
 if is_sdboot; then
