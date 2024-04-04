@@ -1592,6 +1592,15 @@ while true ; do
         esac
 done
 
+if [ -z "$SYSTEMD_LOG_LEVEL" -a -n "$verbose" ]; then
+	if [ "$verbose" -gt 1 ]; then
+		SYSTEMD_LOG_LEVEL=debug
+	else
+		SYSTEMD_LOG_LEVEL=info
+	fi
+	export SYSTEMD_LOG_LEVEL
+fi
+
 case "$1" in
 	install|needs-update|update|force-update|add-kernel|remove-kernel|set-default-snapshot|add-all-kernels|mkinitrd|remove-all-kernels|is-installed|list-snapshots|list-entries|list-kernels|is-bootable|update-predictions|bootloader) ;;
 	kernels|snapshots|entries|"") stty_size; interactive=1 ;;
