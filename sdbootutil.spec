@@ -38,6 +38,9 @@ Requires:       systemd-boot
 Requires:       jq
 Requires:       sed
 Requires:       pcr-oracle
+# While systemd-pcrlock is in experimental
+Requires:       systemd-experimental
+Requires:       dracut-pcr-signature
 Supplements:    (systemd-boot and shim)
 Requires:       (%{name}-snapper if (snapper and btrfsprogs))
 ExclusiveArch:  aarch64 ppc64le riscv64 x86_64
