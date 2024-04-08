@@ -1344,7 +1344,7 @@ select_entries_for_prediction()
 	declare -A snapshots
 	local id
 	while read -r id; do
-	    snapshots[$id]=1
+		snapshots[$id]=1
 	done < <(jq -r '.root[]|select(.active==true or .default==true)|.number' "$snapperfile")
 
 	if is_transactional && [ -e "${state_file}" ]; then
@@ -1366,6 +1366,26 @@ select_entries_for_prediction()
 	update_entries_for_snapshot "$re"
 }
 
+
+# TODO: Maybe share this code outside
+pcrlock_manual_initrd() {
+	local pcr="$1"
+	local pcrlock="$2"
+	local initrd="$3"
+
+	echo -n '{"records":[{"pcr":'"$pcr"',"digests":[' > "$pcrlock"
+	local separator=0
+	local digest
+	for a in sha1 sha256 sha384 sha512; do
+		[ "$separator" = "0" ] || echo -n "," >> "$pcrlock"
+		separator=1
+		hash "${a}sum" || continue
+		read -r digest _ < <("${a}sum" "$initrd")
+		echo -n '{"hashAlg":"'"$a"'","digest":"'"$digest"'"}' >> "$pcrlock"
+	done
+	echo ']}]}' >> "$pcrlock"
+}
+
 # TODO: Maybe share this code outside
 pcrlock_cmdline_initrd() {
 	local cmdline="$1"
@@ -1382,7 +1402,7 @@ pcrlock_cmdline_initrd() {
 	pcrlock \
 		lock-kernel-initrd \
 		--pcrlock="$tmpdir/initrd.pcrlock" \
-		"${boot_root}/$initrd"
+		"${boot_root}/$initrd" 2> /dev/null || pcrlock_manual_initrd 9 "$tmpdir/initrd.pcrlock" "${boot_root}/$initrd"
 	jq --slurp '{"records": [.[].records[0]]}' \
 	   "$tmpdir/cmdline.pcrlock" \
 	   "$tmpdir/initrd.pcrlock" \
