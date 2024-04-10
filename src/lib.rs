@@ -4,7 +4,10 @@ pub mod io;
 pub mod ui;
 pub mod utils;
 
-use fs::{bootloader_name, bootloader_needs_update, is_installed, settle_system_tokens};
+use fs::{
+    bootloader_name, bootloader_needs_update, install_bootloader, is_installed,
+    settle_system_tokens,
+};
 use io::log_info;
 use std::path::{Path, PathBuf};
 
@@ -363,7 +366,7 @@ pub fn command_is_bootable() -> Result<bool, String> {
 ///     None,
 /// ).is_ok();
 ///
-/// assert!(installed, "Expected systemd-boot to not be detected as installed");
+/// assert!(!installed, "Expected systemd-boot to not be detected as installed");
 /// ```
 pub fn command_is_installed(
     snapshot: Option<u64>,
@@ -374,6 +377,13 @@ pub fn command_is_installed(
     filename: Option<PathBuf>,
     override_prefix: Option<&Path>,
 ) -> Result<bool, String> {
+    let bootloader_name =
+        bootloader_name(snapshot, firmware_arch, override_prefix).map_err(|e| {
+            format!(
+                "Is Installed - Can't determine possible bootloader name: {}",
+                e
+            )
+        })?;
     let result = is_installed(
         snapshot,
         firmware_arch,
@@ -386,10 +396,18 @@ pub fn command_is_installed(
     match result {
         Ok(bool) => {
             if bool {
-                log_info("Bootloader was installed using this tool", 0);
+                let message = format!(
+                    "Bootloader '{}' was installed using this tool",
+                    bootloader_name
+                );
+                log_info(&message, 0);
                 Ok(true)
             } else {
-                log_info("Bootloader was not installed using this tool", 0);
+                let message = format!(
+                    "Bootloader '{}' was not installed using this tool",
+                    bootloader_name
+                );
+                log_info(&message, 0);
                 Ok(false)
             }
         }
@@ -400,24 +418,85 @@ pub fn command_is_installed(
     }
 }
 
-/// Executes the `Install` command.
+/// Executes the `install` command to set up the bootloader.
 ///
-/// This function logs the action and returns a predefined status code.
+/// This command facilitates the installation of a bootloader, supporting configurations for various architectures and boot environments.
+/// It utilizes several internal functions to perform tasks such as copying necessary files and updating configurations.
+///
+/// # Arguments
+///
+/// * `snapshot` - An optional snapshot identifier for systems utilizing Btrfs snapshots.
+/// * `firmware_arch` - The architecture of the system's firmware.
+/// * `shimdir` - The directory containing bootloader shim files.
+/// * `boot_root` - The root directory of the boot partition.
+/// * `boot_dst` - The destination directory within the boot partition for bootloader files.
+/// * `entry_token` - A unique token associated with the bootloader entry.
+/// * `arg_no_variables` - Flag indicating whether EFI variables should be skipped.
+/// * `arg_no_random_seed` - Flag indicating whether the random seed should be skipped.
+/// * `override_prefix` - Optional path prefix for operations in a different filesystem root, such as a chroot environment.
 ///
 /// # Returns
 ///
-/// Always returns `14`, indicating a specific status after execution.
+/// - `Ok(true)` upon successful execution of the install command.
+/// - `Err(String)` with an error message if the installation fails.
+///
+/// # Errors
+///
+/// Errors may occur due to issues with copying files, updating configurations, or interacting with the EFI system partition.
 ///
 /// # Examples
 ///
 /// ```
-/// let status = sdbootutil::command_install().unwrap();
-/// assert_eq!(status, true);
+/// let result = sdbootutil::command_install(
+///     Some(0),
+///     "x64",
+///     "/usr/share/efi/x86_64",
+///     "/boot/efi",
+///     "EFI/systemd",
+///     "opensuse-tumbleweed".to_string(),
+///     false,
+///     true,
+///     None
+/// );
+/// assert!(result.is_err(), "Expected an error from command_needs_update");
 /// ```
-pub fn command_install() -> Result<bool, String> {
-    let message = "Install command called";
-    log_info(message, 1);
-    Ok(true)
+pub fn command_install(
+    snapshot: Option<u64>,
+    firmware_arch: &str,
+    shimdir: &str,
+    boot_root: &str,
+    boot_dst: &str,
+    entry_token: String,
+    arg_no_variables: bool,
+    arg_no_random_seed: bool,
+    override_prefix: Option<&Path>,
+) -> Result<bool, String> {
+    let bootloader_name = bootloader_name(snapshot, firmware_arch, override_prefix)
+        .map_err(|e| format!("Install - Can't determine bootloader name: {}", e))?;
+    let result = install_bootloader(
+        snapshot,
+        firmware_arch,
+        shimdir,
+        boot_root,
+        boot_dst,
+        entry_token,
+        arg_no_variables,
+        arg_no_random_seed,
+        override_prefix,
+    );
+    match result {
+        Ok(()) => {
+            let message = format!("Bootloader '{}' successfully installed", bootloader_name);
+            log_info(&message, 0);
+            Ok(true)
+        }
+        Err(e) => {
+            let message = format!("Can't determine if bootloader needs update: {}", e);
+            Err(message)
+        }
+    }
+
+    //THIS STILL NEEDS TO UPDATE PREDICTIONS!!
 }
 
 /// Executes the `NeedsUpdate` command to check if the bootloader needs an update.
@@ -553,46 +632,31 @@ pub fn command_update_predictions() -> Result<bool, String> {
     Ok(true)
 }
 
-/// Gathers comprehensive system information crucial for bootloader management and system configuration.
+/// Processes command-line arguments and gathers essential system information required for bootloader management.
 ///
-/// This function compiles essential system details, including the Btrfs snapshot information (if available),
-/// directory paths for bootloader files, firmware architecture, and bootloader entry token. It validates root
-/// permissions before proceeding to ensure the required system information can be safely accessed. The function
-/// uses `io::get_bootctl_info` and `io::get_root_filesystem_info` to gather boot and filesystem information,
-/// `fs::get_root_snapshot_info` for snapshot-related details, and `fs::determine_boot_dst` for the boot destination.
-/// Command-line arguments are processed to override default values where provided.
+/// This function consolidates various system details crucial for configuring and managing the bootloader.
+/// It covers aspects such as filesystem type, snapshot information, boot configurations, and user-specified options.
+///
+/// # Arguments
+///
+/// * `override_prefix` - Optional `Path` reference to override the default system root,
+/// useful in scenarios like chroot environments or testing.
 ///
 /// # Returns
 ///
-/// A `Result` with either:
-/// - An `Ok` variant containing a tuple with:
-///   - `root_snapshot`: Optional snapshot identifier (`u64`), present if the system uses Btrfs snapshots.
-///   - `root_prefix`: Optional prefix of the root filesystem (`String`), present if snapshots are used.
-///   - `root_subvol`: Optional subvolume of the root filesystem (`String`), present if snapshots are used.
-///   - `root_uuid`: UUID of the root filesystem (`String`), obtained from `findmnt`.
-///   - `root_device`: Source device of the root filesystem (`String`), obtained from `findmnt`.
-///   - `firmware_arch`: Firmware architecture (`String`), either specified by the user or obtained from `bootctl`.
-///   - `entry_token`: Bootloader entry token (`String`), either specified by the user or obtained from `bootctl`.
-///   - `boot_dst`: Destination directory for bootloader files (`String`), determined based on the system configuration.
-///   - `boot_root`: Path of the ESP partition (`String`), obtained from `bootctl`.
-///   - `image`: Bootloader image file name (`String`), either specified by the user or derived from the firmware architecture.
-///   - `no_variables`, `regenerate_initrd`, `no_random_seed`, `all`: Boolean flags reflecting command-line options.
-///   - `shimdir`: Directory containing bootloader shim files (`String`), derived from a standard location and architecture.
-///
-/// - An `Err` variant with a descriptive error message if any step in gathering information fails.
+/// - `Ok((Option<u64>, Option<String>, Option<String>, String, String, String, Option<u64>, String,
+/// String, String, String, bool, bool, bool, bool, String, Option<cli::Commands>))`
+/// containing detailed system information and user options.
+/// - `Err(String)` with an error message if any part of the information gathering or argument processing fails.
 ///
 /// # Errors
 ///
-/// This function may return an error if:
-/// - Root permissions are not granted.
-/// - Essential system information (e.g., from `bootctl` or `findmnt`) cannot be obtained.
-/// - The system uses Btrfs snapshots, but snapshot-related information cannot be retrieved.
-/// - The boot destination directory cannot be determined.
+/// Errors can arise from insufficient permissions, failure to read system configurations, or invalid command-line arguments.
 ///
 /// # Example
 ///
 /// ```no_run
-/// let system_info = sdbootutil::process_args_and_get_system_info()
+/// let system_info = sdbootutil::process_args_and_get_system_info(None)
 ///     .expect("Failed to gather system information");
 ///
 /// let (
@@ -617,7 +681,9 @@ pub fn command_update_predictions() -> Result<bool, String> {
 /// ```
 /// Note that this function should be used with care, as it relies on obtaining root privileges
 /// and accessing various system paths and configuration details.
-pub fn process_args_and_get_system_info() -> Result<
+pub fn process_args_and_get_system_info(
+    override_prefix: Option<&Path>,
+) -> Result<
     (
         Option<u64>,
         Option<String>,
@@ -639,7 +705,7 @@ pub fn process_args_and_get_system_info() -> Result<
     ),
     String,
 > {
-    if let Err(e) = cli::ensure_root_permissions() {
+    if let Err(e) = cli::ensure_root_permissions(override_prefix) {
         let message = format!("Failed to get root privileges: {}", e);
         return Err(message);
     }
@@ -650,14 +716,16 @@ pub fn process_args_and_get_system_info() -> Result<
         std::env::set_var("SYSTEMD_ESP_PATH", path);
     }
 
-    let has_snapshots =
-        fs::is_snapshotted(None).map_err(|e| format!("Couldn't find out if snapshotted: {}", e))?;
+    let prefix_str = override_prefix.and_then(|pref| pref.to_str());
+    let has_snapshots = fs::is_snapshotted(prefix_str)
+        .map_err(|e| format!("Couldn't find out if snapshotted: {}", e))?;
     let (default_firmware_arch, default_entry_token, boot_root) =
-        io::get_bootctl_info().map_err(|e| format!("Couldn't get bootctl info: {}", e))?;
-    let (root_uuid, root_device) = io::get_root_filesystem_info()
+        io::get_bootctl_info(override_prefix)
+            .map_err(|e| format!("Couldn't get bootctl info: {}", e))?;
+    let (root_uuid, root_device) = io::get_findmnt_output("/", override_prefix)
         .map_err(|e| format!("Couldn't get root filesystem info: {}", e))?;
     let (root_snapshot, root_prefix, root_subvol) = if has_snapshots {
-        fs::get_root_snapshot_info()
+        fs::get_root_snapshot_info(override_prefix)
             .map(|(prefix, snapshot_id, full_path)| {
                 (Some(snapshot_id), Some(prefix), Some(full_path))
             })
@@ -687,7 +755,7 @@ pub fn process_args_and_get_system_info() -> Result<
     let regenerate_initrd = args.regenerate_initrd;
     let no_random_seed = args.no_random_seed;
     let all = args.all;
-    let boot_dst = match fs::determine_boot_dst(root_snapshot, &firmware_arch, None) {
+    let boot_dst = match fs::determine_boot_dst(root_snapshot, &firmware_arch, override_prefix) {
         Ok(dst) => dst.to_string(),
         Err(e) => {
             let message = format!("Failed to determine boot_dst: {}", e);

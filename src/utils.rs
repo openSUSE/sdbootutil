@@ -47,7 +47,6 @@ pub(crate) fn compare_versions(version1: &str, version2: &str) -> bool {
     let (v1_main, v1_pre, v1_build) = parse_version(version1);
     let (v2_main, v2_pre, v2_build) = parse_version(version2);
 
-    // Compare main version numbers
     for (seg1, seg2) in v1_main.iter().zip(v2_main.iter()) {
         if seg1 != seg2 {
             return seg1 < seg2;
@@ -57,7 +56,6 @@ pub(crate) fn compare_versions(version1: &str, version2: &str) -> bool {
         return v1_main.len() < v2_main.len();
     }
 
-    // Compare pre-release versions
     for (seg1, seg2) in v1_pre.iter().zip(v2_pre.iter()) {
         match (seg1.1, seg2.1) {
             (Some(num1), Some(num2)) => {
@@ -79,7 +77,6 @@ pub(crate) fn compare_versions(version1: &str, version2: &str) -> bool {
         return v1_pre.len() < v2_pre.len();
     }
 
-    // Compare build metadata
     for (seg1, seg2) in v1_build.iter().zip(v2_build.iter()) {
         match (seg1.1, seg2.1) {
             (Some(num1), Some(num2)) => {

@@ -1,11 +1,17 @@
-use super::io::{log_info, print_error};
+use super::io::get_findmnt_output;
+
+use super::io::{create_efi_boot_entry, log_info, print_error};
 use libbtrfs::subvolume;
 
 use super::utils;
+use rand::{thread_rng, RngCore};
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::env::consts::ARCH;
 use std::fs;
 use std::fs::File;
+use std::io::BufWriter;
+use std::io::{self, Read, Write};
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use tempfile::TempDir;
@@ -35,7 +41,6 @@ impl RollbackItem {
     pub(crate) fn new(original_path: PathBuf) -> Self {
         RollbackItem { original_path }
     }
-
     /// Performs cleanup actions for the rollback item.
     ///
     /// If a backup file (with a `.bak` extension) exists, this function will attempt to restore the original file from the backup.
@@ -126,11 +131,23 @@ pub(crate) fn reset_rollback_items(rollback_items: &mut Vec<RollbackItem>) {
     rollback_items.clear();
 }
 
-/// Checks if the filesystem type of `/etc` is `overlayfs`.
+/// Determines if the system is operating in a transactional mode by checking the filesystem type of `/etc`.
+///
+/// Transactional environments typically mount `/etc` with `overlayfs`, allowing changes to be atomic and reversible.
+///
+/// # Arguments
+///
+/// * `prefix` - An optional string slice that provides a path prefix, allowing checks in a modified filesystem structure, such as during testing or in a chroot environment.
 ///
 /// # Returns
 ///
-/// `Ok(true)` if the filesystem type is `overlayfs`, `Ok(false)` otherwise, or an `Error` if an instruction fails.
+/// - `Ok(true)` if `/etc` is mounted with `overlayfs`, indicating a transactional system.
+/// - `Ok(false)` if `/etc` is not mounted with `overlayfs`.
+/// - `Err(String)` if an error occurs during the check, with an explanatory message.
+///
+/// # Errors
+///
+/// An error is returned if reading the mount information fails or if the expected mount information cannot be parsed.
 pub(crate) fn is_transactional(prefix: Option<&str>) -> Result<bool, String> {
     let mounts_file_path = match prefix {
         Some(prefix) => PathBuf::from(prefix)
@@ -160,21 +177,35 @@ pub(crate) fn is_transactional(prefix: Option<&str>) -> Result<bool, String> {
 
 /// Retrieves detailed information about the root Btrfs snapshot.
 ///
-/// This function extracts and returns the prefix path, the snapshot ID, and the full snapshot path from the system's
-/// root directory. It's designed to parse the snapshot path to identify these components, crucial for Btrfs snapshot management.
+/// This function is designed to parse the system's root directory to extract information critical for managing Btrfs snapshots.
+/// It identifies the prefix path leading up to the snapshot, the snapshot ID, and the full path of the snapshot itself.
+///
+/// # Arguments
+///
+/// * `override_prefix` - An optional override path. If provided, the function returns predefined values without performing actual parsing.
 ///
 /// # Returns
 ///
-/// A Result containing a tuple of:
-/// - The prefix path as a String.
-/// - The snapshot ID as a u64.
-/// - The full snapshot path as a String.
+/// A `Result` containing a tuple of:
+/// - A `String` representing the prefix path leading up to the `.snapshots` directory.
+/// - A `u64` representing the numeric ID of the snapshot.
+/// - A `String` representing the full path of the snapshot.
 ///
 /// # Errors
 ///
-/// Returns an error if the snapshot path does not conform to the expected structure or if any parsing fails.
-pub(crate) fn get_root_snapshot_info() -> Result<(String, u64, String), Box<dyn std::error::Error>>
-{
+/// Returns an `Err` with a boxed error if:
+/// - The snapshot path does not conform to the expected structure.
+/// - Parsing of any component (prefix, snapshot ID, full path) fails.
+pub(crate) fn get_root_snapshot_info(
+    override_prefix: Option<&Path>,
+) -> Result<(String, u64, String), Box<dyn std::error::Error>> {
+    if override_prefix.is_some() {
+        return Ok((
+            "/.snapshots".to_string(),
+            0,
+            override_prefix.unwrap().to_string_lossy().to_string(),
+        ));
+    }
     let full_path = subvolume::get_subvol_path("/")?;
     let parts: Vec<&str> = full_path.split("/.snapshots/").collect();
     let prefix = parts.get(0).ok_or("Prefix not found")?.to_string();
@@ -238,10 +269,13 @@ pub(crate) fn find_sdboot(
 ) -> PathBuf {
     let base_prefix = match prefix_override {
         Some(override_path) => override_path.to_path_buf(),
-        None => Path::new("/.snapshots").to_path_buf(),
+        None => Path::new("/").to_path_buf(),
     };
     let prefix = match snapshot {
-        Some(snap) => base_prefix.join(snap.to_string()).join("snapshot"),
+        Some(snap) => base_prefix
+            .join(".snapshots")
+            .join(snap.to_string())
+            .join("snapshot"),
         None => base_prefix,
     };
 
@@ -277,10 +311,13 @@ pub(crate) fn find_sdboot(
 pub(crate) fn find_grub2(snapshot: Option<u64>, prefix_override: Option<&Path>) -> PathBuf {
     let base_prefix = match prefix_override {
         Some(override_path) => override_path.to_path_buf(),
-        None => Path::new("/.snapshots").to_path_buf(),
+        None => Path::new("/").to_path_buf(),
     };
     let prefix = match snapshot {
-        Some(snap) => base_prefix.join(snap.to_string()).join("snapshot"),
+        Some(snap) => base_prefix
+            .join(".snapshots")
+            .join(snap.to_string())
+            .join("snapshot"),
         None => base_prefix,
     };
     let mut grub2_path = prefix.join(format!("usr/share/efi/{}/grub.efi", ARCH));
@@ -655,16 +692,591 @@ pub(crate) fn is_installed(
     Ok(bootloader_version_successful && installed_flag_exists)
 }
 
+/// Retrieves the path to the shim directory based on the system architecture.
+///
+/// This function constructs a path to where the EFI shim files are stored, which varies
+/// depending on the system's architecture. It uses a global `ARCH` constant to determine
+/// the architecture-specific subdirectory.
+///
+/// # Returns
+///
+/// Returns a `String` representing the full path to the shim directory.
 pub(crate) fn get_shimdir() -> String {
     format!("/usr/share/efi/{}", ARCH)
 }
 
-/// Checks if the filesystem type of `/` is `btrfs` and the directory /.snapshots exists.
+/// Updates the system's random seed stored in the EFI boot loader directory.
+///
+/// This function generates a new random seed and stores it in the `loader/random-seed` file
+/// within the specified boot root directory. It supports disabling this operation with the
+/// `arg_no_random_seed` flag and allows overriding the root directory path with `override_prefix`.
+///
+/// # Arguments
+///
+/// * `boot_root` - A string slice specifying the boot root directory where the `loader` directory resides.
+/// * `arg_no_random_seed` - A boolean flag that, if `true`, skips the random seed update process.
+/// * `override_prefix` - An optional reference to a `Path` that overrides the root directory path.
 ///
 /// # Returns
 ///
-/// `Ok(true)` if the filesystem type is `btrfs` and /.snapshots is a directory,
-/// `Ok(false)` otherwise, or an `Error` if an instruction fails.
+/// Returns `Ok(())` on successful update or an `Err` with a `String` message if the operation fails.
+///
+/// # Errors
+///
+/// Returns an error if file operations (create, read, write) fail or if random seed generation encounters an issue.
+pub(crate) fn update_random_seed(
+    boot_root: &str,
+    arg_no_random_seed: bool,
+    override_prefix: Option<&Path>,
+) -> Result<(), String> {
+    if arg_no_random_seed {
+        return Ok(());
+    }
+
+    let prefix = match override_prefix {
+        Some(ov_prefix) => PathBuf::from(ov_prefix),
+        None => PathBuf::from("/"),
+    };
+    let full_boot_root = prefix.join(boot_root.strip_prefix("/").unwrap_or(boot_root));
+    let mut rng = thread_rng();
+    let mut new_seed = [0u8; 32];
+    rng.fill_bytes(&mut new_seed);
+
+    let random_seed_path = full_boot_root.join("loader/random-seed");
+    fs::create_dir_all(
+        random_seed_path
+            .parent()
+            .ok_or_else(|| "Failed to find the parent directory of dst".to_string())?,
+    )
+    .map_err(|e| e.to_string())?;
+
+    if random_seed_path.exists() {
+        let mut file = File::open(&random_seed_path).map_err(|e| {
+            format!(
+                "Failed to open random seed file {}: {}",
+                random_seed_path.display(),
+                e
+            )
+        })?;
+        let mut old_seed = Vec::new();
+        file.read_to_end(&mut old_seed).map_err(|e| {
+            format!(
+                "Failed to read random seed file {}: {}",
+                random_seed_path.display(),
+                e
+            )
+        })?;
+
+        if old_seed.len() == 32 {
+            new_seed
+                .iter_mut()
+                .zip(old_seed.iter())
+                .for_each(|(n, o)| *n ^= o);
+        }
+    }
+
+    let mut hasher = Sha256::new();
+    hasher.update(new_seed);
+    let hashed_seed = hasher.finalize();
+
+    let new_seed_path = full_boot_root.join("loader/random-seed.new");
+    fs::write(&new_seed_path, &hashed_seed).map_err(|e| {
+        format!(
+            "Failed to write new random seed file {}: {}",
+            new_seed_path.display(),
+            e
+        )
+    })?;
+
+    fs::rename(&new_seed_path, &random_seed_path).map_err(|e| {
+        format!(
+            "Failed to rename new random seed file {}: {}",
+            new_seed_path.display(),
+            e
+        )
+    })?;
+
+    Ok(())
+}
+
+/// Reads the partition number from a specified file.
+///
+/// This function opens the file at `partition_file_path` and reads the first line to extract
+/// the partition number. It's primarily used to determine the partition number from system files
+/// in `/sys` or `/proc`.
+///
+/// # Arguments
+///
+/// * `partition_file_path` - A reference to a `Path` that specifies the file from which to read the partition number.
+///
+/// # Returns
+///
+/// Returns `Ok(u32)` with the partition number on success, or an `Err` with a `String` message if the operation fails.
+///
+/// # Errors
+///
+/// Returns an error if opening or reading the file fails, or if the content cannot be parsed into a `u32`.
+pub(crate) fn read_partition_number(partition_file_path: &Path) -> Result<u32, String> {
+    let file = File::open(partition_file_path).map_err(|e| {
+        format!(
+            "Failed to open partition file {}: {}",
+            partition_file_path.display(),
+            e
+        )
+    })?;
+
+    let mut buf_reader = io::BufReader::new(file);
+    let mut partno_str = String::new();
+    buf_reader.read_line(&mut partno_str).map_err(|e| {
+        format!(
+            "Failed to read partition number from {}: {}",
+            partition_file_path.display(),
+            e
+        )
+    })?;
+
+    partno_str.trim().parse::<u32>().map_err(|e| {
+        format!(
+            "Invalid partition number in {}: {}",
+            partition_file_path.display(),
+            e
+        )
+    })
+}
+
+/// Determines the drive and partition number from a given block device path.
+///
+/// This function parses system information to extract the drive path and partition number
+/// from a specified block device identifier (e.g., `sda1`). It supports an `override_path`
+/// for alternative system root directories.
+///
+/// # Arguments
+///
+/// * `block_device` - A string slice representing the block device identifier.
+/// * `override_path` - An optional reference to a `Path` that specifies an alternative root directory.
+///
+/// # Returns
+///
+/// Returns `Ok((PathBuf, u32))` containing the drive path and partition number, or an `Err`
+/// with a `String` message if the operation fails.
+///
+/// # Errors
+///
+/// Returns an error if system file operations fail or if the drive or partition information cannot be determined.
+pub(crate) fn get_drive_and_partition_from_block_device(
+    block_device: &str,
+    override_path: Option<&Path>,
+) -> Result<(PathBuf, u32), String> {
+    let base_path = override_path.unwrap_or(Path::new("/"));
+    let block_device_name = block_device.trim_start_matches("/dev/");
+    let sys_block_path = base_path.join("sys/class/block").join(block_device_name);
+
+    let abs_path = fs::read_link(&sys_block_path).map_err(|e| {
+        format!(
+            "Failed to read link for {}: {}",
+            sys_block_path.display(),
+            e
+        )
+    })?;
+
+    let drive_path = abs_path
+        .parent()
+        .ok_or_else(|| format!("Failed to get drive path from {}", abs_path.display()))?
+        .to_path_buf();
+
+    let drive = Path::new("/dev").join(
+        drive_path
+            .file_name()
+            .ok_or_else(|| format!("Failed to get drive name from {}", drive_path.display()))?,
+    );
+
+    let partition_file_path = sys_block_path.join("partition");
+    let partition_number = read_partition_number(&partition_file_path)?;
+
+    Ok((drive, partition_number))
+}
+
+/// Copies EFI shim files from the system directory to the boot loader directory.
+///
+/// This function copies specific EFI shim files (`MokManager.efi` and `shim.efi`) from the shim directory
+/// within a system prefix to the destination directory in the boot loader path. It ensures the necessary
+/// directories exist and handles path overrides with `override_prefix`.
+///
+/// # Arguments
+///
+/// * `snapshot_prefix` - A string slice indicating the system directory prefix.
+/// * `shimdir` - A string slice specifying the subdirectory within the snapshot prefix where shim files are located.
+/// * `boot_root` - A string slice specifying the root boot directory.
+/// * `boot_dst` - A string slice indicating the destination directory within the boot root where files will be copied.
+/// * `bootloader` - A reference to a `PathBuf` specifying the bootloader file path.
+/// * `override_prefix` - An optional reference to a `Path` for overriding the root directory path.
+///
+/// # Returns
+///
+/// Returns `Ok(())` on successful copy, or an `Err` with a `String` message if the operation fails.
+///
+/// # Errors
+///
+/// Returns an error if directory creation or file copy operations fail.
+pub(crate) fn copy_shim_files(
+    snapshot_prefix: &str,
+    shimdir: &str,
+    boot_root: &str,
+    boot_dst: &str,
+    bootloader: &PathBuf,
+    override_prefix: Option<&Path>,
+) -> Result<(), String> {
+    let base_path = override_prefix.unwrap_or(Path::new("/"));
+    let full_boot_root = base_path.join(boot_root.strip_prefix("/").unwrap_or(boot_root));
+    let full_boot_dst = full_boot_root.join(boot_dst.strip_prefix("/").unwrap_or(boot_dst));
+    let full_snapshot_prefix =
+        base_path.join(snapshot_prefix.strip_prefix("/").unwrap_or(snapshot_prefix));
+    let full_shimdir = full_snapshot_prefix.join(shimdir.strip_prefix("/").unwrap_or(shimdir));
+
+    let shim_files = ["MokManager.efi", "shim.efi"];
+
+    for shim_file in &shim_files {
+        let src = full_shimdir.join(shim_file);
+        let dst = full_boot_dst.join(shim_file);
+        fs::create_dir_all(
+            dst.parent()
+                .ok_or_else(|| "Failed to find the parent directory of dst".to_string())?,
+        )
+        .map_err(|e| e.to_string())?;
+        fs::copy(&src, &dst).map_err(|e| format!("Failed to copy {}: {}", src.display(), e))?;
+    }
+
+    let dst_bootloader = full_boot_dst.join("grub.efi");
+    fs::create_dir_all(
+        dst_bootloader
+            .parent()
+            .ok_or_else(|| "Failed to find the parent directory of dst_bootloader".to_string())?,
+    )
+    .map_err(|e| e.to_string())?;
+    fs::copy(bootloader, &dst_bootloader)
+        .map_err(|e| format!("Failed to copy bootloader: {}", e))?;
+
+    Ok(())
+}
+
+/// Copies the bootloader file to both the specified boot destination and the EFI/BOOT directory.
+///
+/// This function copies the bootloader file to the destination directory within the boot root, and also
+/// to the standard EFI/BOOT directory, renaming it according to the EFI specification and system architecture.
+/// It supports path overrides with `override_prefix`.
+///
+/// # Arguments
+///
+/// * `bootloader` - A reference to a `PathBuf` specifying the bootloader file path.
+/// * `boot_root` - A string slice specifying the root boot directory.
+/// * `boot_dst` - A string slice indicating the destination directory within the boot root for the bootloader.
+/// * `firmware_arch` - A string slice representing the system's firmware architecture (e.g., `x64`, `aa64`).
+/// * `override_prefix` - An optional reference to a `Path` for overriding the root directory path.
+///
+/// # Returns
+///
+/// Returns `Ok(PathBuf)` with the path to the copied bootloader file in the boot destination, or an `Err`
+/// with a `String` message if the operation fails.
+///
+/// # Errors
+///
+/// Returns an error if directory creation or file copy operations fail.
+pub(crate) fn copy_bootloader(
+    bootloader: &PathBuf,
+    boot_root: &str,
+    boot_dst: &str,
+    firmware_arch: &str,
+    override_prefix: Option<&Path>,
+) -> Result<PathBuf, String> {
+    let base_path = override_prefix.unwrap_or(Path::new("/"));
+    let full_boot_root = base_path.join(boot_root.strip_prefix("/").unwrap_or(boot_root));
+    let full_boot_dst = full_boot_root.join(boot_dst.strip_prefix("/").unwrap_or(boot_dst));
+
+    let bootloader_file_name = bootloader
+        .file_name()
+        .ok_or("Failed to get bootloader file name")?;
+    let efi_bootloader_name = format!("BOOT{}.EFI", firmware_arch.to_uppercase());
+
+    let dst = full_boot_dst.join(bootloader_file_name);
+    fs::create_dir_all(
+        dst.parent()
+            .ok_or_else(|| "Failed to find the parent directory of dst".to_string())?,
+    )
+    .map_err(|e| e.to_string())?;
+    fs::copy(bootloader, &dst).map_err(|e| format!("Failed to copy bootloader: {}", e))?;
+
+    let efi_dst = full_boot_root
+        .join("EFI")
+        .join("BOOT")
+        .join(efi_bootloader_name);
+    fs::create_dir_all(
+        efi_dst
+            .parent()
+            .ok_or_else(|| "Failed to find the parent directory of efi_dst".to_string())?,
+    )
+    .map_err(|e| e.to_string())?;
+    fs::copy(bootloader, efi_dst).map_err(|e| format!("Failed to copy EFI bootloader: {}", e))?;
+
+    Ok(Path::new(boot_dst).join(bootloader_file_name))
+}
+
+/// Updates the configuration for the systemd-boot bootloader.
+///
+/// This function ensures the existence of the `loader/entries` directory and `loader/loader.conf`
+/// file within the specified boot root directory. It supports path overrides with `override_prefix`.
+///
+/// # Arguments
+///
+/// * `boot_root` - A string slice specifying the root boot directory.
+/// * `override_prefix` - An optional reference to a `Path` for overriding the root directory path.
+///
+/// # Returns
+///
+/// Returns `Ok(())` on successful update, or an `Err` with a `String` message if the operation fails.
+///
+/// # Errors
+///
+/// Returns an error if directory creation or file operations fail.
+pub(crate) fn update_sdboot_configuration(
+    boot_root: &str,
+    override_prefix: Option<&Path>,
+) -> Result<(), String> {
+    let base_path = override_prefix.unwrap_or_else(|| Path::new("/"));
+    let full_boot_root = base_path.join(boot_root.strip_prefix("/").unwrap_or(boot_root));
+
+    let entries_rel_path = full_boot_root.join("loader/entries.srel");
+    fs::create_dir_all(
+        entries_rel_path
+            .parent()
+            .ok_or_else(|| "Failed to find the parent directory of entries_rel_path".to_string())?,
+    )
+    .map_err(|e| e.to_string())?;
+    if !entries_rel_path.exists() {
+        fs::write(&entries_rel_path, "type1").map_err(|e| e.to_string())?;
+    }
+
+    let loader_conf_path = full_boot_root.join("loader/loader.conf");
+    if !loader_conf_path.exists() {
+        let mut loader_conf = File::create(&loader_conf_path).map_err(|e| e.to_string())?;
+        writeln!(loader_conf, "#timeout 3\n#console-mode keep").map_err(|e| e.to_string())?;
+    }
+
+    Ok(())
+}
+
+/// Updates the GRUB2 bootloader configuration.
+///
+/// This function copies the `grub.cfg` file from the system directory to both the specified boot destination
+/// and the standard EFI/BOOT directory. It also ensures the GRUB2 module directory exists and copies the `bli.mod`
+/// file from the system to the module directory. It supports path overrides with `override_prefix`.
+///
+/// # Arguments
+///
+/// * `snapshot_prefix` - A string slice indicating the system directory prefix.
+/// * `boot_root` - A string slice specifying the root boot directory.
+/// * `boot_dst` - A string slice indicating the destination directory within the boot root for GRUB2 configuration files.
+/// * `override_prefix` - An optional reference to a `Path` for overriding the root directory path.
+///
+/// # Returns
+///
+/// Returns `Ok(())` on successful update, or an `Err` with a `String` message if the operation fails.
+///
+/// # Errors
+///
+/// Returns an error if directory creation, file copy, or file renaming operations fail.
+pub(crate) fn update_grub2_configuration(
+    snapshot_prefix: &str,
+    boot_root: &str,
+    boot_dst: &str,
+    override_prefix: Option<&Path>,
+) -> Result<(), String> {
+    let base_path = override_prefix.unwrap_or_else(|| Path::new("/"));
+    let full_boot_root = base_path.join(boot_root.strip_prefix("/").unwrap_or(boot_root));
+    let full_boot_dst = full_boot_root.join(boot_dst.strip_prefix("/").unwrap_or(boot_dst));
+    let full_snapshot_prefix =
+        base_path.join(snapshot_prefix.strip_prefix("/").unwrap_or(snapshot_prefix));
+
+    let grub_cfg_path = full_boot_dst.join("grub.cfg");
+    fs::create_dir_all(
+        grub_cfg_path
+            .parent()
+            .ok_or_else(|| "Failed to find the parent directory of grub_cfg".to_string())?,
+    )
+    .map_err(|e| e.to_string())?;
+    if !grub_cfg_path.exists() {
+        let mut grub_cfg = File::create(&grub_cfg_path).map_err(|e| e.to_string())?;
+        writeln!(
+            grub_cfg,
+            "timeout=8\nfunction load_video {{\n  true\n}}\ninsmod bli\nblscfg"
+        )
+        .map_err(|e| e.to_string())?;
+    }
+
+    let efi_boot_grub_cfg_path = full_boot_root.join("EFI/BOOT/grub.cfg");
+    fs::create_dir_all(efi_boot_grub_cfg_path.parent().ok_or_else(|| {
+        "Failed to find the parent directory of efi_boot_grub_cfg_path".to_string()
+    })?)
+    .map_err(|e| e.to_string())?;
+    fs::copy(&grub_cfg_path, &efi_boot_grub_cfg_path).map_err(|e| e.to_string())?;
+
+    let mod_dir = full_boot_dst.join(format!("{}-efi", ARCH));
+    fs::create_dir_all(&mod_dir).map_err(|e| e.to_string())?;
+
+    let bli_mod_src = full_snapshot_prefix.join("grub2moddir/bli.mod");
+    let bli_mod_dst = mod_dir.join("bli.mod");
+    fs::copy(bli_mod_src, bli_mod_dst)
+        .map_err(|e| format!("error copying grub2moddir: {}", e.to_string()))?;
+
+    Ok(())
+}
+
+/// Installs the bootloader and updates the boot configuration.
+///
+/// This function handles the installation and configuration of the bootloader, including copying shim files or the bootloader itself,
+/// updating the random seed, and setting up the EFI boot entry. It supports snapshot-based installation, architecture-specific
+/// considerations, and various flags to control the installation process. Path overrides can be provided with `override_prefix`.
+///
+/// # Arguments
+///
+/// * `snapshot` - An optional snapshot ID used for snapshot-based installation.
+/// * `firmware_arch` - A string slice representing the system's firmware architecture.
+/// * `shimdir` - A string slice specifying the directory containing shim files for secure boot.
+/// * `boot_root` - A string slice specifying the root boot directory.
+/// * `boot_dst` - A string slice indicating the destination directory within the boot root for bootloader files.
+/// * `entry_token` - A string representing the entry token for the bootloader.
+/// * `arg_no_variables` - A boolean flag indicating whether EFI variables should be updated.
+/// * `arg_no_random_seed` - A boolean flag indicating whether the random seed should be updated.
+/// * `override_prefix` - An optional reference to a `Path` for overriding the root directory path.
+///
+/// # Returns
+///
+/// Returns `Ok(())` on successful installation and configuration, or an `Err` with a `String` message if the operation fails.
+///
+/// # Errors
+///
+/// Returns an error if any step in the installation or configuration process fails, including file operations, bootloader copying, and EFI boot entry creation.
+pub(crate) fn install_bootloader(
+    snapshot: Option<u64>,
+    firmware_arch: &str,
+    shimdir: &str,
+    boot_root: &str,
+    boot_dst: &str,
+    entry_token: String,
+    arg_no_variables: bool,
+    arg_no_random_seed: bool,
+    override_prefix: Option<&Path>,
+) -> Result<(), String> {
+    let prefix = match override_prefix {
+        Some(ov_prefix) => PathBuf::from(ov_prefix),
+        None => PathBuf::from("/"),
+    };
+    let snapshot_prefix = match snapshot {
+        Some(snap) => format!("/.snapshots/{}/snapshot", snap),
+        None => "/".to_string(),
+    };
+    let full_snapshot_prefix = prefix.join(
+        snapshot_prefix
+            .strip_prefix("/")
+            .unwrap_or(&snapshot_prefix),
+    );
+    let full_boot_root = prefix.join(boot_root.strip_prefix("/").unwrap_or(boot_root));
+    let full_boot_dst = full_boot_root.join(boot_dst.strip_prefix("/").unwrap_or(boot_dst));
+
+    let bootloader =
+        find_bootloader(snapshot, firmware_arch, override_prefix).map_err(|e| e.to_string())?;
+    let bldr_name =
+        bootloader_name(snapshot, firmware_arch, override_prefix).map_err(|e| e.to_string())?;
+
+    fs::create_dir_all(full_boot_root.join("loader/entries")).map_err(|e| e.to_string())?;
+
+    let entry = if full_snapshot_prefix.join(shimdir).join("shim.efi").exists() {
+        log_info(
+            &format!(
+                "Installing {} with shim into {:?}",
+                bldr_name, full_boot_root
+            ),
+            1,
+        );
+        copy_shim_files(
+            &snapshot_prefix,
+            shimdir,
+            boot_root,
+            boot_dst,
+            &bootloader,
+            override_prefix,
+        )?;
+        Path::new(boot_dst).join("shim.efi")
+    } else {
+        log_info(&format!("Installing {} into {:?}", bldr_name, boot_root), 1);
+        copy_bootloader(
+            &bootloader,
+            boot_root,
+            boot_dst,
+            firmware_arch,
+            override_prefix,
+        )?
+    };
+
+    let boot_csv = full_boot_dst.join("boot.csv");
+    let mut boot_csv_file = BufWriter::new(File::create(&boot_csv).map_err(|e| e.to_string())?);
+    writeln!(
+        boot_csv_file,
+        "{},openSUSE Boot Manager",
+        entry.file_name().unwrap().to_string_lossy()
+    )
+    .map_err(|e| e.to_string())?;
+
+    fs::create_dir_all(full_boot_root.join(entry_token.clone())).map_err(|e| e.to_string())?;
+    fs::write(
+        full_boot_dst.join("installed_by_sdbootutil"),
+        entry_token.clone(),
+    )
+    .map_err(|e| e.to_string())?;
+
+    let entry_token_path = prefix.join(Path::new("etc/kernel/entry-token"));
+    if !entry_token_path.exists() {
+        fs::create_dir_all(entry_token_path.parent().ok_or_else(|| {
+            "Failed to find the parent directory of entry_token_path".to_string()
+        })?)
+        .map_err(|e| e.to_string())?;
+        fs::write(entry_token_path, entry_token).map_err(|e| e.to_string())?;
+    }
+    update_random_seed(boot_root, arg_no_random_seed, override_prefix)
+        .map_err(|e| format!("Failed to update random seed: {}", e))?;
+    if is_sdboot(snapshot, firmware_arch, override_prefix) {
+        update_sdboot_configuration(boot_root, override_prefix)?;
+    } else if is_grub2(snapshot, override_prefix) {
+        update_grub2_configuration(&snapshot_prefix, boot_root, boot_dst, override_prefix)?;
+    }
+
+    let (_, blkpart) = get_findmnt_output(boot_root, override_prefix)?;
+    let (drive, partno) = get_drive_and_partition_from_block_device(&blkpart, override_prefix)?;
+    if !arg_no_variables {
+        create_efi_boot_entry(&drive, partno, &entry, override_prefix)?;
+    }
+
+    Ok(())
+}
+
+/// Checks if the root filesystem is Btrfs and contains a `.snapshots` directory.
+///
+/// This function reads the system's mount information to determine if the root (`/`) is mounted
+/// with the Btrfs filesystem and verifies the existence of the `/.snapshots` directory. It supports
+/// an optional `prefix` argument to specify an alternate root directory for testing or non-standard
+/// environments.
+///
+/// # Arguments
+///
+/// * `prefix` - An optional string slice representing an alternative root directory to check.
+///
+/// # Returns
+///
+/// Returns `Ok(true)` if the root is Btrfs and contains a `/.snapshots` directory, `Ok(false)` otherwise,
+/// or an `Err` with a `String` message if an error occurs during execution.
+///
+/// # Errors
+///
+/// Returns an error if reading from the mounts file fails or if the path construction is invalid.
 pub(crate) fn is_snapshotted(prefix: Option<&str>) -> Result<bool, String> {
     let mounts_file_path = match prefix {
         Some(prefix) => PathBuf::from(prefix)

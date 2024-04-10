@@ -37,24 +37,19 @@ fn test_compare_versions_complex() {
 
 #[test]
 fn test_compare_versions_mixed() {
-    // Basic version comparisons
     assert!(compare_versions("1.0.0", "2.0.0"));
     assert!(!compare_versions("2.0.0", "1.0.0"));
 
-    // Pre-release versions
     assert!(compare_versions("1.0.0-alpha", "1.0.0-alpha.1"));
     assert!(!compare_versions("1.0.0-alpha.1", "1.0.0-alpha"));
 
-    // Build metadata (should have no impact on precedence)
     assert!(compare_versions("1.0.0+build.1", "1.0.0+build.2"));
 
-    // Versions with pre-release and build metadata
     assert!(compare_versions(
         "1.0.0-alpha+build.1",
         "1.0.0-beta+build.2"
     ));
 
-    // Non-semantic versions adapted to semver
     assert!(compare_versions(
         "255.3+suse.16.g12345678",
         "255.4+suse.17.gbe772961ad"
@@ -64,7 +59,6 @@ fn test_compare_versions_mixed() {
         "255.4+suse.16.g12345678"
     ));
 
-    // More complex cases
     assert!(compare_versions(
         "0.9.9-alpha+001",
         "1.0.0-beta+exp.sha.5114f85"
@@ -75,7 +69,6 @@ fn test_compare_versions_mixed() {
         "1.0.0-rc.1+build.1"
     ));
 
-    // Handling cases where preprocessing might not be perfect
     assert!(compare_versions(
         "1.0.0-dev.foo.bar+123",
         "1.0.0-dev.foo.baz+124"

@@ -10,7 +10,9 @@ clap = { version = "4.5.3", features = ["derive"] }
 cursive = { git = "https://github.com/gyscos/cursive.git", default-features = false, features = ["crossterm-backend"] }
 elevate = "0.6.1"
 libbtrfs = "0.0.12"
+rand = "0.8.5"
 regex = "1.10.4"
+sha2 = "0.10.8"
 tempfile = "3.10.1"
 
 [dev-dependencies]

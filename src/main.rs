@@ -10,17 +10,17 @@ fn main() -> Result<(), String> {
         _root_device,
         firmware_arch,
         snapshot,
-        _arg_entry_token,
+        entry_token,
         boot_root,
         boot_dst,
         _image,
-        _no_variables,
+        no_variables,
         _regenerate_initrd,
-        _no_random_seed,
+        no_random_seed,
         _all,
         shimdir,
         cmd,
-    ) = lib::process_args_and_get_system_info()
+    ) = lib::process_args_and_get_system_info(None)
         .map_err(|e| format!("An error occurred while fetching system information: {}", e))?;
 
     lib::test_functions();
@@ -51,7 +51,17 @@ fn main() -> Result<(), String> {
             None,
             None,
         ),
-        Some(Commands::Install {}) => lib::command_install(),
+        Some(Commands::Install {}) => lib::command_install(
+            snapshot,
+            &firmware_arch,
+            &shimdir,
+            &boot_root,
+            &boot_dst,
+            entry_token,
+            no_variables,
+            no_random_seed,
+            None,
+        ),
         Some(Commands::NeedsUpdate {}) => lib::command_needs_update(
             snapshot,
             root_snapshot,
