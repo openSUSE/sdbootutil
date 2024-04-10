@@ -278,9 +278,9 @@ sedrootflags()
 	# s///.
 	local sed_arguments=("-e s/[ \t]\+/ /g"\
 		"-e s/\<\(BOOT_IMAGE\|initrd\)=[^ ]* \?//"\
-		"-e s/\<root=[^ ]*/root=UUID=$root_uuid/;tb;s,\$, root=UUID=$root_uuid,;tc;:c;:b"\
-		"-e s,\<systemd.machine_id=[^ ]*,systemd.machine_id=$machine_id,;tf;s,\$, systemd.machine_id=$machine_id,;tg;:g;:f")
+		"-e s/\<root=[^ ]*/root=UUID=$root_uuid/;tb;s,\$, root=UUID=$root_uuid,;tc;:c;:b")
 	[ -z "$have_snapshots" ] || sed_arguments+=("-e s,\<rootflags=subvol=[^ ]*,rootflags=subvol=$subvol,;td;s,\$, rootflags=subvol=$subvol,;te;:e;:d")
+	[ -z "$machine_id" ] || sed_arguments+=("-e s,\<systemd.machine_id=[^ ]*,systemd.machine_id=$machine_id,;tf;s,\$, systemd.machine_id=$machine_id,;tg;:g;:f")
 	sed "${sed_arguments[@]}"
 }
 
@@ -335,12 +335,11 @@ settle_entry_token()
 			if [ -s '/etc/kernel/entry-token' ]; then
 				read -r entry_token < '/etc/kernel/entry-token'
 			else
-				[ -n "$machine_id" ] || err "Couldn't determine machine-id"
-				entry_token="$machine_id"
-				# bootctl has more here in case the machine id
-				# is random falls back to trying IMAGE_ID and
-				# ID, only them machine id. We assume there is
-				# a valid machine-id
+				local var
+				for var in machine_id os_release_IMAGE_ID os_release_ID; do
+					entry_token="${!var}"
+					[ -z "$entry_token" ] || break
+				done
 			fi
 			;;
 		machine-id)
@@ -357,8 +356,12 @@ settle_entry_token()
 			entry_token="$os_release_IMAGE_ID"
 			[ -n "$entry_token" ] || err "Missing IMAGE_ID"
 			;;
-		*) entry_token="$arg_entry_token" ;;
+		literal:*)
+			entry_token="${arg_entry_token#literal:}"
+			;;
+		*) err "Unexpected parameter for --entry-token=: $arg_entry_token" ;;
 	esac
+	[ -n "$entry_token" ] || err "Can't determine entry-token"
 	return 0
 }
 
