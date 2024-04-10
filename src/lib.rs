@@ -456,9 +456,10 @@ pub fn command_is_installed(
 ///     "opensuse-tumbleweed".to_string(),
 ///     false,
 ///     true,
+///     None,
 ///     None
 /// );
-/// assert!(result.is_err(), "Expected an error from command_needs_update");
+/// assert!(result.is_err(), "Expected an error from command_install");
 /// ```
 pub fn command_install(
     snapshot: Option<u64>,
@@ -469,29 +470,64 @@ pub fn command_install(
     entry_token: String,
     arg_no_variables: bool,
     arg_no_random_seed: bool,
+    filename: Option<PathBuf>,
     override_prefix: Option<&Path>,
 ) -> Result<bool, String> {
     let bootloader_name = bootloader_name(snapshot, firmware_arch, override_prefix)
         .map_err(|e| format!("Install - Can't determine bootloader name: {}", e))?;
-    let result = install_bootloader(
+    let result_installed = is_installed(
         snapshot,
         firmware_arch,
         shimdir,
         boot_root,
         boot_dst,
-        entry_token,
-        arg_no_variables,
-        arg_no_random_seed,
+        filename,
         override_prefix,
     );
-    match result {
-        Ok(()) => {
-            let message = format!("Bootloader '{}' successfully installed", bootloader_name);
-            log_info(&message, 0);
-            Ok(true)
+    match result_installed {
+        Ok(bool) => {
+            if bool {
+                let message = format!(
+                    "Bootloader '{}' is already installed",
+                    bootloader_name
+                );
+                log_info(&message, 0);
+                Ok(false)
+            } else {
+                let message = format!(
+                    "Bootloader '{}' was not installed using this tool",
+                    bootloader_name
+                );
+                log_info(&message, 1);
+                let result = install_bootloader(
+                    snapshot,
+                    firmware_arch,
+                    shimdir,
+                    boot_root,
+                    boot_dst,
+                    entry_token,
+                    arg_no_variables,
+                    arg_no_random_seed,
+                    override_prefix,
+                );
+                match result {
+                    Ok(()) => {
+                        let message = format!(
+                            "Bootloader '{}' successfully installed",
+                            bootloader_name
+                        );
+                        log_info(&message, 0);
+                        Ok(true)
+                    }
+                    Err(e) => {
+                        let message = format!("Bootloader could not be installed: {}", e);
+                        Err(message)
+                    }
+                }
+            }
         }
         Err(e) => {
-            let message = format!("Can't determine if bootloader needs update: {}", e);
+            let message = format!("Can't determine if bootloader is installed: {}", e);
             Err(message)
         }
     }
@@ -572,44 +608,237 @@ pub fn command_needs_update(
     }
 }
 
-/// Executes the `Update` command.
+/// Attempts to update the system bootloader if it's determined to be outdated.
 ///
-/// This function logs the action and returns a predefined status code.
+/// This function checks if the bootloader requires an update based on the current system
+/// configuration and the specified snapshot. If an update is necessary, it will proceed
+/// to install the new bootloader configuration.
+///
+/// # Arguments
+///
+/// * `snapshot` - An optional snapshot identifier for systems utilizing Btrfs snapshots.
+/// * `root_snapshot` - The current root snapshot, used for determining the bootloader configuration.
+/// * `firmware_arch` - The system's firmware architecture.
+/// * `shimdir` - The directory containing EFI shim binaries.
+/// * `boot_root` - The mount point of the boot partition.
+/// * `boot_dst` - The directory within the boot partition where bootloader files are located.
+/// * `entry_token` - A unique identifier for the bootloader entry.
+/// * `arg_no_variables` - Flag indicating whether to skip updating EFI variables.
+/// * `arg_no_random_seed` - Flag indicating whether to skip updating the random seed file.
+/// * `override_prefix` - Optional path used to override the system root, useful in chroot environments.
 ///
 /// # Returns
 ///
-/// Always returns `16`, indicating a specific status after execution.
+/// - `Ok(true)` if the bootloader was successfully updated.
+/// - `Ok(false)` if the bootloader is already up-to-date and does not require an update.
+/// - `Err(String)` with an error message if the update process fails.
+///
+/// # Errors
+///
+/// Errors can arise from the inability to determine the bootloader status, failure in the installation process,
+/// or issues related to accessing necessary files or directories.
 ///
 /// # Examples
 ///
 /// ```
-/// let status = sdbootutil::command_update().unwrap();
-/// assert_eq!(status, true);
+/// let result = sdbootutil::command_update(
+///     Some(0),
+///     Some(0),
+///     "x64",
+///     "/usr/share/efi/x86_64",
+///     "/boot/efi",
+///     "EFI/systemd",
+///     "opensuse-tumbleweed".to_string(),
+///     false,
+///     true,
+///     None,
+/// );
+/// assert!(result.is_err(), "Expected an error from command_install");
 /// ```
-pub fn command_update() -> Result<bool, String> {
-    let message = "Update command called";
-    log_info(message, 1);
-    Ok(true)
+pub fn command_update(
+    snapshot: Option<u64>,
+    root_snapshot: Option<u64>,
+    firmware_arch: &str,
+    shimdir: &str,
+    boot_root: &str,
+    boot_dst: &str,
+    entry_token: String,
+    arg_no_variables: bool,
+    arg_no_random_seed: bool,
+    override_prefix: Option<&Path>,
+) -> Result<bool, String> {
+    let bootloader_name = bootloader_name(snapshot, firmware_arch, override_prefix)
+        .map_err(|e| format!("Update - Can't determine bootloader name: {}", e))?;
+    let result_needs_update = bootloader_needs_update(
+        snapshot,
+        root_snapshot,
+        firmware_arch,
+        shimdir,
+        boot_root,
+        boot_dst,
+        override_prefix,
+    );
+    match result_needs_update {
+        Ok(bool) => {
+            if bool {
+                let message = format!("Bootloader '{}' needs to be updated", bootloader_name);
+                log_info(&message, 1);
+                let result = install_bootloader(
+                    snapshot,
+                    firmware_arch,
+                    shimdir,
+                    boot_root,
+                    boot_dst,
+                    entry_token,
+                    arg_no_variables,
+                    arg_no_random_seed,
+                    override_prefix,
+                );
+                match result {
+                    Ok(()) => {
+                        let message =
+                            format!("Bootloader '{}' successfully updated", bootloader_name);
+                        log_info(&message, 0);
+                        Ok(true)
+                    }
+                    Err(e) => {
+                        let message = format!("Bootloader could not be updated: {}", e);
+                        Err(message)
+                    }
+                }
+            } else {
+                let message = format!(
+                    "Bootloader '{}' is already up-to-date, no update needed",
+                    bootloader_name
+                );
+                log_info(&message, 0);
+                Ok(false)
+            }
+        }
+        Err(e) => {
+            let message = format!("Can't determine if bootloader needs update: {}", e);
+            Err(message)
+        }
+    }
 }
 
-/// Executes the `ForceUpdate` command.
+/// Forces an update of the system bootloader, regardless of its current version.
 ///
-/// This function logs the action and returns a predefined status code.
+/// This function is used in scenarios where a forced reinstallation of the bootloader
+/// is required, such as after a manual system modification or when recovering from a
+/// corrupted bootloader configuration.
+///
+/// # Arguments
+///
+/// * `snapshot` - An optional snapshot identifier for systems utilizing Btrfs snapshots.
+/// * `firmware_arch` - The system's firmware architecture.
+/// * `shimdir` - The directory containing EFI shim binaries.
+/// * `boot_root` - The mount point of the boot partition.
+/// * `boot_dst` - The directory within the boot partition where bootloader files are located.
+/// * `entry_token` - A unique identifier for the bootloader entry.
+/// * `arg_no_variables` - Flag indicating whether to skip updating EFI variables.
+/// * `arg_no_random_seed` - Flag indicating whether to skip updating the random seed file.
+/// * `filename` - An optional parameter specifying a custom bootloader filename, used in advanced configurations.
+/// * `override_prefix` - Optional path used to override the system root, useful in chroot environments.
 ///
 /// # Returns
 ///
-/// Always returns `17`, indicating a specific status after execution.
+/// - `Ok(true)` if the bootloader was successfully force-updated.
+/// - `Ok(false)` if the bootloader is not installed using this tool and cannot be force-updated.
+/// - `Err(String)` with an error message if the force update process fails.
+///
+/// # Errors
+///
+/// Errors may occur if the tool cannot verify the current bootloader installation status,
+/// if the bootloader installation fails, or if there are issues with accessing necessary files or directories.
 ///
 /// # Examples
 ///
 /// ```
-/// let status = sdbootutil::command_force_update().unwrap();
-/// assert_eq!(status, true);
+/// let result = sdbootutil::command_force_update(
+///     Some(0),
+///     "x64",
+///     "/usr/share/efi/x86_64",
+///     "/boot/efi",
+///     "EFI/systemd",
+///     "opensuse-tumbleweed".to_string(),
+///     false,
+///     true,
+///     None,
+///     None
+/// );
+/// assert!(result.is_err(), "Expected an error from command_force_update");
 /// ```
-pub fn command_force_update() -> Result<bool, String> {
-    let message = "ForceUpdate command called";
-    log_info(message, 1);
-    Ok(true)
+pub fn command_force_update(
+    snapshot: Option<u64>,
+    firmware_arch: &str,
+    shimdir: &str,
+    boot_root: &str,
+    boot_dst: &str,
+    entry_token: String,
+    arg_no_variables: bool,
+    arg_no_random_seed: bool,
+    filename: Option<PathBuf>,
+    override_prefix: Option<&Path>,
+) -> Result<bool, String> {
+    let bootloader_name = bootloader_name(snapshot, firmware_arch, override_prefix)
+        .map_err(|e| format!("Force Update - Can't determine bootloader name: {}", e))?;
+    let result_installed = is_installed(
+        snapshot,
+        firmware_arch,
+        shimdir,
+        boot_root,
+        boot_dst,
+        filename,
+        override_prefix,
+    );
+    match result_installed {
+        Ok(bool) => {
+            if bool {
+                let message = format!(
+                    "Bootloader '{}' was installed using this tool",
+                    bootloader_name
+                );
+                log_info(&message, 1);
+                let result = install_bootloader(
+                    snapshot,
+                    firmware_arch,
+                    shimdir,
+                    boot_root,
+                    boot_dst,
+                    entry_token,
+                    arg_no_variables,
+                    arg_no_random_seed,
+                    override_prefix,
+                );
+                match result {
+                    Ok(()) => {
+                        let message = format!(
+                            "Bootloader '{}' successfully force-updated",
+                            bootloader_name
+                        );
+                        log_info(&message, 0);
+                        Ok(true)
+                    }
+                    Err(e) => {
+                        let message = format!("Bootloader could not be force-updated: {}", e);
+                        Err(message)
+                    }
+                }
+            } else {
+                let message = format!(
+                    "Bootloader '{}' isn't installed and can't be force-updated",
+                    bootloader_name
+                );
+                log_info(&message, 1);
+                Ok(false)
+            }
+        }
+        Err(e) => {
+            let message = format!("Can't determine if bootloader is installed: {}", e);
+            Err(message)
+        }
+    }
 }
 
 /// Executes the `UpdatePredictions` command.

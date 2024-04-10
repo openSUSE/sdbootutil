@@ -501,14 +501,24 @@ pub(crate) fn bootloader_version(
     filename: Option<PathBuf>,
     override_prefix: Option<&Path>,
 ) -> Result<String, String> {
-    let prefix = override_prefix.unwrap_or(Path::new(""));
+    let base_prefix = match override_prefix {
+        Some(override_path) => override_path.to_path_buf(),
+        None => Path::new("/").to_path_buf(),
+    };
+    let prefix = match snapshot {
+        Some(snap) => base_prefix
+            .join(".snapshots")
+            .join(snap.to_string())
+            .join("snapshot"),
+        None => base_prefix.clone(),
+    };
     let fn_path = match filename {
         Some(f) => f,
         None => {
             if PathBuf::from(format!("{}{}/shim.efi", prefix.display(), shimdir)).exists() {
                 PathBuf::from(format!(
                     "{}{}{}/grub.efi",
-                    prefix.display(),
+                    base_prefix.display(),
                     boot_root,
                     boot_dst
                 ))
@@ -516,7 +526,7 @@ pub(crate) fn bootloader_version(
                 let bootloader = find_bootloader(snapshot, firmware_arch, override_prefix)?;
                 PathBuf::from(format!(
                     "{}{}{}/{}",
-                    prefix.display(),
+                    base_prefix.display(),
                     boot_root,
                     boot_dst,
                     bootloader.file_name().unwrap().to_str().unwrap()
@@ -1189,7 +1199,11 @@ pub(crate) fn install_bootloader(
 
     fs::create_dir_all(full_boot_root.join("loader/entries")).map_err(|e| e.to_string())?;
 
-    let entry = if full_snapshot_prefix.join(shimdir).join("shim.efi").exists() {
+    let entry = if full_snapshot_prefix
+        .join(shimdir.strip_prefix("/").unwrap_or(&shimdir))
+        .join("shim.efi")
+        .exists()
+    {
         log_info(
             &format!(
                 "Installing {} with shim into {:?}",
