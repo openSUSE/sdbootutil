@@ -1,4 +1,6 @@
 use super::cli;
+use std::path::Path;
+use std::path::PathBuf;
 use std::process::Command;
 
 /// Prints a given message to the standard output.
@@ -68,33 +70,33 @@ pub(crate) fn get_command_output(
     Ok(output_str)
 }
 
-/// Retrieves system bootloader information using the `bootctl` command.
+/// Gathers bootloader information using the `bootctl` utility, including firmware architecture, entry token, and boot root.
 ///
-/// This function invokes the `bootctl` command with the `--no-pager` argument to ensure that the output
-/// is not paginated. It then parses the output to extract three key pieces of information:
-/// - The firmware architecture (`Firmware Arch`)
-/// - The bootloader entry token (`token`)
-/// - The boot root path (`$BOOT`)
+/// This function runs `bootctl --no-pager` and parses its output to extract crucial bootloader configuration details.
+/// It's useful for scripts or programs that need to interact with the system bootloader programmatically.
 ///
-/// These pieces of information are parsed from the lines that contain their respective identifiers.
-/// The function is designed to handle cases where the information may not be at the start of the line.
+/// # Arguments
+///
+/// * `override_prefix` - An optional `Path` reference that overrides the system root for testing or operation in a chroot environment.
 ///
 /// # Returns
 ///
-/// A `Result` containing a tuple of three `String` values:
-/// - `firmware_arch`: The architecture of the system's firmware.
-/// - `entry_token`: A unique token associated with the bootloader entry.
-/// - `boot_root`: The path to the boot root directory.
-///
-/// If the command execution fails, or any of the required information is missing from the output,
-/// the function returns an `Err` with a descriptive message.
+/// - `Ok((String, String, String))` containing the firmware architecture, bootloader entry token, and boot root path, respectively.
+/// - `Err(String)` with an error message if the command fails or the expected output is not found.
 ///
 /// # Errors
 ///
-/// The function will return an error in the following cases:
-/// - If the `bootctl` command execution fails.
-/// - If any of the required pieces of information (`Firmware Arch`, `token`, `boot_root`) are not found in the command output.
-pub(crate) fn get_bootctl_info() -> Result<(String, String, String), String> {
+/// Errors can occur due to failed command execution or missing information in the command output.
+pub(crate) fn get_bootctl_info(
+    override_prefix: Option<&Path>,
+) -> Result<(String, String, String), String> {
+    if override_prefix.is_some() {
+        return Ok((
+            "x64".to_string(),
+            "entry_token".to_string(),
+            override_prefix.unwrap().to_string_lossy().to_string(),
+        ));
+    }
     let output = get_command_output("bootctl", &["--no-pager"])
         .map_err(|e| format!("Bootctl call failed: {}", e))?;
 
@@ -135,33 +137,99 @@ pub(crate) fn get_bootctl_info() -> Result<(String, String, String), String> {
     Ok((firmware_arch, entry_token, boot_root))
 }
 
-/// Retrieves the UUID and source device of the root filesystem using the `findmnt` command.
+/// Retrieves the UUID and source device for a given mount point using `findmnt`.
 ///
-/// This function invokes the `findmnt` command with specific arguments to obtain the UUID and the source device
-/// associated with the root filesystem ('/'). The command output is then parsed to extract these two pieces of information.
+/// This function is particularly useful for scripts or systems that need to work with UUIDs and device paths,
+/// ensuring operations are performed on the correct filesystems.
+///
+/// # Arguments
+///
+/// * `mount_point` - A string slice that specifies the filesystem mount point to query, such as "/" for the root filesystem.
+/// * `override_prefix` - An optional `Path` reference for use in an alternative filesystem hierarchy, such as within a chroot environment.
 ///
 /// # Returns
 ///
-/// A `Result` containing a tuple of two `String` values:
-/// - `root_uuid`: The UUID of the root filesystem.
-/// - `root_device`: The source device for the root filesystem.
-///
-/// If the command execution fails, or if the UUID or the device information cannot be found in the command output,
-/// the function returns an `Err` with a descriptive message.
+/// - `Ok((String, String))` with the UUID and source device of the specified mount point.
+/// - `Err(String)` with a description of the error if the operation fails.
 ///
 /// # Errors
 ///
-/// The function will return an error in the following cases:
-/// - If the `findmnt` command execution fails.
-/// - If the UUID of the root filesystem is not found in the command output.
-/// - If the source device of the root filesystem is not found in the command output.
-pub(crate) fn get_root_filesystem_info() -> Result<(String, String), String> {
-    let output = get_command_output("findmnt", &["/", "-v", "-r", "-n", "-o", "UUID,SOURCE"])
-        .map_err(|e| format!("Bootctl call failed: {}", e))?;
+/// Errors may arise from command execution failure or parsing issues with the command's output.
+pub(crate) fn get_findmnt_output(
+    mount_point: &str,
+    override_prefix: Option<&Path>,
+) -> Result<(String, String), String> {
+    if override_prefix.is_some() {
+        return Ok(("123456789".to_string(), "sda1".to_string()));
+    }
+    let output = get_command_output(
+        "findmnt",
+        &[mount_point, "-v", "-r", "-n", "-o", "UUID,SOURCE"],
+    )
+    .map_err(|e| format!("findmnt call failed: {}", e))?;
 
     let mut parts = output.split_whitespace();
-    let root_uuid = parts.next().ok_or("UUID not found")?.to_string();
-    let root_device = parts.next().ok_or("Device not found")?.to_string();
+    let mount_uuid = parts.next().ok_or("UUID not found")?.to_string();
+    let mount_device = parts.next().ok_or("Device not found")?.to_string();
 
-    Ok((root_uuid, root_device))
+    Ok((mount_uuid, mount_device))
+}
+
+/// Creates an EFI boot entry using `efibootmgr`.
+///
+/// This function attempts to create a new EFI boot entry for the system. It constructs
+/// the necessary arguments for `efibootmgr` based on the provided drive, partition number,
+/// and the path to the bootloader entry. If an `override_prefix` is provided or an entry
+/// already exists, the function skips the boot entry creation and returns success immediately.
+///
+/// # Arguments
+///
+/// * `drive` - A reference to a `PathBuf` that specifies the drive (e.g., `/dev/sda`).
+/// * `partno` - The partition number as a `u32`.
+/// * `entry` - A reference to a `PathBuf` that specifies the path to the bootloader entry.
+/// * `override_prefix` - An optional reference to a `Path` that, if provided, overrides the default behavior.
+///
+/// # Returns
+///
+/// Returns `Ok(())` on success or an `Err` containing a `String` error message if the operation fails.
+///
+/// # Errors
+///
+/// Returns an error if the `efibootmgr` command fails or if any provided path arguments are invalid.
+pub(crate) fn create_efi_boot_entry(
+    drive: &PathBuf,
+    partno: u32,
+    entry: &PathBuf,
+    override_prefix: Option<&Path>,
+) -> Result<(), String> {
+    if override_prefix.is_some() {
+        return Ok(());
+    }
+
+    let efibootmgr_output = get_command_output("efibootmgr", &[]).map_err(|e| e.to_string())?;
+
+    if efibootmgr_output.contains("openSUSE Boot Manager") {
+        log_info("EFI entry for openSUSE already exists, skipping...", 2);
+        return Ok(());
+    }
+
+    let disk_arg = format!("--disk={}", drive.to_string_lossy());
+    let part_arg = format!("--part={}", partno);
+    let loader_arg = format!("--loader={}", entry.to_string_lossy());
+
+    let _output = get_command_output(
+        "efibootmgr",
+        &[
+            "-q",
+            "--create",
+            &disk_arg,
+            &part_arg,
+            "--label=openSUSE Boot Manager",
+            &loader_arg,
+        ],
+    )
+    .map_err(|e| e.to_string())?;
+    log_info("Created EFI boot entry for openSUSE", 2);
+
+    Ok(())
 }

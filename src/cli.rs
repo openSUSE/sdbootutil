@@ -1,4 +1,5 @@
 use clap::{ArgAction, Parser, Subcommand};
+use std::path::Path;
 
 /// Validates that a given string is not empty.
 ///
@@ -199,7 +200,12 @@ pub fn parse_args() -> Args {
     Args::parse()
 }
 
-pub(crate) fn ensure_root_permissions() -> Result<(), Box<dyn std::error::Error>> {
+pub(crate) fn ensure_root_permissions(
+    override_prefix: Option<&Path>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if override_prefix.is_some() {
+        return Ok(());
+    }
     match elevate::check() {
         elevate::RunningAs::Root | elevate::RunningAs::Suid => Ok(()),
         _ => {

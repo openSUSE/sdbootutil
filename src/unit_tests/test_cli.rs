@@ -2,6 +2,7 @@ use super::super::cli::*;
 use clap::error::ErrorKind;
 use clap::CommandFactory;
 use clap::Parser;
+use std::path::Path;
 
 #[test]
 fn test_non_empty_string_with_non_empty_input() {
@@ -232,4 +233,11 @@ fn test_default_snapshot_when_not_specified() {
         args.snapshot.is_none(),
         "Expected no default value for snapshot"
     );
+}
+
+#[test]
+fn test_ensure_root_permissions_override() {
+    let override_path = Path::new("/dummy/path");
+    let result = ensure_root_permissions(Some(override_path));
+    assert!(result.is_ok());
 }
