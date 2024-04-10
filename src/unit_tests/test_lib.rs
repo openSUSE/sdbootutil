@@ -347,9 +347,11 @@ fn test_command_install_shim_sdboot() {
         "opensuse-tumbleweed".to_string(),
         false,
         false,
+        None,
         Some(override_root.path()),
     );
     assert!(result.is_ok());
+    assert_eq!(result.unwrap(), true);
 
     let full_boot_root = override_root.path().join("boot/efi");
     assert!(full_boot_root.join("loader/entries.srel").exists());
@@ -468,9 +470,11 @@ fn test_command_install_shim_grub2() {
         "opensuse-tumbleweed".to_string(),
         false,
         false,
+        None,
         Some(override_root.path()),
     );
     assert!(result.is_ok());
+    assert_eq!(result.unwrap(), true);
 
     let full_boot_root = override_root.path().join("boot/efi");
     let grub_cfg_path = full_boot_root.join("EFI/opensuse").join("grub.cfg");
@@ -547,6 +551,209 @@ fn test_command_install_shim_grub2() {
         String::from_utf8(entry_token_path_content).unwrap(),
         "opensuse-tumbleweed"
     );
+}
+
+#[test]
+fn test_command_install_no_no_shim_grub2_no_snapshots() {
+    let override_root = TempDir::new().unwrap();
+    let snapshot_dir = override_root
+        .path();
+
+    let grub2_efi_path = snapshot_dir.join(format!("usr/share/grub2/{}-efi/grub.efi", ARCH));
+    let systemd_boot_efi_file = override_root
+        .path()
+        .join("boot/efi/EFI/opensuse/grub.efi");
+    fs::create_dir_all(grub2_efi_path.parent().unwrap())
+        .expect("Failed to create directory for systemd-boot EFI file");
+    fs::create_dir_all(systemd_boot_efi_file.parent().unwrap())
+        .expect("Failed to create directory for systemd-boot EFI file");
+    fs::copy(
+        PathBuf::from("src/unit_tests/test_files/grub2.efi"),
+        &grub2_efi_path,
+    )
+    .expect("Failed to copy systemd-boot test file");
+    File::create(&systemd_boot_efi_file)
+        .unwrap()
+        .write_all(b"GNU GRUB  version %s\x002.12\x00prefixESC at any time exits.")
+        .unwrap();
+
+        let bli_mod_src = snapshot_dir.join("grub2moddir/bli.mod");
+        fs::create_dir_all(bli_mod_src.parent().unwrap()).unwrap();
+        fs::write(&bli_mod_src, "bli module content").unwrap();
+
+    let sys_class_block_dir = override_root.path().join("sys/class/block/sda1");
+
+    fs::create_dir_all(&sys_class_block_dir.parent().unwrap())
+        .expect("Failed to create mock sys/class/block directory");
+    let device_dir = override_root.path().join("sys/devices/pci0000:00/0000:00:02.1/0000:04:00.0/0000:05:0d.0/0000:18:00.0/ata8/host7/target7:0:0/7:0:0:0/block/sda/sda1");
+    fs::create_dir_all(&device_dir).expect("Failed to create mock device directory");
+
+    std::os::unix::fs::symlink(&device_dir, &sys_class_block_dir)
+        .expect("Failed to create symbolic link for device");
+
+    let partition_file = sys_class_block_dir.join("partition");
+    fs::write(&partition_file, "1").expect("Failed to write mock partition number");
+
+    let full_boot_root = override_root.path().join("boot/efi");
+    let temp_boot_dst = full_boot_root.as_path().join("EFI/opensuse");
+    let install_flag = temp_boot_dst.join("installed_by_sdbootutil");
+    std::fs::write(&install_flag, "opensuse-tumbleweed").unwrap();
+
+    let result = command_install(
+        None,
+        "x64",
+        "/usr/share/efi/x86_64",
+        "/boot/efi",
+        "/EFI/opensuse",
+        "opensuse-tumbleweed".to_string(),
+        false,
+        false,
+        None,
+        Some(override_root.path()),
+    );
+    assert!(result.is_ok());
+    assert_eq!(result.unwrap(), false);
+
+    let full_boot_root = override_root.path().join("boot/efi");
+    let grub_cfg_path = full_boot_root.join("EFI/opensuse").join("grub.cfg");
+    assert!(!grub_cfg_path.exists());
+
+    let efi_boot_grub_cfg_path = full_boot_root.join("EFI/BOOT/grub.cfg");
+    assert!(!efi_boot_grub_cfg_path.exists());
+
+    let mod_dir = full_boot_root.join("EFI/opensuse").join(format!("{}-efi", ARCH));
+    let bli_mod_dst = mod_dir.join("bli.mod");
+    assert!(!bli_mod_dst.exists());
+
+    let random_seed_path = full_boot_root.join("loader/random-seed");
+    assert!(!random_seed_path.exists());
+
+    let entries_dir = full_boot_root.join("loader/entries");
+    assert!(!entries_dir.is_dir());
+
+    let temp_boot_dst = full_boot_root.as_path().join("EFI/opensuse");
+    let copied_bootloader = temp_boot_dst.join("grub.efi");
+
+    assert!(copied_bootloader.exists());
+
+    let boot_csv = temp_boot_dst.join("boot.csv");
+    assert!(!boot_csv.exists());
+
+    let kernel_dir = full_boot_root.join("opensuse-tumbleweed");
+    assert!(!kernel_dir.is_dir());
+
+    assert!(install_flag.exists());
+
+    let entry_token_path = override_root.path().join("etc/kernel/entry-token");
+    assert!(!entry_token_path.exists());
+}
+
+#[test]
+fn test_command_install_no_shim_sdboot() {
+    let override_root = TempDir::new().unwrap();
+    let snapshot_dir = override_root
+        .path()
+        .join(".snapshots")
+        .join("0")
+        .join("snapshot");
+    let mock_mok_manager_content = b"mock MokManager.efi content";
+    let mock_shim_content = b"mock shim.efi content";
+
+    let systemd_boot_test_file = snapshot_dir.join("usr/lib/systemd-boot/systemd-bootx64.efi");
+    let systemd_boot_efi_file = override_root
+        .path()
+        .join("boot/efi/EFI/opensuse/grub.efi");
+    fs::create_dir_all(systemd_boot_test_file.parent().unwrap())
+        .expect("Failed to create directory for systemd-boot EFI file");
+    fs::create_dir_all(systemd_boot_efi_file.parent().unwrap())
+        .expect("Failed to create directory for systemd-boot EFI file");
+    fs::copy(
+        PathBuf::from("src/unit_tests/test_files/systemd_boot.efi"),
+        &systemd_boot_test_file,
+    )
+    .expect("Failed to copy systemd-boot test file");
+    let shim_test_file = snapshot_dir.join("usr/share/efi/x86_64/shim.efi");
+    fs::create_dir_all(shim_test_file.parent().unwrap())
+        .expect("Failed to create directory for shim EFI file");
+    File::create(&shim_test_file)
+        .unwrap()
+        .write_all(b"")
+        .unwrap();
+    File::create(&systemd_boot_efi_file)
+        .unwrap()
+        .write_all(b"#### LoaderInfo: systemd-boot 256.4+suse.17.gbe772961ad ####")
+        .unwrap();
+
+    let temp_shimdir = snapshot_dir.join("usr/share/efi/x86_64");
+    std::fs::create_dir_all(&temp_shimdir).unwrap();
+
+    let mok_manager_efi = temp_shimdir.join("MokManager.efi");
+    let shim_efi = temp_shimdir.join("shim.efi");
+    std::fs::write(&mok_manager_efi, mock_mok_manager_content).unwrap();
+    std::fs::write(&shim_efi, mock_shim_content).unwrap();
+
+    let sys_class_block_dir = override_root.path().join("sys/class/block/sda1");
+
+    fs::create_dir_all(&sys_class_block_dir.parent().unwrap())
+        .expect("Failed to create mock sys/class/block directory");
+    let device_dir = override_root.path().join("sys/devices/pci0000:00/0000:00:02.1/0000:04:00.0/0000:05:0d.0/0000:18:00.0/ata8/host7/target7:0:0/7:0:0:0/block/sda/sda1");
+    fs::create_dir_all(&device_dir).expect("Failed to create mock device directory");
+
+    std::os::unix::fs::symlink(&device_dir, &sys_class_block_dir)
+        .expect("Failed to create symbolic link for device");
+
+    let partition_file = sys_class_block_dir.join("partition");
+    fs::write(&partition_file, "1").expect("Failed to write mock partition number");
+
+    let full_boot_root = override_root.path().join("boot/efi");
+    let temp_boot_dst = full_boot_root.as_path().join("EFI/opensuse");
+    let install_flag = temp_boot_dst.join("installed_by_sdbootutil");
+    std::fs::write(&install_flag, "opensuse-tumbleweed").unwrap();
+
+    let result = command_install(
+        Some(0),
+        "x64",
+        "/usr/share/efi/x86_64",
+        "/boot/efi",
+        "/EFI/opensuse",
+        "opensuse-tumbleweed".to_string(),
+        false,
+        false,
+        None,
+        Some(override_root.path()),
+    );
+    assert!(result.is_ok());
+    assert_eq!(result.unwrap(), false);
+
+    assert!(!full_boot_root.join("loader/entries.srel").exists());
+    assert!(!full_boot_root.join("loader/loader.conf").exists());
+
+    let random_seed_path = full_boot_root.join("loader/random-seed");
+    assert!(!random_seed_path.exists());
+
+    let entries_dir = full_boot_root.join("loader/entries");
+    assert!(!entries_dir.is_dir());
+    
+    let copied_mok_manager_efi = temp_boot_dst.join("MokManager.efi");
+    let copied_shim_efi = temp_boot_dst.join("shim.efi");
+    let copied_bootloader = temp_boot_dst.join("grub.efi");
+
+    assert!(!copied_mok_manager_efi.exists());
+
+    assert!(!copied_shim_efi.exists());
+
+    assert!(copied_bootloader.exists());
+
+    let boot_csv = temp_boot_dst.join("boot.csv");
+    assert!(!boot_csv.exists());
+
+    let kernel_dir = full_boot_root.join("opensuse-tumbleweed");
+    assert!(!kernel_dir.is_dir());
+
+    assert!(install_flag.exists());
+
+    let entry_token_path = override_root.path().join("etc/kernel/entry-token");
+    assert!(!entry_token_path.exists());
 }
 
 #[test]
@@ -636,29 +843,24 @@ fn test_command_needs_update_shim_systemd_boot() {
         .join("snapshot");
 
     let systemd_boot_test_file = snapshot_dir.join("usr/lib/systemd-boot/systemd-bootx64.efi");
-    let systemd_boot_efi_file = temp_dir
-        .path()
-        .join("boot/efi/EFI/systemd/systemd-bootx64.efi");
     fs::create_dir_all(systemd_boot_test_file.parent().unwrap())
-        .expect("Failed to create directory for systemd-boot EFI file");
-    fs::create_dir_all(systemd_boot_efi_file.parent().unwrap())
         .expect("Failed to create directory for systemd-boot EFI file");
     fs::copy(
         PathBuf::from("src/unit_tests/test_files/systemd_boot.efi"),
         &systemd_boot_test_file,
     )
     .expect("Failed to copy systemd-boot test file");
-    let shim_test_file = temp_dir.path().join("usr/share/efi/x86_64/shim.efi");
-    let shim_efi_file = temp_dir.path().join("boot/efi/EFI/systemd/grub.efi");
+    let shim_test_file = snapshot_dir.join("usr/share/efi/x86_64/shim.efi");
+    let grub_efi_file = temp_dir.path().join("boot/efi/EFI/systemd/grub.efi");
     fs::create_dir_all(shim_test_file.parent().unwrap())
         .expect("Failed to create directory for shim EFI file");
-    fs::create_dir_all(shim_efi_file.parent().unwrap())
+    fs::create_dir_all(grub_efi_file.parent().unwrap())
         .expect("Failed to create directory for shim EFI file");
     File::create(&shim_test_file)
         .unwrap()
         .write_all(b"")
         .unwrap();
-    File::create(&shim_efi_file)
+    File::create(&grub_efi_file)
         .unwrap()
         .write_all(b"#### LoaderInfo: systemd-boot 253.4+suse.17.gbe772961ad ####")
         .unwrap();
@@ -696,22 +898,12 @@ fn test_command_needs_update_no_shim_systemd_boot() {
     fs::copy(
         PathBuf::from("src/unit_tests/test_files/systemd_boot.efi"),
         &systemd_boot_test_file,
+    ).expect("Failed to copy systemd-boot test file");
+    fs::copy(
+        PathBuf::from("src/unit_tests/test_files/systemd_boot.efi"),
+        &systemd_boot_efi_file,
     )
     .expect("Failed to copy systemd-boot test file");
-    let shim_test_file = temp_dir.path().join("usr/share/efi/x86_64/shim.efi");
-    let shim_efi_file = temp_dir.path().join("boot/efi/EFI/systemd/grub.efi");
-    fs::create_dir_all(shim_test_file.parent().unwrap())
-        .expect("Failed to create directory for shim EFI file");
-    fs::create_dir_all(shim_efi_file.parent().unwrap())
-        .expect("Failed to create directory for shim EFI file");
-    File::create(&shim_test_file)
-        .unwrap()
-        .write_all(b"")
-        .unwrap();
-    File::create(&shim_efi_file)
-        .unwrap()
-        .write_all(b"#### LoaderInfo: systemd-boot 256.4+suse.17.gbe772961ad ####")
-        .unwrap();
 
     let needs_update = command_needs_update(
         Some(0),
@@ -827,15 +1019,1028 @@ fn test_command_needs_update_no_shim_grub2() {
 }
 
 #[test]
-fn test_command_update() {
-    let result = command_update().unwrap();
-    assert_eq!(result, true);
+fn test_command_update_shim_sdboot() {
+    let override_root = TempDir::new().unwrap();
+    let snapshot_dir = override_root
+        .path()
+        .join(".snapshots")
+        .join("0")
+        .join("snapshot");
+    let mock_mok_manager_content = b"mock MokManager.efi content";
+    let mock_shim_content = b"mock shim.efi content";
+
+    let systemd_boot_test_file = snapshot_dir.join("usr/lib/systemd-boot/systemd-bootx64.efi");
+    let systemd_boot_efi_file = override_root
+        .path()
+        .join("boot/efi/EFI/opensuse/grub.efi");
+    fs::create_dir_all(systemd_boot_test_file.parent().unwrap())
+        .expect("Failed to create directory for systemd-boot EFI file");
+    fs::create_dir_all(systemd_boot_efi_file.parent().unwrap())
+        .expect("Failed to create directory for systemd-boot EFI file");
+    fs::copy(
+        PathBuf::from("src/unit_tests/test_files/systemd_boot.efi"),
+        &systemd_boot_test_file,
+    )
+    .expect("Failed to copy systemd-boot test file");
+    let shim_test_file = snapshot_dir.join("usr/share/efi/x86_64/shim.efi");
+    fs::create_dir_all(shim_test_file.parent().unwrap())
+        .expect("Failed to create directory for shim EFI file");
+    File::create(&shim_test_file)
+        .unwrap()
+        .write_all(b"")
+        .unwrap();
+    File::create(&systemd_boot_efi_file)
+        .unwrap()
+        .write_all(b"#### LoaderInfo: systemd-boot 253.4+suse.17.gbe772961ad ####")
+        .unwrap();
+
+    let temp_shimdir = snapshot_dir.join("usr/share/efi/x86_64");
+    std::fs::create_dir_all(&temp_shimdir).unwrap();
+
+    let mok_manager_efi = temp_shimdir.join("MokManager.efi");
+    let shim_efi = temp_shimdir.join("shim.efi");
+    std::fs::write(&mok_manager_efi, mock_mok_manager_content).unwrap();
+    std::fs::write(&shim_efi, mock_shim_content).unwrap();
+
+    let sys_class_block_dir = override_root.path().join("sys/class/block/sda1");
+
+    fs::create_dir_all(&sys_class_block_dir.parent().unwrap())
+        .expect("Failed to create mock sys/class/block directory");
+    let device_dir = override_root.path().join("sys/devices/pci0000:00/0000:00:02.1/0000:04:00.0/0000:05:0d.0/0000:18:00.0/ata8/host7/target7:0:0/7:0:0:0/block/sda/sda1");
+    fs::create_dir_all(&device_dir).expect("Failed to create mock device directory");
+
+    std::os::unix::fs::symlink(&device_dir, &sys_class_block_dir)
+        .expect("Failed to create symbolic link for device");
+
+    let partition_file = sys_class_block_dir.join("partition");
+    fs::write(&partition_file, "1").expect("Failed to write mock partition number");
+
+    let result = command_update(
+        Some(0),
+        Some(0),
+        "x64",
+        "/usr/share/efi/x86_64",
+        "/boot/efi",
+        "/EFI/opensuse",
+        "opensuse-tumbleweed".to_string(),
+        false,
+        false,
+        Some(override_root.path()),
+    );
+    assert!(result.is_ok());
+    assert_eq!(result.unwrap(), true);
+
+    let full_boot_root = override_root.path().join("boot/efi");
+    assert!(full_boot_root.join("loader/entries.srel").exists());
+    let copied_content_entries = std::fs::read(full_boot_root.join("loader/entries.srel")).unwrap();
+    assert_eq!(copied_content_entries, b"type1");
+    assert!(full_boot_root.join("loader/loader.conf").exists());
+    let copied_content_loader = std::fs::read(full_boot_root.join("loader/loader.conf")).unwrap();
+    assert_eq!(copied_content_loader, b"#timeout 3\n#console-mode keep\n");
+
+    let random_seed_path = full_boot_root.join("loader/random-seed");
+    assert!(random_seed_path.exists());
+
+    let entries_dir = full_boot_root.join("loader/entries");
+    assert!(entries_dir.is_dir());
+
+    let temp_boot_dst = full_boot_root.as_path().join("EFI/opensuse");
+    let copied_mok_manager_efi = temp_boot_dst.join("MokManager.efi");
+    let copied_shim_efi = temp_boot_dst.join("shim.efi");
+    let copied_bootloader = temp_boot_dst.join("grub.efi");
+
+    assert!(copied_mok_manager_efi.exists());
+    let copied_content = std::fs::read(&copied_mok_manager_efi).unwrap();
+    assert_eq!(copied_content, mock_mok_manager_content);
+
+    assert!(copied_shim_efi.exists());
+    let copied_content = std::fs::read(&copied_shim_efi).unwrap();
+    assert_eq!(copied_content, mock_shim_content);
+
+    assert!(copied_bootloader.exists());
+    let copied_content = std::fs::read(&copied_bootloader).unwrap();
+    assert_ne!(copied_content, b"#### LoaderInfo: systemd-boot 253.4+suse.17.gbe772961ad ####");
+
+    let boot_csv = temp_boot_dst.join("boot.csv");
+    assert!(boot_csv.exists());
+    let copied_boot_csv_content = std::fs::read(&boot_csv).unwrap();
+    assert_eq!(
+        String::from_utf8(copied_boot_csv_content).unwrap(),
+        format!("{},openSUSE Boot Manager\n", "shim.efi")
+    );
+
+    let kernel_dir = full_boot_root.join("opensuse-tumbleweed");
+    assert!(kernel_dir.is_dir());
+
+    let install_flag = temp_boot_dst.join("installed_by_sdbootutil");
+    assert!(install_flag.exists());
+    let install_flag_content = std::fs::read(&install_flag).unwrap();
+    assert_eq!(
+        String::from_utf8(install_flag_content).unwrap(),
+        "opensuse-tumbleweed"
+    );
+
+    let entry_token_path = override_root.path().join("etc/kernel/entry-token");
+    assert!(entry_token_path.exists());
+    let entry_token_path_content = std::fs::read(&entry_token_path).unwrap();
+    assert_eq!(
+        String::from_utf8(entry_token_path_content).unwrap(),
+        "opensuse-tumbleweed"
+    );
 }
 
 #[test]
-fn test_command_force_update() {
-    let result = command_force_update().unwrap();
-    assert_eq!(result, true);
+fn test_command_update_no_shim_sdboot() {
+    let override_root = TempDir::new().unwrap();
+    let snapshot_dir = override_root
+        .path()
+        .join(".snapshots")
+        .join("0")
+        .join("snapshot");
+
+    let systemd_boot_test_file = snapshot_dir.join("usr/lib/systemd-boot/systemd-bootx64.efi");
+    let systemd_boot_efi_file = override_root
+        .path()
+        .join("boot/efi/EFI/opensuse/systemd-bootx64.efi");
+    fs::create_dir_all(systemd_boot_test_file.parent().unwrap())
+        .expect("Failed to create directory for systemd-boot EFI file");
+    fs::create_dir_all(systemd_boot_efi_file.parent().unwrap())
+        .expect("Failed to create directory for systemd-boot EFI file");
+    fs::copy(
+        PathBuf::from("src/unit_tests/test_files/systemd_boot.efi"),
+        &systemd_boot_test_file,
+    )
+    .expect("Failed to copy systemd-boot test file");
+    File::create(&systemd_boot_efi_file)
+        .unwrap()
+        .write_all(b"#### LoaderInfo: systemd-boot 253.4+suse.17.gbe772961ad ####")
+        .unwrap();
+
+    let sys_class_block_dir = override_root.path().join("sys/class/block/sda1");
+
+    fs::create_dir_all(&sys_class_block_dir.parent().unwrap())
+        .expect("Failed to create mock sys/class/block directory");
+    let device_dir = override_root.path().join("sys/devices/pci0000:00/0000:00:02.1/0000:04:00.0/0000:05:0d.0/0000:18:00.0/ata8/host7/target7:0:0/7:0:0:0/block/sda/sda1");
+    fs::create_dir_all(&device_dir).expect("Failed to create mock device directory");
+
+    std::os::unix::fs::symlink(&device_dir, &sys_class_block_dir)
+        .expect("Failed to create symbolic link for device");
+
+    let partition_file = sys_class_block_dir.join("partition");
+    fs::write(&partition_file, "1").expect("Failed to write mock partition number");
+
+    let result = command_update(
+        Some(0),
+        Some(0),
+        "x64",
+        "/usr/share/efi/x86_64",
+        "/boot/efi",
+        "/EFI/opensuse",
+        "opensuse-tumbleweed".to_string(),
+        false,
+        false,
+        Some(override_root.path()),
+    );
+    assert!(result.is_ok());
+    assert_eq!(result.unwrap(), true);
+
+    let full_boot_root = override_root.path().join("boot/efi");
+    assert!(full_boot_root.join("loader/entries.srel").exists());
+    let copied_content_entries = std::fs::read(full_boot_root.join("loader/entries.srel")).unwrap();
+    assert_eq!(copied_content_entries, b"type1");
+    assert!(full_boot_root.join("loader/loader.conf").exists());
+    let copied_content_loader = std::fs::read(full_boot_root.join("loader/loader.conf")).unwrap();
+    assert_eq!(copied_content_loader, b"#timeout 3\n#console-mode keep\n");
+
+    let random_seed_path = full_boot_root.join("loader/random-seed");
+    assert!(random_seed_path.exists());
+
+    let entries_dir = full_boot_root.join("loader/entries");
+    assert!(entries_dir.is_dir());
+
+    let temp_boot_dst = full_boot_root.as_path().join("EFI/opensuse");
+    let copied_bootloader = temp_boot_dst.join("systemd-bootx64.efi");
+
+    assert!(copied_bootloader.exists());
+    let copied_content = std::fs::read(&copied_bootloader).unwrap();
+    assert_ne!(copied_content, b"#### LoaderInfo: systemd-boot 253.4+suse.17.gbe772961ad ####");
+
+    let boot_csv = temp_boot_dst.join("boot.csv");
+    assert!(boot_csv.exists());
+    let copied_boot_csv_content = std::fs::read(&boot_csv).unwrap();
+    assert_eq!(
+        String::from_utf8(copied_boot_csv_content).unwrap(),
+        format!("{},openSUSE Boot Manager\n", "systemd-bootx64.efi")
+    );
+
+    let kernel_dir = full_boot_root.join("opensuse-tumbleweed");
+    assert!(kernel_dir.is_dir());
+
+    let install_flag = temp_boot_dst.join("installed_by_sdbootutil");
+    assert!(install_flag.exists());
+    let install_flag_content = std::fs::read(&install_flag).unwrap();
+    assert_eq!(
+        String::from_utf8(install_flag_content).unwrap(),
+        "opensuse-tumbleweed"
+    );
+
+    let entry_token_path = override_root.path().join("etc/kernel/entry-token");
+    assert!(entry_token_path.exists());
+    let entry_token_path_content = std::fs::read(&entry_token_path).unwrap();
+    assert_eq!(
+        String::from_utf8(entry_token_path_content).unwrap(),
+        "opensuse-tumbleweed"
+    );
+}
+
+#[test]
+fn test_command_update_shim_grub2() {
+    let override_root = TempDir::new().unwrap();
+    let snapshot_dir = override_root
+        .path()
+        .join(".snapshots")
+        .join("0")
+        .join("snapshot");
+    let mock_mok_manager_content = b"mock MokManager.efi content";
+    let mock_shim_content = b"mock shim.efi content";
+
+    let grub2_efi_path = snapshot_dir.join(format!("usr/share/grub2/{}-efi/grub.efi", ARCH));
+    let systemd_boot_efi_file = override_root
+        .path()
+        .join("boot/efi/EFI/opensuse/grub.efi");
+    fs::create_dir_all(grub2_efi_path.parent().unwrap())
+        .expect("Failed to create directory for systemd-boot EFI file");
+    fs::create_dir_all(systemd_boot_efi_file.parent().unwrap())
+        .expect("Failed to create directory for systemd-boot EFI file");
+    fs::copy(
+        PathBuf::from("src/unit_tests/test_files/grub2.efi"),
+        &grub2_efi_path,
+    )
+    .expect("Failed to copy systemd-boot test file");
+    let shim_test_file = snapshot_dir.join("usr/share/efi/x86_64/shim.efi");
+    fs::create_dir_all(shim_test_file.parent().unwrap())
+        .expect("Failed to create directory for shim EFI file");
+    File::create(&shim_test_file)
+        .unwrap()
+        .write_all(b"")
+        .unwrap();
+    File::create(&systemd_boot_efi_file)
+        .unwrap()
+        .write_all(b"GNU GRUB  version %s\x002.10\x00prefixESC at any time exits.")
+        .unwrap();
+
+        let bli_mod_src = snapshot_dir.join("grub2moddir/bli.mod");
+        fs::create_dir_all(bli_mod_src.parent().unwrap()).unwrap();
+        fs::write(&bli_mod_src, "bli module content").unwrap();
+
+    let temp_shimdir = snapshot_dir.join("usr/share/efi/x86_64");
+    std::fs::create_dir_all(&temp_shimdir).unwrap();
+
+    let mok_manager_efi = temp_shimdir.join("MokManager.efi");
+    let shim_efi = temp_shimdir.join("shim.efi");
+    std::fs::write(&mok_manager_efi, mock_mok_manager_content).unwrap();
+    std::fs::write(&shim_efi, mock_shim_content).unwrap();
+
+    let sys_class_block_dir = override_root.path().join("sys/class/block/sda1");
+
+    fs::create_dir_all(&sys_class_block_dir.parent().unwrap())
+        .expect("Failed to create mock sys/class/block directory");
+    let device_dir = override_root.path().join("sys/devices/pci0000:00/0000:00:02.1/0000:04:00.0/0000:05:0d.0/0000:18:00.0/ata8/host7/target7:0:0/7:0:0:0/block/sda/sda1");
+    fs::create_dir_all(&device_dir).expect("Failed to create mock device directory");
+
+    std::os::unix::fs::symlink(&device_dir, &sys_class_block_dir)
+        .expect("Failed to create symbolic link for device");
+
+    let partition_file = sys_class_block_dir.join("partition");
+    fs::write(&partition_file, "1").expect("Failed to write mock partition number");
+
+    let result = command_update(
+        Some(0),
+        Some(0),
+        "x64",
+        "/usr/share/efi/x86_64",
+        "/boot/efi",
+        "/EFI/opensuse",
+        "opensuse-tumbleweed".to_string(),
+        false,
+        false,
+        Some(override_root.path()),
+    );
+    assert!(result.is_ok());
+    assert_eq!(result.unwrap(), true);
+
+    let full_boot_root = override_root.path().join("boot/efi");
+    let grub_cfg_path = full_boot_root.join("EFI/opensuse").join("grub.cfg");
+    assert!(grub_cfg_path.exists());
+
+    let efi_boot_grub_cfg_path = full_boot_root.join("EFI/BOOT/grub.cfg");
+    assert!(efi_boot_grub_cfg_path.exists());
+
+    let mod_dir = full_boot_root.join("EFI/opensuse").join(format!("{}-efi", ARCH));
+    let bli_mod_dst = mod_dir.join("bli.mod");
+    assert!(bli_mod_dst.exists());
+
+    let random_seed_path = full_boot_root.join("loader/random-seed");
+    assert!(random_seed_path.exists());
+
+    let entries_dir = full_boot_root.join("loader/entries");
+    assert!(entries_dir.is_dir());
+
+    let temp_boot_dst = full_boot_root.as_path().join("EFI/opensuse");
+    let copied_mok_manager_efi = temp_boot_dst.join("MokManager.efi");
+    let copied_shim_efi = temp_boot_dst.join("shim.efi");
+    let copied_bootloader = temp_boot_dst.join("grub.efi");
+
+    assert!(copied_mok_manager_efi.exists());
+    let copied_content = std::fs::read(&copied_mok_manager_efi).unwrap();
+    assert_eq!(copied_content, mock_mok_manager_content);
+
+    assert!(copied_shim_efi.exists());
+    let copied_content = std::fs::read(&copied_shim_efi).unwrap();
+    assert_eq!(copied_content, mock_shim_content);
+
+    assert!(copied_bootloader.exists());
+
+    let boot_csv = temp_boot_dst.join("boot.csv");
+    assert!(boot_csv.exists());
+    let copied_boot_csv_content = std::fs::read(&boot_csv).unwrap();
+    assert_eq!(
+        String::from_utf8(copied_boot_csv_content).unwrap(),
+        format!("{},openSUSE Boot Manager\n", "shim.efi")
+    );
+
+    let kernel_dir = full_boot_root.join("opensuse-tumbleweed");
+    assert!(kernel_dir.is_dir());
+
+    let install_flag = temp_boot_dst.join("installed_by_sdbootutil");
+    assert!(install_flag.exists());
+    let install_flag_content = std::fs::read(&install_flag).unwrap();
+    assert_eq!(
+        String::from_utf8(install_flag_content).unwrap(),
+        "opensuse-tumbleweed"
+    );
+
+    let entry_token_path = override_root.path().join("etc/kernel/entry-token");
+    assert!(entry_token_path.exists());
+    let entry_token_path_content = std::fs::read(&entry_token_path).unwrap();
+    assert_eq!(
+        String::from_utf8(entry_token_path_content).unwrap(),
+        "opensuse-tumbleweed"
+    );
+}
+
+#[test]
+fn test_command_update_no_shim_grub2_no_snapshots() {
+    let override_root = TempDir::new().unwrap();
+    let snapshot_dir = override_root
+        .path();
+
+    let grub2_efi_path = snapshot_dir.join(format!("usr/share/grub2/{}-efi/grub.efi", ARCH));
+    let systemd_boot_efi_file = override_root
+        .path()
+        .join("boot/efi/EFI/opensuse/grub.efi");
+    fs::create_dir_all(grub2_efi_path.parent().unwrap())
+        .expect("Failed to create directory for systemd-boot EFI file");
+    fs::create_dir_all(systemd_boot_efi_file.parent().unwrap())
+        .expect("Failed to create directory for systemd-boot EFI file");
+    fs::copy(
+        PathBuf::from("src/unit_tests/test_files/grub2.efi"),
+        &grub2_efi_path,
+    )
+    .expect("Failed to copy systemd-boot test file");
+    File::create(&systemd_boot_efi_file)
+        .unwrap()
+        .write_all(b"GNU GRUB  version %s\x002.10\x00prefixESC at any time exits.")
+        .unwrap();
+
+        let bli_mod_src = snapshot_dir.join("grub2moddir/bli.mod");
+        fs::create_dir_all(bli_mod_src.parent().unwrap()).unwrap();
+        fs::write(&bli_mod_src, "bli module content").unwrap();
+
+    let sys_class_block_dir = override_root.path().join("sys/class/block/sda1");
+
+    fs::create_dir_all(&sys_class_block_dir.parent().unwrap())
+        .expect("Failed to create mock sys/class/block directory");
+    let device_dir = override_root.path().join("sys/devices/pci0000:00/0000:00:02.1/0000:04:00.0/0000:05:0d.0/0000:18:00.0/ata8/host7/target7:0:0/7:0:0:0/block/sda/sda1");
+    fs::create_dir_all(&device_dir).expect("Failed to create mock device directory");
+
+    std::os::unix::fs::symlink(&device_dir, &sys_class_block_dir)
+        .expect("Failed to create symbolic link for device");
+
+    let partition_file = sys_class_block_dir.join("partition");
+    fs::write(&partition_file, "1").expect("Failed to write mock partition number");
+
+    let result = command_update(
+        None,
+        None,
+        "x64",
+        "/usr/share/efi/x86_64",
+        "/boot/efi",
+        "/EFI/opensuse",
+        "opensuse-tumbleweed".to_string(),
+        false,
+        false,
+        Some(override_root.path()),
+    );
+    assert!(result.is_ok());
+    assert_eq!(result.unwrap(), true);
+
+    let full_boot_root = override_root.path().join("boot/efi");
+    let grub_cfg_path = full_boot_root.join("EFI/opensuse").join("grub.cfg");
+    assert!(grub_cfg_path.exists());
+
+    let efi_boot_grub_cfg_path = full_boot_root.join("EFI/BOOT/grub.cfg");
+    assert!(efi_boot_grub_cfg_path.exists());
+
+    let mod_dir = full_boot_root.join("EFI/opensuse").join(format!("{}-efi", ARCH));
+    let bli_mod_dst = mod_dir.join("bli.mod");
+    assert!(bli_mod_dst.exists());
+
+    let random_seed_path = full_boot_root.join("loader/random-seed");
+    assert!(random_seed_path.exists());
+
+    let entries_dir = full_boot_root.join("loader/entries");
+    assert!(entries_dir.is_dir());
+
+    let temp_boot_dst = full_boot_root.as_path().join("EFI/opensuse");
+    let copied_bootloader = temp_boot_dst.join("grub.efi");
+
+    assert!(copied_bootloader.exists());
+
+    let boot_csv = temp_boot_dst.join("boot.csv");
+    assert!(boot_csv.exists());
+    let copied_boot_csv_content = std::fs::read(&boot_csv).unwrap();
+    assert_eq!(
+        String::from_utf8(copied_boot_csv_content).unwrap(),
+        format!("{},openSUSE Boot Manager\n", "grub.efi")
+    );
+
+    let kernel_dir = full_boot_root.join("opensuse-tumbleweed");
+    assert!(kernel_dir.is_dir());
+
+    let install_flag = temp_boot_dst.join("installed_by_sdbootutil");
+    assert!(install_flag.exists());
+    let install_flag_content = std::fs::read(&install_flag).unwrap();
+    assert_eq!(
+        String::from_utf8(install_flag_content).unwrap(),
+        "opensuse-tumbleweed"
+    );
+
+    let entry_token_path = override_root.path().join("etc/kernel/entry-token");
+    assert!(entry_token_path.exists());
+    let entry_token_path_content = std::fs::read(&entry_token_path).unwrap();
+    assert_eq!(
+        String::from_utf8(entry_token_path_content).unwrap(),
+        "opensuse-tumbleweed"
+    );
+}
+
+#[test]
+fn test_command_update_no_update_no_shim_grub2_no_snapshots() {
+    let override_root = TempDir::new().unwrap();
+    let snapshot_dir = override_root
+        .path();
+
+    let grub2_efi_path = snapshot_dir.join(format!("usr/share/grub2/{}-efi/grub.efi", ARCH));
+    let systemd_boot_efi_file = override_root
+        .path()
+        .join("boot/efi/EFI/opensuse/grub.efi");
+    fs::create_dir_all(grub2_efi_path.parent().unwrap())
+        .expect("Failed to create directory for systemd-boot EFI file");
+    fs::create_dir_all(systemd_boot_efi_file.parent().unwrap())
+        .expect("Failed to create directory for systemd-boot EFI file");
+    fs::copy(
+        PathBuf::from("src/unit_tests/test_files/grub2.efi"),
+        &grub2_efi_path,
+    )
+    .expect("Failed to copy systemd-boot test file");
+    File::create(&systemd_boot_efi_file)
+        .unwrap()
+        .write_all(b"GNU GRUB  version %s\x002.12\x00prefixESC at any time exits.")
+        .unwrap();
+
+        let bli_mod_src = snapshot_dir.join("grub2moddir/bli.mod");
+        fs::create_dir_all(bli_mod_src.parent().unwrap()).unwrap();
+        fs::write(&bli_mod_src, "bli module content").unwrap();
+
+    let sys_class_block_dir = override_root.path().join("sys/class/block/sda1");
+
+    fs::create_dir_all(&sys_class_block_dir.parent().unwrap())
+        .expect("Failed to create mock sys/class/block directory");
+    let device_dir = override_root.path().join("sys/devices/pci0000:00/0000:00:02.1/0000:04:00.0/0000:05:0d.0/0000:18:00.0/ata8/host7/target7:0:0/7:0:0:0/block/sda/sda1");
+    fs::create_dir_all(&device_dir).expect("Failed to create mock device directory");
+
+    std::os::unix::fs::symlink(&device_dir, &sys_class_block_dir)
+        .expect("Failed to create symbolic link for device");
+
+    let partition_file = sys_class_block_dir.join("partition");
+    fs::write(&partition_file, "1").expect("Failed to write mock partition number");
+
+    let result = command_update(
+        None,
+        None,
+        "x64",
+        "/usr/share/efi/x86_64",
+        "/boot/efi",
+        "/EFI/opensuse",
+        "opensuse-tumbleweed".to_string(),
+        false,
+        false,
+        Some(override_root.path()),
+    );
+    assert!(result.is_ok());
+    assert_eq!(result.unwrap(), false);
+
+    let full_boot_root = override_root.path().join("boot/efi");
+    let grub_cfg_path = full_boot_root.join("EFI/opensuse").join("grub.cfg");
+    assert!(!grub_cfg_path.exists());
+
+    let efi_boot_grub_cfg_path = full_boot_root.join("EFI/BOOT/grub.cfg");
+    assert!(!efi_boot_grub_cfg_path.exists());
+
+    let mod_dir = full_boot_root.join("EFI/opensuse").join(format!("{}-efi", ARCH));
+    let bli_mod_dst = mod_dir.join("bli.mod");
+    assert!(!bli_mod_dst.exists());
+
+    let random_seed_path = full_boot_root.join("loader/random-seed");
+    assert!(!random_seed_path.exists());
+
+    let entries_dir = full_boot_root.join("loader/entries");
+    assert!(!entries_dir.is_dir());
+
+    let temp_boot_dst = full_boot_root.as_path().join("EFI/opensuse");
+    let copied_bootloader = temp_boot_dst.join("grub.efi");
+
+    assert!(copied_bootloader.exists());
+
+    let boot_csv = temp_boot_dst.join("boot.csv");
+    assert!(!boot_csv.exists());
+
+    let kernel_dir = full_boot_root.join("opensuse-tumbleweed");
+    assert!(!kernel_dir.is_dir());
+
+    let install_flag = temp_boot_dst.join("installed_by_sdbootutil");
+    assert!(!install_flag.exists());
+
+    let entry_token_path = override_root.path().join("etc/kernel/entry-token");
+    assert!(!entry_token_path.exists());
+}
+
+#[test]
+fn test_command_update_no_update_shim_sdboot() {
+    let override_root = TempDir::new().unwrap();
+    let snapshot_dir = override_root
+        .path()
+        .join(".snapshots")
+        .join("0")
+        .join("snapshot");
+    let mock_mok_manager_content = b"mock MokManager.efi content";
+    let mock_shim_content = b"mock shim.efi content";
+
+    let systemd_boot_test_file = snapshot_dir.join("usr/lib/systemd-boot/systemd-bootx64.efi");
+    let systemd_boot_efi_file = override_root
+        .path()
+        .join("boot/efi/EFI/opensuse/grub.efi");
+    fs::create_dir_all(systemd_boot_test_file.parent().unwrap())
+        .expect("Failed to create directory for systemd-boot EFI file");
+    fs::create_dir_all(systemd_boot_efi_file.parent().unwrap())
+        .expect("Failed to create directory for systemd-boot EFI file");
+    fs::copy(
+        PathBuf::from("src/unit_tests/test_files/systemd_boot.efi"),
+        &systemd_boot_test_file,
+    )
+    .expect("Failed to copy systemd-boot test file");
+    let shim_test_file = snapshot_dir.join("usr/share/efi/x86_64/shim.efi");
+    fs::create_dir_all(shim_test_file.parent().unwrap())
+        .expect("Failed to create directory for shim EFI file");
+    File::create(&shim_test_file)
+        .unwrap()
+        .write_all(b"")
+        .unwrap();
+    File::create(&systemd_boot_efi_file)
+        .unwrap()
+        .write_all(b"#### LoaderInfo: systemd-boot 256.4+suse.17.gbe772961ad ####")
+        .unwrap();
+
+    let temp_shimdir = snapshot_dir.join("usr/share/efi/x86_64");
+    std::fs::create_dir_all(&temp_shimdir).unwrap();
+
+    let mok_manager_efi = temp_shimdir.join("MokManager.efi");
+    let shim_efi = temp_shimdir.join("shim.efi");
+    std::fs::write(&mok_manager_efi, mock_mok_manager_content).unwrap();
+    std::fs::write(&shim_efi, mock_shim_content).unwrap();
+
+    let sys_class_block_dir = override_root.path().join("sys/class/block/sda1");
+
+    fs::create_dir_all(&sys_class_block_dir.parent().unwrap())
+        .expect("Failed to create mock sys/class/block directory");
+    let device_dir = override_root.path().join("sys/devices/pci0000:00/0000:00:02.1/0000:04:00.0/0000:05:0d.0/0000:18:00.0/ata8/host7/target7:0:0/7:0:0:0/block/sda/sda1");
+    fs::create_dir_all(&device_dir).expect("Failed to create mock device directory");
+
+    std::os::unix::fs::symlink(&device_dir, &sys_class_block_dir)
+        .expect("Failed to create symbolic link for device");
+
+    let partition_file = sys_class_block_dir.join("partition");
+    fs::write(&partition_file, "1").expect("Failed to write mock partition number");
+
+    let result = command_update(
+        Some(0),
+        Some(0),
+        "x64",
+        "/usr/share/efi/x86_64",
+        "/boot/efi",
+        "/EFI/opensuse",
+        "opensuse-tumbleweed".to_string(),
+        false,
+        false,
+        Some(override_root.path()),
+    );
+    assert!(result.is_ok());
+    assert_eq!(result.unwrap(), false);
+
+    let full_boot_root = override_root.path().join("boot/efi");
+    assert!(!full_boot_root.join("loader/entries.srel").exists());
+    assert!(!full_boot_root.join("loader/loader.conf").exists());
+
+    let random_seed_path = full_boot_root.join("loader/random-seed");
+    assert!(!random_seed_path.exists());
+
+    let entries_dir = full_boot_root.join("loader/entries");
+    assert!(!entries_dir.is_dir());
+
+    let temp_boot_dst = full_boot_root.as_path().join("EFI/opensuse");
+    let copied_mok_manager_efi = temp_boot_dst.join("MokManager.efi");
+    let copied_shim_efi = temp_boot_dst.join("shim.efi");
+    let copied_bootloader = temp_boot_dst.join("grub.efi");
+
+    assert!(!copied_mok_manager_efi.exists());
+
+    assert!(!copied_shim_efi.exists());
+
+    assert!(copied_bootloader.exists());
+
+    let boot_csv = temp_boot_dst.join("boot.csv");
+    assert!(!boot_csv.exists());
+
+    let kernel_dir = full_boot_root.join("opensuse-tumbleweed");
+    assert!(!kernel_dir.is_dir());
+
+    let install_flag = temp_boot_dst.join("installed_by_sdbootutil");
+    assert!(!install_flag.exists());
+
+    let entry_token_path = override_root.path().join("etc/kernel/entry-token");
+    assert!(!entry_token_path.exists());
+}
+
+#[test]
+fn test_command_force_no_update_no_shim_sdboot() {
+    let override_root = TempDir::new().unwrap();
+    let snapshot_dir = override_root
+        .path()
+        .join(".snapshots")
+        .join("0")
+        .join("snapshot");
+    let mock_mok_manager_content = b"mock MokManager.efi content";
+    let mock_shim_content = b"mock shim.efi content";
+
+    let systemd_boot_test_file = snapshot_dir.join("usr/lib/systemd-boot/systemd-bootx64.efi");
+    let systemd_boot_efi_file = override_root
+        .path()
+        .join("boot/efi/EFI/opensuse/grub.efi");
+    fs::create_dir_all(systemd_boot_test_file.parent().unwrap())
+        .expect("Failed to create directory for systemd-boot EFI file");
+    fs::create_dir_all(systemd_boot_efi_file.parent().unwrap())
+        .expect("Failed to create directory for systemd-boot EFI file");
+    fs::copy(
+        PathBuf::from("src/unit_tests/test_files/systemd_boot.efi"),
+        &systemd_boot_test_file,
+    )
+    .expect("Failed to copy systemd-boot test file");
+    let shim_test_file = snapshot_dir.join("usr/share/efi/x86_64/shim.efi");
+    fs::create_dir_all(shim_test_file.parent().unwrap())
+        .expect("Failed to create directory for shim EFI file");
+    File::create(&shim_test_file)
+        .unwrap()
+        .write_all(b"")
+        .unwrap();
+    File::create(&systemd_boot_efi_file)
+        .unwrap()
+        .write_all(b"#### LoaderInfo: systemd-boot 256.4+suse.17.gbe772961ad ####")
+        .unwrap();
+
+    let temp_shimdir = snapshot_dir.join("usr/share/efi/x86_64");
+    std::fs::create_dir_all(&temp_shimdir).unwrap();
+
+    let mok_manager_efi = temp_shimdir.join("MokManager.efi");
+    let shim_efi = temp_shimdir.join("shim.efi");
+    std::fs::write(&mok_manager_efi, mock_mok_manager_content).unwrap();
+    std::fs::write(&shim_efi, mock_shim_content).unwrap();
+
+    let sys_class_block_dir = override_root.path().join("sys/class/block/sda1");
+
+    fs::create_dir_all(&sys_class_block_dir.parent().unwrap())
+        .expect("Failed to create mock sys/class/block directory");
+    let device_dir = override_root.path().join("sys/devices/pci0000:00/0000:00:02.1/0000:04:00.0/0000:05:0d.0/0000:18:00.0/ata8/host7/target7:0:0/7:0:0:0/block/sda/sda1");
+    fs::create_dir_all(&device_dir).expect("Failed to create mock device directory");
+
+    std::os::unix::fs::symlink(&device_dir, &sys_class_block_dir)
+        .expect("Failed to create symbolic link for device");
+
+    let partition_file = sys_class_block_dir.join("partition");
+    fs::write(&partition_file, "1").expect("Failed to write mock partition number");
+
+    let result = command_force_update(
+        Some(0),
+        "x64",
+        "/usr/share/efi/x86_64",
+        "/boot/efi",
+        "/EFI/opensuse",
+        "opensuse-tumbleweed".to_string(),
+        false,
+        false,
+        None,
+        Some(override_root.path()),
+    );
+    assert!(result.is_ok());
+    assert_eq!(result.unwrap(), false);
+
+    let full_boot_root = override_root.path().join("boot/efi");
+    assert!(!full_boot_root.join("loader/entries.srel").exists());
+    assert!(!full_boot_root.join("loader/loader.conf").exists());
+
+    let random_seed_path = full_boot_root.join("loader/random-seed");
+    assert!(!random_seed_path.exists());
+
+    let entries_dir = full_boot_root.join("loader/entries");
+    assert!(!entries_dir.is_dir());
+
+    let temp_boot_dst = full_boot_root.as_path().join("EFI/opensuse");
+    let copied_mok_manager_efi = temp_boot_dst.join("MokManager.efi");
+    let copied_shim_efi = temp_boot_dst.join("shim.efi");
+    let copied_bootloader = temp_boot_dst.join("grub.efi");
+
+    assert!(!copied_mok_manager_efi.exists());
+
+    assert!(!copied_shim_efi.exists());
+
+    assert!(copied_bootloader.exists());
+
+    let boot_csv = temp_boot_dst.join("boot.csv");
+    assert!(!boot_csv.exists());
+
+    let kernel_dir = full_boot_root.join("opensuse-tumbleweed");
+    assert!(!kernel_dir.is_dir());
+
+    let install_flag = temp_boot_dst.join("installed_by_sdbootutil");
+    assert!(!install_flag.exists());
+
+    let entry_token_path = override_root.path().join("etc/kernel/entry-token");
+    assert!(!entry_token_path.exists());
+}
+
+#[test]
+fn test_command_force_update_no_shim_grub2_no_snapshots() {
+    let override_root = TempDir::new().unwrap();
+    let snapshot_dir = override_root
+        .path();
+
+    let grub2_efi_path = snapshot_dir.join(format!("usr/share/grub2/{}-efi/grub.efi", ARCH));
+    let systemd_boot_efi_file = override_root
+        .path()
+        .join("boot/efi/EFI/opensuse/grub.efi");
+    fs::create_dir_all(grub2_efi_path.parent().unwrap())
+        .expect("Failed to create directory for systemd-boot EFI file");
+    fs::create_dir_all(systemd_boot_efi_file.parent().unwrap())
+        .expect("Failed to create directory for systemd-boot EFI file");
+    fs::copy(
+        PathBuf::from("src/unit_tests/test_files/grub2.efi"),
+        &grub2_efi_path,
+    )
+    .expect("Failed to copy systemd-boot test file");
+    File::create(&systemd_boot_efi_file)
+        .unwrap()
+        .write_all(b"GNU GRUB  version %s\x002.12\x00prefixESC at any time exits.")
+        .unwrap();
+
+        let bli_mod_src = snapshot_dir.join("grub2moddir/bli.mod");
+        fs::create_dir_all(bli_mod_src.parent().unwrap()).unwrap();
+        fs::write(&bli_mod_src, "bli module content").unwrap();
+
+    let sys_class_block_dir = override_root.path().join("sys/class/block/sda1");
+
+    fs::create_dir_all(&sys_class_block_dir.parent().unwrap())
+        .expect("Failed to create mock sys/class/block directory");
+    let device_dir = override_root.path().join("sys/devices/pci0000:00/0000:00:02.1/0000:04:00.0/0000:05:0d.0/0000:18:00.0/ata8/host7/target7:0:0/7:0:0:0/block/sda/sda1");
+    fs::create_dir_all(&device_dir).expect("Failed to create mock device directory");
+
+    std::os::unix::fs::symlink(&device_dir, &sys_class_block_dir)
+        .expect("Failed to create symbolic link for device");
+
+    let partition_file = sys_class_block_dir.join("partition");
+    fs::write(&partition_file, "1").expect("Failed to write mock partition number");
+
+    let full_boot_root = override_root.path().join("boot/efi");
+    let temp_boot_dst = full_boot_root.as_path().join("EFI/opensuse");
+    let install_flag = temp_boot_dst.join("installed_by_sdbootutil");
+    std::fs::write(&install_flag, "opensuse-tumbleweed").unwrap();
+
+    let result = command_force_update(
+        None,
+        "x64",
+        "/usr/share/efi/x86_64",
+        "/boot/efi",
+        "/EFI/opensuse",
+        "opensuse-tumbleweed".to_string(),
+        false,
+        false,
+        None,
+        Some(override_root.path()),
+    );
+    assert!(result.is_ok());
+    assert_eq!(result.unwrap(), true);
+
+    let full_boot_root = override_root.path().join("boot/efi");
+    let grub_cfg_path = full_boot_root.join("EFI/opensuse").join("grub.cfg");
+    assert!(grub_cfg_path.exists());
+
+    let efi_boot_grub_cfg_path = full_boot_root.join("EFI/BOOT/grub.cfg");
+    assert!(efi_boot_grub_cfg_path.exists());
+
+    let mod_dir = full_boot_root.join("EFI/opensuse").join(format!("{}-efi", ARCH));
+    let bli_mod_dst = mod_dir.join("bli.mod");
+    assert!(bli_mod_dst.exists());
+
+    let random_seed_path = full_boot_root.join("loader/random-seed");
+    assert!(random_seed_path.exists());
+
+    let entries_dir = full_boot_root.join("loader/entries");
+    assert!(entries_dir.is_dir());
+
+    let temp_boot_dst = full_boot_root.as_path().join("EFI/opensuse");
+    let copied_bootloader = temp_boot_dst.join("grub.efi");
+
+    assert!(copied_bootloader.exists());
+
+    let boot_csv = temp_boot_dst.join("boot.csv");
+    assert!(boot_csv.exists());
+    let copied_boot_csv_content = std::fs::read(&boot_csv).unwrap();
+    assert_eq!(
+        String::from_utf8(copied_boot_csv_content).unwrap(),
+        format!("{},openSUSE Boot Manager\n", "grub.efi")
+    );
+
+    let kernel_dir = full_boot_root.join("opensuse-tumbleweed");
+    assert!(kernel_dir.is_dir());
+
+    let install_flag = temp_boot_dst.join("installed_by_sdbootutil");
+    assert!(install_flag.exists());
+    let install_flag_content = std::fs::read(&install_flag).unwrap();
+    assert_eq!(
+        String::from_utf8(install_flag_content).unwrap(),
+        "opensuse-tumbleweed"
+    );
+
+    let entry_token_path = override_root.path().join("etc/kernel/entry-token");
+    assert!(entry_token_path.exists());
+    let entry_token_path_content = std::fs::read(&entry_token_path).unwrap();
+    assert_eq!(
+        String::from_utf8(entry_token_path_content).unwrap(),
+        "opensuse-tumbleweed"
+    );
+}
+
+#[test]
+fn test_command_force_update_shim_sdboot() {
+    let override_root = TempDir::new().unwrap();
+    let snapshot_dir = override_root
+        .path()
+        .join(".snapshots")
+        .join("0")
+        .join("snapshot");
+    let mock_mok_manager_content = b"mock MokManager.efi content";
+    let mock_shim_content = b"mock shim.efi content";
+
+    let systemd_boot_test_file = snapshot_dir.join("usr/lib/systemd-boot/systemd-bootx64.efi");
+    let systemd_boot_efi_file = override_root
+        .path()
+        .join("boot/efi/EFI/opensuse/grub.efi");
+    fs::create_dir_all(systemd_boot_test_file.parent().unwrap())
+        .expect("Failed to create directory for systemd-boot EFI file");
+    fs::create_dir_all(systemd_boot_efi_file.parent().unwrap())
+        .expect("Failed to create directory for systemd-boot EFI file");
+    fs::copy(
+        PathBuf::from("src/unit_tests/test_files/systemd_boot.efi"),
+        &systemd_boot_test_file,
+    )
+    .expect("Failed to copy systemd-boot test file");
+    let shim_test_file = snapshot_dir.join("usr/share/efi/x86_64/shim.efi");
+    fs::create_dir_all(shim_test_file.parent().unwrap())
+        .expect("Failed to create directory for shim EFI file");
+    File::create(&shim_test_file)
+        .unwrap()
+        .write_all(b"")
+        .unwrap();
+    File::create(&systemd_boot_efi_file)
+        .unwrap()
+        .write_all(b"#### LoaderInfo: systemd-boot 256.4+suse.17.gbe772961ad ####")
+        .unwrap();
+
+    let temp_shimdir = snapshot_dir.join("usr/share/efi/x86_64");
+    std::fs::create_dir_all(&temp_shimdir).unwrap();
+
+    let mok_manager_efi = temp_shimdir.join("MokManager.efi");
+    let shim_efi = temp_shimdir.join("shim.efi");
+    std::fs::write(&mok_manager_efi, mock_mok_manager_content).unwrap();
+    std::fs::write(&shim_efi, mock_shim_content).unwrap();
+
+    let sys_class_block_dir = override_root.path().join("sys/class/block/sda1");
+
+    fs::create_dir_all(&sys_class_block_dir.parent().unwrap())
+        .expect("Failed to create mock sys/class/block directory");
+    let device_dir = override_root.path().join("sys/devices/pci0000:00/0000:00:02.1/0000:04:00.0/0000:05:0d.0/0000:18:00.0/ata8/host7/target7:0:0/7:0:0:0/block/sda/sda1");
+    fs::create_dir_all(&device_dir).expect("Failed to create mock device directory");
+
+    std::os::unix::fs::symlink(&device_dir, &sys_class_block_dir)
+        .expect("Failed to create symbolic link for device");
+
+    let partition_file = sys_class_block_dir.join("partition");
+    fs::write(&partition_file, "1").expect("Failed to write mock partition number");
+
+    let full_boot_root = override_root.path().join("boot/efi");
+    let temp_boot_dst = full_boot_root.as_path().join("EFI/opensuse");
+    let install_flag = temp_boot_dst.join("installed_by_sdbootutil");
+    std::fs::write(&install_flag, "opensuse-tumbleweed").unwrap();
+
+    let result = command_force_update(
+        Some(0),
+        "x64",
+        "/usr/share/efi/x86_64",
+        "/boot/efi",
+        "/EFI/opensuse",
+        "opensuse-tumbleweed".to_string(),
+        false,
+        false,
+        None,
+        Some(override_root.path()),
+    );
+    assert!(result.is_ok());
+    assert_eq!(result.unwrap(), true);
+
+    assert!(full_boot_root.join("loader/entries.srel").exists());
+    let copied_content_entries = std::fs::read(full_boot_root.join("loader/entries.srel")).unwrap();
+    assert_eq!(copied_content_entries, b"type1");
+    assert!(full_boot_root.join("loader/loader.conf").exists());
+    let copied_content_loader = std::fs::read(full_boot_root.join("loader/loader.conf")).unwrap();
+    assert_eq!(copied_content_loader, b"#timeout 3\n#console-mode keep\n");
+
+    let random_seed_path = full_boot_root.join("loader/random-seed");
+    assert!(random_seed_path.exists());
+
+    let entries_dir = full_boot_root.join("loader/entries");
+    assert!(entries_dir.is_dir());
+    
+    let copied_mok_manager_efi = temp_boot_dst.join("MokManager.efi");
+    let copied_shim_efi = temp_boot_dst.join("shim.efi");
+    let copied_bootloader = temp_boot_dst.join("grub.efi");
+
+    assert!(copied_mok_manager_efi.exists());
+    let copied_content = std::fs::read(&copied_mok_manager_efi).unwrap();
+    assert_eq!(copied_content, mock_mok_manager_content);
+
+    assert!(copied_shim_efi.exists());
+    let copied_content = std::fs::read(&copied_shim_efi).unwrap();
+    assert_eq!(copied_content, mock_shim_content);
+
+    assert!(copied_bootloader.exists());
+    let copied_content = std::fs::read(&copied_bootloader).unwrap();
+    assert_ne!(copied_content, b"#### LoaderInfo: systemd-boot 253.4+suse.17.gbe772961ad ####");
+
+    let boot_csv = temp_boot_dst.join("boot.csv");
+    assert!(boot_csv.exists());
+    let copied_boot_csv_content = std::fs::read(&boot_csv).unwrap();
+    assert_eq!(
+        String::from_utf8(copied_boot_csv_content).unwrap(),
+        format!("{},openSUSE Boot Manager\n", "shim.efi")
+    );
+
+    let kernel_dir = full_boot_root.join("opensuse-tumbleweed");
+    assert!(kernel_dir.is_dir());
+
+    let install_flag = temp_boot_dst.join("installed_by_sdbootutil");
+    assert!(install_flag.exists());
+    let install_flag_content = std::fs::read(&install_flag).unwrap();
+    assert_eq!(
+        String::from_utf8(install_flag_content).unwrap(),
+        "opensuse-tumbleweed"
+    );
+
+    let entry_token_path = override_root.path().join("etc/kernel/entry-token");
+    assert!(entry_token_path.exists());
+    let entry_token_path_content = std::fs::read(&entry_token_path).unwrap();
+    assert_eq!(
+        String::from_utf8(entry_token_path_content).unwrap(),
+        "opensuse-tumbleweed"
+    );
 }
 
 #[test]
