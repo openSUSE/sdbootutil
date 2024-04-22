@@ -8,7 +8,7 @@ use fs::{
     bootloader_name, bootloader_needs_update, install_bootloader, is_installed,
     settle_system_tokens,
 };
-use io::log_info;
+use io::{log_info, set_systemd_log_level};
 use std::path::{Path, PathBuf};
 
 /// Executes the `Kernels` command.
@@ -940,6 +940,8 @@ pub fn process_args_and_get_system_info(
     }
 
     let args = cli::parse_args();
+
+    set_systemd_log_level(args.verbosity, override_prefix);
 
     if let Some(ref path) = args.esp_path {
         std::env::set_var("SYSTEMD_ESP_PATH", path);
