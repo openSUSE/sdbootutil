@@ -1,29 +1,8 @@
 use super::cli;
+use std::env;
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::Command;
-
-/// Prints a given message to the standard output.
-///
-/// This function is a simple helper to output messages, typically used for logging informational messages.
-///
-/// # Arguments
-///
-/// * `message` - A string slice that holds the message to be printed.
-fn print_message(message: &str) {
-    println!("{}", message);
-}
-
-/// Prints a given error message to the standard error output.
-///
-/// This function is intended for logging error messages, ensuring they are directed to the standard error stream.
-///
-/// # Arguments
-///
-/// * `message` - A string slice containing the error message to be printed.
-pub fn print_error(message: &str) {
-    eprintln!("Error: {}", message);
-}
 
 /// Logs an informational message to the console based on the specified verbosity level.
 ///
@@ -42,7 +21,7 @@ pub fn print_error(message: &str) {
 pub(crate) fn log_info(message: &str, log_verbosity: u8) {
     let verbosity = cli::parse_args().verbosity;
     if verbosity >= log_verbosity {
-        print_message(message)
+        println!("{}", message);
     }
 }
 
@@ -232,4 +211,28 @@ pub(crate) fn create_efi_boot_entry(
     log_info("Created EFI boot entry for openSUSE", 2);
 
     Ok(())
+}
+
+/// Sets the systemd log level based on the provided verbosity level.
+///
+/// This function sets the `SYSTEMD_LOG_LEVEL` environment variable to control logging verbosity.
+/// It checks if the environment variable is already set before applying any changes. If an override prefix
+/// is provided, the function will return early without changing the log level. The log level is set to "debug"
+/// for verbosity levels greater than 1, otherwise it is set to "info" for any positive verbosity level.
+///
+/// # Arguments
+///
+/// * `verbosity` - A `u8` that specifies the verbosity level:
+///   - `0`: Do nothing.
+///   - `1`: Set log level to "info".
+///   - `>1`: Set log level to "debug".
+/// * `override_prefix` - An optional reference to a `Path` that, if provided, bypasses setting the log level.
+pub(crate) fn set_systemd_log_level(verbosity: u8, override_prefix: Option<&Path>) {
+    if override_prefix.is_some() {
+        return;
+    }
+    if env::var("SYSTEMD_LOG_LEVEL").is_err() && verbosity >= 1 {
+        let log_level = if verbosity > 1 { "debug" } else { "info" };
+        env::set_var("SYSTEMD_LOG_LEVEL", log_level);
+    }
 }

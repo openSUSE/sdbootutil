@@ -1,6 +1,6 @@
 use super::io::get_findmnt_output;
 
-use super::io::{create_efi_boot_entry, log_info, print_error};
+use super::io::{create_efi_boot_entry, log_info};
 use libbtrfs::subvolume;
 
 use super::utils;
@@ -98,7 +98,7 @@ pub(crate) fn cleanup_rollback_items(rollback_items: &[RollbackItem]) {
     for item in rollback_items {
         if let Err(e) = item.cleanup() {
             let message = format!("Error cleaning up item: {}", e);
-            print_error(&message);
+            log_info(&message, 0);
         }
     }
 }
@@ -121,7 +121,7 @@ pub(crate) fn reset_rollback_items(rollback_items: &mut Vec<RollbackItem>) {
                     backup_path.display(),
                     e
                 );
-                print_error(&message);
+                log_info(&message, 0);
             } else {
                 let message = format!("Removed backup file {}", backup_path.display());
                 log_info(&message, 1)
@@ -1474,14 +1474,14 @@ pub(crate) fn read_machine_id(
     Err("Machine ID file not found".to_string())
 }
 
-/// Determines the system's entry token based on various criteria and system files.
+/// Determines the system's entry token based on various system files and an optional user input.
 ///
 /// This function reads the OS release information and the machine ID from the system or specified subvolume,
-/// and determines the entry token to use for the bootloader based on the given `arg_entry_token` parameter.
-/// The entry token can be explicitly set to use the machine ID, the OS ID (from `/etc/os-release`),
-/// an OS image ID, or a custom token. If `arg_entry_token` is set to "auto" or not provided,
-/// the function attempts to read the entry token from `/etc/kernel/entry-token`; if the file does not exist,
-/// it falls back to using the machine ID.
+/// and determines the entry token to use for the bootloader based on the provided `arg_entry_token` parameter.
+/// The token can be set explicitly to use the machine ID, the OS ID (from `/etc/os-release`), an OS image ID,
+/// or a custom token. If `arg_entry_token` is set to "auto" or is not provided, the function attempts to read
+/// the entry token from `/etc/kernel/entry-token`; if the file does not exist, it tries to derive
+/// the token from available system information, starting with the machine ID, then OS image ID, and finally the OS ID.
 ///
 /// # Arguments
 ///
@@ -1489,8 +1489,8 @@ pub(crate) fn read_machine_id(
 ///   If not provided, the function reads from the system's root.
 /// * `snapshot` - An optional snapshot identifier used when determining the machine ID in a transactional environment.
 /// * `arg_entry_token` - An optional argument that specifies how to determine the entry token. It can be "auto",
-///   "machine-id", "os-id", "os-image", or a custom token. If "auto" or not provided, the function uses the default
-///   mechanism described above.
+///   "machine-id", "os-id", "os-image", or a custom token prefixed with "literal:" for direct usage.
+///   If "auto" or not provided, the function uses the default mechanism described above.
 /// * `override_prefix` - An optional path prefix that overrides the base path for reading system files. This is useful
 ///   for testing or when operating in a chroot environment.
 ///
@@ -1524,27 +1524,38 @@ pub(crate) fn settle_system_tokens(
     let prefix = override_prefix.unwrap_or(Path::new("/"));
     let (os_release_id, os_release_version_id, os_release_pretty_name, os_release_image_id) =
         read_os_release(subvol, override_prefix)?;
-    let machine_id = read_machine_id(subvol, snapshot, override_prefix)?;
+    let machine_id_result = read_machine_id(subvol, snapshot, override_prefix);
 
     let entry_token = match arg_entry_token {
         Some("auto") | None => {
             if let Ok(token) = fs::read_to_string(prefix.join("etc/kernel/entry-token")) {
                 token.trim_end_matches('\n').to_string()
             } else {
-                machine_id.clone()
+                [
+                    machine_id_result.as_deref().ok(),
+                    os_release_image_id.as_deref(),
+                    os_release_id.as_deref(),
+                ]
+                .iter()
+                .find_map(|&token| token)
+                .map(String::from)
+                .ok_or_else(|| "Can't auto detect".to_string())?
             }
         }
-        Some("machine-id") => machine_id.clone(),
+        Some("machine-id") => machine_id_result.clone()?,
         Some("os-id") => os_release_id
             .clone()
             .ok_or_else(|| "Missing ID".to_string())?,
         Some("os-image") => os_release_image_id.ok_or_else(|| "Missing IMAGE_ID".to_string())?,
-        Some(token) => token.to_string(),
+        Some(token) if token.starts_with("literal:") => token.replacen("literal:", "", 1),
+        Some(token) => {
+            return Err(format!("Unexpected parameter for --entry-token: {}", token).to_string())
+        }
     };
 
     Ok((
         entry_token,
-        machine_id,
+        machine_id_result.unwrap_or_default(),
         os_release_id,
         os_release_version_id,
         os_release_pretty_name,
