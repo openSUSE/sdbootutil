@@ -38,6 +38,7 @@ Requires:       systemd-boot
 Requires:       jq
 Requires:       sed
 Requires:       pcr-oracle
+Requires:       dialog
 # While systemd-pcrlock is in experimental
 Requires:       systemd-experimental
 Requires:       dracut-pcr-signature
