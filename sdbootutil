@@ -451,7 +451,7 @@ set_machine_id()
 	local subvol=""
 	[ -z "$snapshot" ] || subvol="${subvol_prefix}/.snapshots/${snapshot}/snapshot"
 	machine_id_files=()
-	if is_transactional; then
+	if is_transactional && [ -z "$TRANSACTIONAL_UPDATE" ]; then
 		[ -n "$snapshot" ] && machine_id_files+=("/var/lib/overlay/$snapshot/etc/machine-id")
 	fi
 	machine_id_files+=(
@@ -506,6 +506,9 @@ mount_etc()
 {
 	local snapshot_dir="$1"
 
+	# don't mount if we are within a transactional-update shell
+        [ -z "$TRANSACTIONAL_UPDATE" ] || return 0
+
 	IFS=',' read -ra fields <<< \
 	   $(findmnt --tab-file "${snapshot_dir}/etc/fstab" --noheadings --nofsroot --output OPTIONS /etc | sed 's#/sysroot##g' | sed 's#:/etc,#:'"${snapshot_dir}"'/etc,#g')
 
@@ -523,6 +526,8 @@ mount_etc()
 umount_etc()
 {
 	local snapshot_dir="$1"
+	# don't umount if we are within a transactional-update shell
+        [ -z "$TRANSACTIONAL_UPDATE" ] || return 0
 	umount "${snapshot_dir}/etc"
 }
 
