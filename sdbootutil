@@ -23,6 +23,16 @@ have_snapshots=
 # for x in vmlinuz image vmlinux linux bzImage uImage Image zImage; do
 image=
 
+color_red=
+color_end=
+if [ "$SYSTEMD_COLORS" != "false" ] && [ "$SYSTEMD_COLORS" != "0" ]; then
+	color_red="\e[31m"
+	color_green="\e[32m"
+	color_yellow="\e[33m"
+	color_bu="\e[1;4m" # bold underscore
+	color_end="\e[m"
+fi
+
 # State file for transactional systems
 state_file="/var/lib/misc/transactional-update.state"
 
@@ -103,12 +113,16 @@ helpandquit()
 			   is potentially bootable
 
 		install    Install systemd-boot and shim into ESP
+
 		needs-update
 			   Check whether the bootloader in ESP needs updating
+
 		update
 			    Update the bootloader if it's old
+
 		force-update
 			    Update the bootloader in any case
+
 		update-predictions
 			    Update TPM2 predictions
 
@@ -117,6 +131,8 @@ helpandquit()
 		snapshots  Open snapshots menu
 		entries    Open entry menu
 
+		Vairables:
+		SYSTEMD_COLORS		Set 0 to disable colored output
 	EOF
 	exit 0
 }
@@ -700,16 +716,17 @@ list_entries()
 	while read -r isdefault isreported type id root conf title; do
 		color=
 		if [ "$isdefault" = "true" ]; then
-			color="\e[1;4m"
+			color="$color_bu"
 		fi
 		if [ "$isreported" = "false" ]; then
-			color="$color\e[32m"
+			color="$color${color_green}"
 		fi
 		if [ "$type" = "loader" ]; then
-			color="$color\e[33m"
+			color="$color${color_yellow}"
 		fi
+
 		local errors=()
-		if [ -n "$verbose" ] && [ -n "$conf" ] && [  -e "$conf" ]; then
+		if [ -n "$verbose" ] && [ -n "$conf" ] && [ -e "$conf" ]; then
 			local k
 			local v
 			while read -r k v; do
@@ -729,9 +746,9 @@ list_entries()
 			done < "$conf"
 		fi
 		if [ -n "$errors" ]; then
-			echo -e "  \e[31m${errors[*]}\e[m" >&2
+			echo -e "  ${color_red}${errors[*]}${color_end}" >&2
 		fi
-		echo -e "$color$id${verbose:+: $title}\e[m"
+		echo -e "$color$id${verbose:+: $title}${color_end}"
 	done < <(jq '.[]|[.isDefault, if has("isReported") then .isReported else 0 end, if has("type") then .type else "unknown" end, .id, .root, .path, .showTitle]|join(" ")' -r < "$entryfile")
 }
 
@@ -862,7 +879,7 @@ list_snapshots()
 		[ "$n" != "0" ] || continue
 		local id="$n"
 		if [ "$isdefault" = "true" ]; then
-			id="\e[1;4m$id\e[m"
+			id="$color_bu$id$color_end"
 		fi
 		update_kernels "$n"
 		[ "$is_bootable" = 1 ] || id="!$id"
@@ -991,7 +1008,7 @@ list_kernels()
 		local kv="${k%/*}"
 		kv="${kv##*/}"
 		if [ -z "$id" ]; then
-			echo -e "\e[33mmissing /lib/modules/$kv/$image\e[m"
+			echo -e "${color_yellow}missing /lib/modules/$kv/$image$color_end"
 		else
 			echo "ok /lib/modules/$kv/$image -> $id"
 		fi
@@ -999,7 +1016,7 @@ list_kernels()
 	kernelfiles=("${!stale_kernels[@]}")
 	for k in "${kernelfiles[@]}"; do
 		local id="${stale_kernels[$k]}"
-		printf "\e[31mstale %s\e[m\n" "$id"
+		printf "${color_red}stale %s$color_end\n" "$id"
 	done
 }
 
