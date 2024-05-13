@@ -16,6 +16,7 @@ arg_esp_path="$SYSTEMD_ESP_PATH"
 arg_entry_token=
 arg_arch=
 arg_all_entries=
+arg_entry_keys=()
 arg_no_variables=
 arg_no_reuse_initrd=
 arg_no_random_seed=
@@ -70,6 +71,7 @@ helpandquit()
 		  --arch		Manually set architecture
 		  --entry-token		Override entry token
 		  --image		Specify Linux kernel file name
+		  --entry-keys		Comma separated list of keys
 		  --no-variables	Do not update UEFI variables
 		  --no-reuse-initrd	Always regenerate initrd
 		  -v, --verbose		More verbose output
@@ -103,6 +105,10 @@ helpandquit()
 
 		list-snapshots
 			   List all snapshots
+
+		show-entry VERSION [SNAPSHOT]
+			   Show fields for an entry with an specified kernel
+			   version
 
 		set-default-snapshot [SNAPSHOT]
 			   Make SNAPSHOT the default for next boot.
@@ -385,6 +391,7 @@ remove_kernel()
 {
 	local snapshot="$1"
 	local kernel_version="$2"
+	[ -n "$kernel_version" ] || err "Missing kernel version"
 	settle_entry_token "${snapshot}"
 	local id="$entry_token-$kernel_version${snapshot:+-$snapshot}.conf"
 	run_command_output bootctl unlink "$id"
@@ -562,6 +569,7 @@ install_kernel()
 	local dstinitrd=()
 	local src="${subvol#"${subvol_prefix}"}/lib/modules/$kernel_version/$image"
 	local initrddir="${subvol#"${subvol_prefix}"}/usr/lib/initrd"
+	[ -n "$kernel_version" ] || err "Missing kernel version"
 	[ -e "$src" ] || err "Can't find $src"
 
 	calc_chksum "$src"
@@ -730,7 +738,7 @@ list_entries()
 			local k
 			local v
 			while read -r k v; do
-				if [ "$k" = 'linux' ] || [ "$k" = 'initrd' ] ; then
+				if [ "$k" = 'linux' ] || [ "$k" = 'initrd' ]; then
 					if [ ! -e "$root$v" ]; then
 						errors+=("$root/$v does not exist")
 					fi
@@ -750,6 +758,32 @@ list_entries()
 		fi
 		echo -e "$color$id${verbose:+: $title}${color_end}"
 	done < <(jq '.[]|[.isDefault, if has("isReported") then .isReported else 0 end, if has("type") then .type else "unknown" end, .id, .root, .path, .showTitle]|join(" ")' -r < "$entryfile")
+}
+
+show_entry_fields()
+{
+	local snapshot="$1"
+	local kernel_version="$2"
+	[ -n "$kernel_version" ] || err "Missing kernel version"
+	settle_entry_token "${snapshot}"
+	local id="$entry_token-$kernel_version${snapshot:+-$snapshot}.conf"
+
+	local conf
+	conf="$(find_conf_file "${kernel_version}" "${snapshot}")"
+
+	[ -z "$verbose" ] || echo -e "ID\t$id"
+	local k
+	local v
+	while read -r k v; do
+		case "$k" in
+			title|version|sort-key|options|linux|initrd) ;;
+			*) continue ;;
+		esac
+
+		if [ -z "$arg_entry_keys" ] || [[ ${arg_entry_keys[@]} =~ "all" ]] || [[ ${arg_entry_keys[@]} =~ "$k" ]]; then
+			echo -e "$k\t$v"
+		fi
+	done < "$conf"
 }
 
 show_entries()
@@ -1637,7 +1671,7 @@ main_menu()
 
 ####### main #######
 
-getopttmp=$(getopt -o hc:v --long help,flicker,verbose,esp-path:,entry-token:,arch:,image:,no-variables,no-reuse-initrd,no-random-seed,all -n "${0##*/}" -- "$@")
+getopttmp=$(getopt -o hc:v --long help,flicker,verbose,esp-path:,entry-token:,arch:,image:,entry-keys:,no-variables,no-reuse-initrd,no-random-seed,all -n "${0##*/}" -- "$@")
 eval set -- "$getopttmp"
 
 while true ; do
@@ -1649,6 +1683,7 @@ while true ; do
 		--arch) arg_arch="$2"; shift 2 ;;
 		--entry-token) arg_entry_token="$2"; shift 2 ;;
 		--image) image="$2"; shift 2 ;;
+		--entry-keys) IFS=',' read -r -a arg_entry_keys <<<"$2"; shift 2 ;;
 		--no-variables) arg_no_variables=1; shift ;;
 		--no-reuse-initrd) arg_no_reuse_initrd=1; shift ;;
 		--no-random-seed) arg_no_random_seed=1; shift ;;
@@ -1668,7 +1703,7 @@ if [ -z "$SYSTEMD_LOG_LEVEL" -a -n "$verbose" ]; then
 fi
 
 case "$1" in
-	install|needs-update|update|force-update|add-kernel|remove-kernel|set-default-snapshot|add-all-kernels|mkinitrd|remove-all-kernels|is-installed|list-snapshots|list-entries|list-kernels|is-bootable|update-predictions|bootloader) ;;
+	install|needs-update|update|force-update|add-kernel|remove-kernel|set-default-snapshot|add-all-kernels|mkinitrd|remove-all-kernels|is-installed|list-snapshots|list-entries|list-kernels|show-entry|is-bootable|update-predictions|bootloader) ;;
 	kernels|snapshots|entries|"") stty_size; interactive=1 ;;
 	*) err "unknown command $1" ;;
 esac
@@ -1753,6 +1788,8 @@ elif [ "$1" = "list-entries" ]; then
 	list_entries "${2:-}"
 elif [ "$1" = "list-snapshots" ]; then
 	list_snapshots
+elif [ "$1" = "show-entry" ]; then
+	show_entry_fields "${3:-$root_snapshot}" "$2"
 elif [ "$1" = "is-bootable" ]; then
 	is_bootable "${2:-$root_snapshot}"
 elif [ "$1" = "update-predictions" ]; then
