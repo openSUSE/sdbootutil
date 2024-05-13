@@ -1,0 +1,37 @@
+#!/bin/bash
+
+shopt -s extglob nullglob
+set -e
+
+# check whether it's a transactional system
+is_transactional()
+{
+    [ "$(stat -f -c %T /etc)" = "overlayfs" ]
+}
+
+callExt_post()
+{
+    path="$1"
+
+    if [ -e "$path"/run/regenerate-initrd ]; then
+	cp -a "$path"/run/regenerate-initrd /run
+    fi
+}
+
+h()
+{
+    echo "Available commands:"
+    echo "${!commands[@]}"
+}
+
+declare -A commands
+
+commands['callExt-post']=callExt_post
+commands['help']=h
+
+cmd="$1"
+shift
+[ -n "$cmd" ] || cmd=help
+if [ "${#commands[$cmd]}" -gt 0 ]; then
+    ${commands[$cmd]} "$@"
+fi
