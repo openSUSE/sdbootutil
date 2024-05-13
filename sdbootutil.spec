@@ -44,6 +44,7 @@ Requires:       systemd-experimental
 Requires:       dracut-pcr-signature
 Supplements:    (systemd-boot and shim)
 Requires:       (%{name}-snapper if (snapper and btrfsprogs))
+Requires:       (%{name}-tukit if read-only-root-fs)
 ExclusiveArch:  aarch64 ppc64le riscv64 x86_64
 
 %description
@@ -58,6 +59,15 @@ Requires:       snapper
 
 %description snapper
 Plugin scripts for snapper to handle BLS config files
+
+%package tukit
+Summary:        plugin script for tukit
+Requires:       %{name} = %{version}
+Requires:       sdbootutil >= %{version}-%{release}
+Requires:       tukit
+
+%description tukit
+Plugin scripts for tukit to handle BLS config files
 
 %package rpm-scriptlets
 Summary:        Scripts to create boot entries on kernel updates
@@ -114,6 +124,12 @@ for i in 10-sdbootutil.snapper; do
   install -m 755 $i %{buildroot}%{_prefix}/lib/snapper/plugins/$i
 done
 
+# tukit
+install -d -m755 %{buildroot}%{_prefix}/lib/tukit/plugins
+for i in 10-sdbootutil.tukit; do
+  install -m 755 $i %{buildroot}%{_prefix}/lib/tukit/plugins/$i
+done
+
 # kernel-install
 install -d -m755 %{buildroot}%{_prefix}/lib/kernel/install.d
 for i in 50-sdbootutil.install; do
@@ -151,6 +167,11 @@ sdbootutil update
 %dir %{_prefix}/lib/snapper
 %dir %{_prefix}/lib/snapper/plugins
 %{_prefix}/lib/snapper/plugins/*
+
+%files tukit
+%dir %{_prefix}/lib/tukit
+%dir %{_prefix}/lib/tukit/plugins
+%{_prefix}/lib/tukit/plugins/*
 
 %files kernel-install
 %dir %{_prefix}/lib/kernel
