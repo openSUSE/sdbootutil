@@ -1211,7 +1211,7 @@ install_bootloader()
 		install -p -D "$bootloader" "$boot_root/EFI/BOOT/BOOT${firmware_arch^^}.EFI"
 	fi
 	# this is for shim to create the entry if missing
-	echo "${entry##*/},openSUSE Boot Manager" | iconv -f ascii -t ucs2 > "$boot_root/$boot_dst/boot.csv"
+	echo "${entry##*/},openSUSE Boot Manager" | { echo -ne "\xff\xfe"; iconv -f ascii -t ucs-2le; } > "$boot_root/$boot_dst/boot.csv"
 
 	mkdir -p "$boot_root/$entry_token"
 	echo "$entry_token" > "$boot_root/$boot_dst/installed_by_sdbootutil"
