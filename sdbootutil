@@ -137,7 +137,7 @@ helpandquit()
 		snapshots  Open snapshots menu
 		entries    Open entry menu
 
-		Vairables:
+		Variables:
 		SYSTEMD_COLORS		Set 0 to disable colored output
 	EOF
 	exit 0
@@ -905,7 +905,7 @@ show_entry()
 
 list_snapshots()
 {
-	[ -n "$have_snapshots"  ] || { log_info "System does no support snapshots."; return 0; }
+	[ -n "$have_snapshots"  ] || { log_info "System does not support snapshots."; return 0; }
 	update_snapper 2>"$tmpfile" || err "$(cat "$tmpfile")"
 
 	local n=0
@@ -923,7 +923,7 @@ list_snapshots()
 
 show_snapper()
 {
-	[ -n "$have_snapshots" ] || { log_info "System does no support snapshots."; return 0; }
+	[ -n "$have_snapshots" ] || { log_info "System does not support snapshots."; return 0; }
 	if ! update_snapper 2>"$tmpfile"; then
 		d --title "Error" --textbox "$tmpfile" 0 0
 		exit 1
@@ -1358,7 +1358,7 @@ set_default_entry()
 
 set_default_snapshot()
 {
-	[ -n "$have_snapshots" ] || { log_info "System does no support snapshots."; return 0; }
+	[ -n "$have_snapshots" ] || { log_info "System does not support snapshots."; return 0; }
 	local num="${1:?}"
 	local configs
 	update_entries_for_snapshot "$num"
