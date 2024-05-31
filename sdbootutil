@@ -1432,7 +1432,7 @@ select_entries_for_prediction()
 
 
 # TODO: Maybe share this code outside
-pcrlock_manual_initrd() {
+pcrlock_manual_raw() {
 	local pcr="$1"
 	local pcrlock="$2"
 	local initrd="$3"
@@ -1466,7 +1466,7 @@ pcrlock_sdboot_cmdline_initrd() {
 	pcrlock \
 		lock-kernel-initrd \
 		--pcrlock="$tmpdir/initrd.pcrlock" \
-		"${boot_root}/$initrd" 2> /dev/null || pcrlock_manual_initrd 9 "$tmpdir/initrd.pcrlock" "${boot_root}/$initrd"
+		"${boot_root}/$initrd" 2> /dev/null || pcrlock_manual_raw 9 "$tmpdir/initrd.pcrlock" "${boot_root}/$initrd"
 	jq --slurp '{"records": [.[].records[0]]}' \
 	   "$tmpdir/cmdline.pcrlock" \
 	   "$tmpdir/initrd.pcrlock" \
@@ -1489,28 +1489,26 @@ pcrlock_sdboot_cmdline_initrd() {
 
 # TODO: Maybe share this code outside
 pcrlock_grub2_kernel_initrd() {
-	local kernel="$1"
+	local linux="$1"
 	local initrd="$2"
 	local suffix="$3"
 
-	# 710-grub2-kernel-initrd-entry.pcrlock.d is not part of the
-	# pcrlock standards
-	pcrlock \
-	    lock-raw \
-	    --pcr=9 \
-	    --pcrlock="$tmpdir/kernel.pcrlock" \
-	    "${boot_root}/$kernel"
-	pcrlock \
-	    lock-raw \
-	    --pcr=9 \
-	    --pcrlock="$tmpdir/initrd.pcrlock" \
-	    "${boot_root}/$initrd"
+	local elements=( "$linux" "$initrd" )
+	local locks=()
+	local n=0
+	for element in "${elements[@]}"; do
+		n=$((n+1))
+		pcrlock \
+		    lock-raw \
+		    --pcr=9 \
+		    --pcrlock "$tmpdir/element-$n.pcrlock" \
+		    "$element" || pcrlock_manual_raw 9 "$tmpdir/initrd.pcrlock" "${boot_root}/$initrd"
+		locks+=( "$tmpdir/element-$n.pcrlock" )
+	done
 	jq --slurp '{"records": [.[].records[0]]}' \
-	   "$tmpdir/kernel.pcrlock" \
-	   "$tmpdir/initrd.pcrlock" \
+	   ${locks[@]} \
 	   > "/var/lib/pcrlock.d/710-grub2-kernel-initrd-entry.pcrlock.d/kernel-initrd-$suffix.pcrlock"
-	rm "$tmpdir/kernel.pcrlock"
-	rm "$tmpdir/initrd.pcrlock"
+	rm ${locks[@]}
 }
 
 # TODO: Maybe share this code outside
@@ -1548,30 +1546,6 @@ pcrlock_grub2_exec_cmdline() {
 	jq --slurp '{"records": [.[].records[0]]}' \
 	   ${locks[@]} \
 	   > "/var/lib/pcrlock.d/650-grub2-entry-exec-cmdline.pcrlock.d/exec-cmdline-$suffix.pcrlock"
-	rm ${locks[@]}
-}
-
-pcrlock_grub2_kernel_initrd()
-{
-	local linux="$1"
-	local initrd="$2"
-	local suffix="$3"
-
-	local elements=( "$linux" "$initrd" )
-	local locks=()
-	local n=0
-	for element in "${elements[@]}"; do
-		n=$((n+1))
-		pcrlock \
-		    lock-raw \
-		    --pcr=9 \
-		    --pcrlock "$tmpdir/element-$n.pcrlock" \
-		    "$element"
-		locks+=( "$tmpdir/element-$n.pcrlock" )
-	done
-	jq --slurp '{"records": [.[].records[0]]}' \
-	   ${locks[@]} \
-	   > "/var/lib/pcrlock.d/710-grub2-kernel-initrd-entry.pcrlock.d/kernel-initrd-$suffix.pcrlock"
 	rm ${locks[@]}
 }
 
