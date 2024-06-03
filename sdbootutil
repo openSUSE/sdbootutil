@@ -1550,6 +1550,25 @@ pcrlock_grub2_exec_cmdline() {
 }
 
 # TODO: Maybe share this code outside
+pcrlock_grub2_entry_files() {
+	local locks=()
+	local n=0
+	while read -r i; do
+		n=$((n+1))
+		pcrlock \
+		    lock-raw \
+		    --pcr=9 \
+		    --pcrlock="$tmpdir/entry-$n.pcrlock" \
+		    "$i"
+		locks+=( "$tmpdir/entry-$n.pcrlock" )
+	done < <(jq --raw-output 'map(.path) | .[]' "$entryfile")
+	jq --slurp '{"records": [.[].records[0]]}' \
+	   ${locks[@]} \
+	   > "/var/lib/pcrlock.d/643-grub2-entry-files.pcrlock.d/generated.pcrlock"
+	rm ${locks[@]}
+}
+
+# TODO: Maybe share this code outside
 pcrlock_sdboot()
 {
 	# 641-sdboot-loader-conf.pcrlock is not part of the pcrlock
@@ -1621,18 +1640,10 @@ pcrlock_grub2()
 	    --pcr=9 \
 	    --pcrlock=/var/lib/pcrlock.d/642-grub2-blscfg-mod.pcrlock
 
-	# 643-grub2-entry-file.pcrlock is not part of the pcrlock
+	# 643-grub2-entry-files.pcrlock is not part of the pcrlock
 	# standards
-	mkdir -p /var/lib/pcrlock.d/643-grub2-entry-file.pcrlock.d
-	local n=0
-	while read -r i; do
-		n=$((n+1))
-		pcrlock \
-		    lock-raw \
-		    --pcr=9 \
-		    --pcrlock=/var/lib/pcrlock.d/643-grub2-entry-file.pcrlock.d/entry-"$n".pcrlock \
-		    "$i"
-	done < <(jq --raw-output 'map(.path) | .[]' "$entryfile")
+	mkdir -p /var/lib/pcrlock.d/643-grub2-entry-files.pcrlock.d
+	pcrlock_grub2_entry_files
 
 	blkpart="$(findmnt -nvo SOURCE "$boot_root")"
 	read -r partno < "/sys/class/block/${blkpart##*/}"/partition
