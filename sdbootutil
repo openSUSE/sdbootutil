@@ -20,6 +20,7 @@ arg_entry_keys=()
 arg_no_variables=
 arg_no_reuse_initrd=
 arg_no_random_seed=
+arg_ask_pin=
 have_snapshots=
 # for x in vmlinuz image vmlinux linux bzImage uImage Image zImage; do
 image=
@@ -74,6 +75,7 @@ helpandquit()
 		  --entry-keys		Comma separated list of keys
 		  --no-variables	Do not update UEFI variables
 		  --no-reuse-initrd	Always regenerate initrd
+		  --ask-pin		Ask recovery PIN for re-enrollment
 		  -v, --verbose		More verbose output
 		  -h, --help		This screen
 
@@ -139,6 +141,7 @@ helpandquit()
 
 		Variables:
 		SYSTEMD_COLORS		Set 0 to disable colored output
+		PIN			Recovery PIN / password (re-enrollment)
 	EOF
 	exit 0
 }
@@ -1744,7 +1747,34 @@ generate_tpm2_predictions_pcrlock()
 		pcrlock_grub2
 	fi
 
-	pcrlock --pcr="$pcrs" make-policy
+	# If the prediction fails, the system will ask for a password,
+	# but we can do a re-enrollment using the recovery PIN.  To
+	# register a recovery PIN disk-encryption-tool will call this
+	# script deploying in the @u keyring a "cryptsetup" entry.
+	# For re-enrollments we can use the same entry, the PIN
+	# environment variable, or the --ask-pin parameter.
+	local pin
+	local extra=()
+	local keyid="$(keyctl id %user:cryptenroll 2> /dev/null)" || true
+	if [ -n "$keyid" ]; then
+		pin="$(keyctl pipe "$keyid")"
+		extra=("--recovery-pin=yes")
+	elif [ -n "$PIN" ]; then
+		pin="$PIN"
+		extra=("--recovery-pin=yes")
+	elif [ -n "$arg_ask_pin" ]; then
+		read -s -p "Recovery PIN: " pin
+		extra=("--recovery-pin=yes")
+	fi
+
+	PIN="$pin" pcrlock --pcr="$pcrs" "${extra[@]}" make-policy  || {
+		echo "Error creating the policy!"
+		if [ -z "$pin" ]; then
+			echo "Please, provide the recovery PIN to register the new policy"
+		else
+			echo "Provided PIN incorrect or TPM2 locked after too many retries"
+		fi
+	}
 
 	# Publish the assets in the ESP, so can be imported by
 	# dracut-pcr-signature
@@ -1856,7 +1886,7 @@ main_menu()
 
 ####### main #######
 
-getopttmp=$(getopt -o hc:v --long help,flicker,verbose,esp-path:,entry-token:,arch:,image:,entry-keys:,no-variables,no-reuse-initrd,no-random-seed,all -n "${0##*/}" -- "$@")
+getopttmp=$(getopt -o hc:v --long help,flicker,verbose,esp-path:,entry-token:,arch:,image:,entry-keys:,no-variables,no-reuse-initrd,no-random-seed,ask-pin,all -n "${0##*/}" -- "$@")
 eval set -- "$getopttmp"
 
 while true ; do
@@ -1872,6 +1902,7 @@ while true ; do
 		--no-variables) arg_no_variables=1; shift ;;
 		--no-reuse-initrd) arg_no_reuse_initrd=1; shift ;;
 		--no-random-seed) arg_no_random_seed=1; shift ;;
+		--ask-pin) arg_ask_pin=1; shift ;;
 		--all) arg_all_entries=1; shift ;;
                 --) shift ; break ;;
                 *) echo "Internal error!" ; exit 1 ;;
