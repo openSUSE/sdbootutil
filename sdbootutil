@@ -1293,14 +1293,12 @@ install_bootloader()
 		}
 		# Required to populate EFI varidables
 		insmod bli
-		insmod blscfg
 		blscfg
 		EOF
 
 		[ -e "$boot_root/EFI/BOOT/grub.cfg" ] || cp "$boot_root$boot_dst/grub.cfg" "$boot_root/EFI/BOOT/grub.cfg"
 		mkdir -p "$boot_root$boot_dst/$(uname -m)-efi"
 		cp -a "$prefix$grub2moddir/bli.mod" "$boot_root$boot_dst/$(uname -m)-efi"
-		cp -a "$prefix$grub2moddir/blscfg.mod" "$boot_root$boot_dst/$(uname -m)-efi"
 	fi
 
 	# Create boot menu entry if it does not exist
@@ -1525,7 +1523,6 @@ pcrlock_grub2_exec_cmdline() {
 	# bls entry (like the call to load_video or loading gzio).
 	local lines=("timeout=8"
 		     "insmod bli"
-		     "insmod blscfg"
 		     "blscfg"
 		     "load_video"
 		     "true"
@@ -1635,13 +1632,6 @@ pcrlock_grub2()
 	    lock-raw "${boot_root}${boot_dst}/$(uname -m)-efi/bli.mod" \
 	    --pcr=9 \
 	    --pcrlock=/var/lib/pcrlock.d/642-grub2-bli-mod.pcrlock
-
-	# 642-grub2-blscfg-mod.pcrlock is not part of the pcrlock
-	# standards
-	pcrlock \
-	    lock-raw "${boot_root}${boot_dst}/$(uname -m)-efi/blscfg.mod" \
-	    --pcr=9 \
-	    --pcrlock=/var/lib/pcrlock.d/642-grub2-blscfg-mod.pcrlock
 
 	# 643-grub2-entry-files.pcrlock is not part of the pcrlock
 	# standards
