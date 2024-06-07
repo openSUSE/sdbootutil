@@ -1716,7 +1716,7 @@ pcrlock_sdboot()
 	# required because disk-encryption-tool generates a new initrd
 	# during the first boot, making the event log impossible to
 	# align for systemd-pcrlock
-	if [ "$SDB_ADD_INITIAL_CMDLINE" = "1" ]; then
+	if [ "$SDB_ADD_INITIAL_COMPONENT" = "1" ]; then
 		read -r cmdline < /proc/cmdline
 		local initrd="${cmdline#*initrd=}"; initrd="${initrd%% *}"; initrd="${initrd//\\//}"
 		pcrlock_sdboot_cmdline_initrd "$cmdline" "$initrd" "0" || warn "Not all PCRs are registered in the policy"
@@ -1776,7 +1776,7 @@ pcrlock_grub2()
 	#
 	# In GRUB2, the cmdline does not contain the initrd, so we
 	# need to infer the one used taking the oldest one
-	if [ "$SDB_ADD_INITIAL_CMDLINE" = "1" ]; then
+	if [ "$SDB_ADD_INITIAL_COMPONENT" = "1" ]; then
 		read -r cmdline < /proc/cmdline
 		cmdline="${cmdline#*BOOT_IMAGE=}"
 		local entry_path="${cmdline#*$grub_drive}"; entry_path="${entry_path%%/linux-*}"
@@ -1796,7 +1796,7 @@ pcrlock_grub2()
 
 	# Generate variation for 710-grub2-kernel-initrd-entry for the
 	# same reason than before.
-	if [ "$SDB_ADD_INITIAL_CMDLINE" = "1" ]; then
+	if [ "$SDB_ADD_INITIAL_COMPONENT" = "1" ]; then
 		read -r cmdline < /proc/cmdline
 		local kernel="${cmdline#*BOOT_IMAGE=$grub_drive}"; kernel="${kernel%% *}"
 		local initrd="$(ls --sort=time --reverse "$boot_root$entry_path/initrd-"* | head -n1)"
