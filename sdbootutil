@@ -1672,6 +1672,7 @@ pcrlock_grub2()
 		cmdline="${cmdline#*BOOT_IMAGE=}"
 		local entry_path="${cmdline#*$grub_drive}"; entry_path="${entry_path%%/linux-*}"
 		local initrd="$(ls --sort=time --reverse "$boot_root$entry_path/initrd-"* | head -n1)"
+		initrd="$grub_drive${initrd#$boot_root}"
 		pcrlock_grub2_exec_cmdline "linux $cmdline" "$cmdline" "initrd $initrd" "0" || warn "Not all PCRs are registered in the policy"
 	fi
 
