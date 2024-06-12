@@ -319,7 +319,7 @@ update_entries()
 update_entries_for_subvol()
 {
 	local subvol="$1"
-	update_entries jq "[.[]|select(has(\"options\"))|select(.options|match(\"root=UUID=$root_uuid .*rootflags=subvol=$subvol\"))]"
+	update_entries jq "[.[]|select(has(\"options\"))|select(.options|test(\"root=UUID=$root_uuid .*rootflags=subvol=$subvol\"))]"
 }
 
 update_entries_for_snapshot()
@@ -330,7 +330,7 @@ update_entries_for_snapshot()
 
 update_entries_for_this_system()
 {
-	update_entries jq "[.[]|select(has(\"options\"))|select(.options|match(\"root=UUID=$root_uuid\"))]"
+	update_entries jq "[.[]|select(has(\"options\"))|select(.options|test(\"root=UUID=$root_uuid\"))]"
 }
 
 find_conf_file() {
@@ -1121,11 +1121,11 @@ show_kernels()
 
 			case "$action" in
 				entries)
-					update_entries jq "[.[]|select(has(\"linux\"))|select(.linux|match(\"${kernelfiles[$n]}\"))]"
+					update_entries jq "[.[]|select(has(\"linux\"))|select(.linux|test(\"${kernelfiles[$n]}\"))]"
 					show_entries "Entries for kernel ${kernelfiles[$n]#/*/}"
 					;;
 				show)
-					show_entry ".[]|select(.id|match(\"$id\"))"
+					show_entry ".[]|select(.id|test(\"$id\"))"
 					break # might have selected delete so refresh
 					;;
 				install)
