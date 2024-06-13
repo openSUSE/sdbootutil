@@ -319,13 +319,22 @@ update_entries()
 update_entries_for_subvol()
 {
 	local subvol="$1"
-	update_entries jq "[.[]|select(has(\"options\"))|select(.options|test(\"root=UUID=$root_uuid .*rootflags=subvol=$subvol\"))]"
+	local invert="${2:-}"
+
+	[ -z "$invert" ] || invert='|not'
+	update_entries jq "[.[]|select(has(\"options\"))|select(.options|test(\"root=UUID=$root_uuid .*rootflags=subvol=$subvol\")$invert)]"
 }
 
 update_entries_for_snapshot()
 {
 	local n="$1"
 	update_entries_for_subvol "${subvol_prefix}/.snapshots/$n/snapshot"
+}
+
+update_entries_for_snapshot_invert()
+{
+	local n="$1"
+	update_entries_for_subvol "${subvol_prefix}/.snapshots/$n/snapshot" "invert"
 }
 
 update_entries_for_this_system()
@@ -563,6 +572,60 @@ add_version_to_title()
 	[ -n "$os_release_VERSION" ] || title="$title $os_release_VERSION_ID"
 }
 
+pending_kernel_size()
+{
+	echo $(($(stat -c %s "$1") / 1024 + 1))
+}
+
+pending_initrds_size()
+{
+	local size=0
+	local i=0
+	while [ -e "$1/initrd-$i" ]; do
+		size=$((size + $(stat -c %s "$1/initrd-$i")))
+		((++i))
+	done
+	echo $((size / 1024 + 1))
+}
+
+boot_free_space()
+{
+	echo $(($(findmnt -n -b -o AVAIL --target "$boot_root") / 1024))
+}
+
+select_entries_for_free_space()
+{
+	local snapshot="$1"
+
+	update_entries_for_snapshot_invert "$(regex_entries_ids_for_prediction "$snapshot")"
+}
+
+make_free_space()
+{
+	local snapshot="$1"
+
+	# Calculate the free space and the required size.  All sizes
+	# are in Kb to avoid big numbers
+	local free_space total_size
+	total_size=$(($(pending_kernel_size "$src") + $(pending_initrds_size "$tmpdir")))
+
+	select_entries_for_free_space "$snapshot"
+
+	local id
+	while read -r id; do
+		free_space="$(boot_free_space)"
+		if [ "$total_size" -gt "$free_space" ];	then
+			log_info "Removing boot entry $id"
+			bootctl unlink "$id"
+		else
+			return 0
+		fi
+	done < <(jq -r 'reverse|.[]|.id' < "$entryfile")
+
+	free_space="$(boot_free_space)"
+	[ "$total_size" -lt "$free_space" ]
+}
+
 install_kernel()
 {
 	local snapshot="$1"
@@ -611,6 +674,8 @@ install_kernel()
 		run_command_live_output dracut --quiet --reproducible "${dracut_args[@]}" "$tmpdir/initrd-0" "$kernel_version"
 		is_transactional && umount_etc "${snapshot_dir}"
 	fi
+
+	make_free_space "$snapshot" || err "No free space in $boot_root for new kernel"
 
 	local boot_options=
 	for i in /etc/kernel/cmdline /usr/lib/kernel/cmdline /proc/cmdline; do
@@ -1400,13 +1465,18 @@ is_pcr_oracle() {
 }
 
 # TODO: Maybe share this code outside
-select_entries_for_prediction()
+regex_entries_ids_for_prediction()
 {
+	local snapshot="$1"
+
 	# Get the numbers for the last three snapshots
 	[ -s "$snapperfile" ] || update_snapper
 
-	# Select the default and the active snapshots
+	# Select the default and the active snapshots.  Also include
+	# one extra snapshot if is passed as a parameter, that refers
+	# the snapshot from where we are installing the kernel
 	declare -A snapshots
+	[ -z "$snapshot" ] || snapshots["$snapshot"]=1
 	local id
 	while read -r id; do
 		snapshots[$id]=1
@@ -1418,9 +1488,14 @@ select_entries_for_prediction()
 		for id in $LAST_WORKING_SNAPSHOTS; do
 			snapshots[$id]=1
 		done
+	else
+		while read -r id; do
+			if [ "${#snaphosts[@]}" -lt 3 ]; then
+				snapshots[$id]=1
+			fi
+		done < <(jq -r '.root|sort_by(.date)[-2:]|.[]|.number' "$snapperfile")
 	fi
 
-	log_info "Creating predictions for snapshots: ${!snapshots[*]}"
 	local re
 	if [ "${#snapshots[@]}" = 1 ]; then
 		re="${!snapshots[*]}"
@@ -1428,7 +1503,13 @@ select_entries_for_prediction()
 		IFS='|' eval re='"(:?${!snapshots[*]})"'
 	fi
 
-	update_entries_for_snapshot "$re"
+	echo "$re"
+}
+
+# TODO: Maybe share this code outside
+select_entries_for_prediction()
+{
+	update_entries_for_snapshot "$(regex_entries_ids_for_prediction)"
 }
 
 
