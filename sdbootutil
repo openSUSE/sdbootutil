@@ -319,10 +319,10 @@ update_entries()
 update_entries_for_subvol()
 {
 	local subvol="$1"
-	local invert="${2:-}"
+	local ext="${2:-}"
 
-	[ -z "$invert" ] || invert='|not'
-	update_entries jq "[.[]|select(has(\"options\"))|select(.options|test(\"root=UUID=$root_uuid .*rootflags=subvol=$subvol\")$invert)]"
+	[ -z "$ext" ] || ext="|$ext"
+	update_entries jq "[.[]|select(has(\"options\"))|select(.options|test(\"root=UUID=$root_uuid .*rootflags=subvol=$subvol\")$ext)]"
 }
 
 update_entries_for_snapshot()
@@ -334,7 +334,7 @@ update_entries_for_snapshot()
 update_entries_for_snapshot_invert()
 {
 	local n="$1"
-	update_entries_for_subvol "${subvol_prefix}/.snapshots/$n/snapshot" "invert"
+	update_entries_for_subvol "${subvol_prefix}/.snapshots/$n/snapshot" "not"
 }
 
 update_entries_for_this_system()
