@@ -45,7 +45,6 @@ set_default_snapshot()
 
 	if is_transactional; then
 		/usr/bin/sdbootutil add-all-kernels "$num" || :
-		/usr/bin/sdbootutil update "$num" || :
 
 		if [ -e /usr/lib/module-init-tools/regenerate-initrd-posttrans ]; then
 			/usr/lib/module-init-tools/regenerate-initrd-posttrans
@@ -53,6 +52,7 @@ set_default_snapshot()
 	fi
 
 	/usr/bin/sdbootutil set-default-snapshot "$num" || :
+	/usr/bin/sdbootutil update --sync "$num"
 }
 
 h()
