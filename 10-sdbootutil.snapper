@@ -45,10 +45,10 @@ set_default_snapshot()
 
 	if is_transactional; then
 		/usr/bin/sdbootutil add-all-kernels "$num" || :
-		/usr/bin/sdbootutil update "$num" || :
 	fi
 
 	/usr/bin/sdbootutil set-default-snapshot "$num"
+	/usr/bin/sdbootutil update --sync "$num"
 }
 
 h()
