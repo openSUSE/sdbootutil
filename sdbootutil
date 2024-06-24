@@ -347,7 +347,25 @@ entry_conf_file()
 	local kernel_version="${1:?}"
 	local snapshot="$2"
 	local tries="$3"
-	echo "$entry_token-$kernel_version${snapshot:+-$snapshot}${tries:++$tries}.conf"
+
+	# GRUB2 with the BLS patches does not follow the expected
+	# ordering rules, using only rpmvercmp() with the entry
+	# filename.  To provide an order we add a prefix ("system")
+	# for entries that are not RO, making it newer that any other
+	# entry name that start with the "snapper" prefix:
+	# ("system" > "snapper").
+	local prefix=""
+	local subvol=""
+	[ -z "$have_snapshots" ] || subvol="${subvol_prefix}/.snapshots/${snapshot}/snapshot"
+	if ! is_transactional && is_grub2; then
+		if ! subvol_is_ro "$subvol"; then
+			prefix="system"
+		else
+			prefix="snapper"
+		fi
+	fi
+
+	echo "${prefix:+$prefix-}$entry_token-$kernel_version${snapshot:+-$snapshot}${tries:++$tries}.conf"
 }
 
 find_conf_file() {
