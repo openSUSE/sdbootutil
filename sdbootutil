@@ -342,10 +342,18 @@ update_entries_for_this_system()
 	update_entries jq "[.[]|select(has(\"options\"))|select(.options|test(\"root=UUID=$root_uuid\"))]"
 }
 
+entry_conf_file()
+{
+	local kernel_version="${1:?}"
+	local snapshot="$2"
+	local tries="$3"
+	echo "$entry_token-$kernel_version${snapshot:+-$snapshot}${tries:++$tries}.conf"
+}
+
 find_conf_file() {
 	local kernel_version="${1:?}"
 	local snapshot="$2"
-	local id="$entry_token-$kernel_version${snapshot:+-$snapshot}.conf"
+	local id="$(entry_conf_file "$kernel_version" "$snapshot")"
 
 	update_entries_for_snapshot "$snapshot"
 
@@ -405,7 +413,7 @@ remove_kernel()
 	local kernel_version="$2"
 	[ -n "$kernel_version" ] || err "Missing kernel version"
 	settle_entry_token "${snapshot}"
-	local id="$entry_token-$kernel_version${snapshot:+-$snapshot}.conf"
+	local id="$(entry_conf_file "$kernel_version" "$snapshot")"
 	run_command_output bootctl unlink "$id"
 
 	# This action will require to update the PCR predictions
@@ -744,7 +752,7 @@ install_kernel()
 			tries=
 		fi
 
-		loader_entry="$boot_root/loader/entries/$entry_token-$kernel_version${snapshot:+-$snapshot}${tries:++$tries}.conf"
+		loader_entry="$boot_root/loader/entries/$(entry_conf_file "$kernel_version" "$snapshot" "$tries")"
 		install_with_rollback "$tmpdir/entry.conf" "$loader_entry" || failed="bootloader entry"
 		rm -f "$tmpdir/entry.conf"
 	fi
@@ -834,7 +842,7 @@ show_entry_fields()
 	local kernel_version="$2"
 	[ -n "$kernel_version" ] || err "Missing kernel version"
 	settle_entry_token "${snapshot}"
-	local id="$entry_token-$kernel_version${snapshot:+-$snapshot}.conf"
+	local id="$(entry_conf_file "$kernel_version" "$snapshot")"
 
 	local conf
 	conf="$(find_conf_file "${kernel_version}" "${snapshot}")"
