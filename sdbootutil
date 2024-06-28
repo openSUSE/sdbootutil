@@ -255,7 +255,9 @@ stty_size() {
 # check whether it's a transactional system
 is_transactional()
 {
-	[ "$(stat -f -c %T /etc)" = "overlayfs" ]
+	# For running systems we can have this tests instead:
+	#   [ "$(stat -f -c %T /etc)" = "overlayfs" ]
+	grep -q "^overlay /etc" /etc/fstab
 }
 
 subvol_is_ro()
