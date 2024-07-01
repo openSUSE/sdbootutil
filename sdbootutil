@@ -21,6 +21,7 @@ arg_no_variables=
 arg_no_reuse_initrd=
 arg_no_random_seed=
 arg_ask_pin=
+arg_portable=
 have_snapshots=
 # for x in vmlinuz image vmlinux linux bzImage uImage Image zImage; do
 image=
@@ -76,6 +77,7 @@ helpandquit()
 		  --no-variables	Do not update UEFI variables
 		  --no-reuse-initrd	Always regenerate initrd
 		  --ask-pin		Ask recovery PIN for re-enrollment
+		  --portable		Handle bootloader on portable devices
 		  -v, --verbose		More verbose output
 		  -h, --help		This screen
 
@@ -1342,7 +1344,7 @@ install_bootloader()
 		log_info "Installing $bldr_name with shim into $boot_root"
 		entry="$boot_dst/shim.efi"
 		for i in MokManager shim; do
-			install -p -D "$prefix$shimdir/$i.efi" "$boot_root$boot_dst/$i.efi"
+			[ -n "$arg_portable" ] || install -p -D "$prefix$shimdir/$i.efi" "$boot_root$boot_dst/$i.efi"
 		done
 		install -p -D "$bootloader" "$boot_root$boot_dst/grub.efi"
 
@@ -1354,14 +1356,15 @@ install_bootloader()
 	else
 		log_info "Installing $bldr_name into $boot_root"
 		entry="$boot_dst/${bootloader##*/}"
-		install -p -D "$bootloader" "$boot_root$entry"
+		[ -n "$arg_portable" ] || install -p -D "$bootloader" "$boot_root$entry"
 		install -p -D "$bootloader" "$boot_root/EFI/BOOT/BOOT${firmware_arch^^}.EFI"
 	fi
+
 	# this is for shim to create the entry if missing
-	echo "${entry##*/},openSUSE Boot Manager" | { echo -ne "\xff\xfe"; iconv -f ascii -t ucs-2le; } > "$boot_root/$boot_dst/boot.csv"
+	[ -n "$arg_portable" ] || echo "${entry##*/},openSUSE Boot Manager" | { echo -ne "\xff\xfe"; iconv -f ascii -t ucs-2le; } > "$boot_root$boot_dst/boot.csv"
 
 	mkdir -p "$boot_root/$entry_token"
-	echo "$entry_token" > "$boot_root/$boot_dst/installed_by_sdbootutil"
+	echo "$entry_token" > "$boot_root$boot_dst/installed_by_sdbootutil"
 	mkdir -p "/etc/kernel"
 	[ -s /etc/kernel/entry-token ] || echo "$entry_token" > /etc/kernel/entry-token
 	update_random_seed
@@ -1395,7 +1398,7 @@ install_bootloader()
 	fi
 
 	# Create boot menu entry if it does not exist
-	[ -n "$arg_no_variables" ] || efibootmgr | grep -q 'Boot.*openSUSE Boot Manager' || efibootmgr -q --create --disk "$drive" --part "$partno" --label "openSUSE Boot Manager" --loader "$entry" || true
+	[ -n "$arg_no_variables" ] || [ -n "$arg_portable" ] || efibootmgr | grep -q 'Boot.*openSUSE Boot Manager' || efibootmgr -q --create --disk "$drive" --part "$partno" --label "openSUSE Boot Manager" --loader "$entry" || true
 
 	# This action will require to update the PCR predictions
 	update_predictions=1
@@ -1827,10 +1830,12 @@ generate_tpm2_predictions_pcrlock()
 
 	# 630-shim-efi-application is not part of the pcrlock standards
 	# TODO: move to shim-pcrlock.rpm
+	local entry="shim.efi"
+	[ -f "$boot_dst/BOOT${firmware_arch^^}.EFI" ] || entry="BOOT${firmware_arch^^}.EFI"
 	pcrlock \
 	    lock-pe \
 	    --pcrlock=/var/lib/pcrlock.d/630-shim-efi-application.pcrlock.d/generated.pcrlock \
-	    "${boot_root}${boot_dst}/shim.efi"
+	    "${boot_root}${boot_dst}/${entry}"
 
 	# 640-boot-loader-efi-application is not part of the pcrlock
 	# standards
@@ -1990,7 +1995,7 @@ main_menu()
 
 ####### main #######
 
-getopttmp=$(getopt -o hc:v --long help,flicker,verbose,esp-path:,entry-token:,arch:,image:,entry-keys:,no-variables,no-reuse-initrd,no-random-seed,ask-pin,all -n "${0##*/}" -- "$@")
+getopttmp=$(getopt -o hc:v --long help,flicker,verbose,esp-path:,entry-token:,arch:,image:,entry-keys:,no-variables,no-reuse-initrd,no-random-seed,ask-pin,portable,all -n "${0##*/}" -- "$@")
 eval set -- "$getopttmp"
 
 while true ; do
@@ -2007,6 +2012,7 @@ while true ; do
 		--no-reuse-initrd) arg_no_reuse_initrd=1; shift ;;
 		--no-random-seed) arg_no_random_seed=1; shift ;;
 		--ask-pin) arg_ask_pin=1; shift ;;
+		--portable) arg_portable=1; shift ;;
 		--all) arg_all_entries=1; shift ;;
                 --) shift ; break ;;
                 *) echo "Internal error!" ; exit 1 ;;
@@ -2063,7 +2069,13 @@ case "$firmware_arch" in
 esac
 
 # XXX: Unify both in /EFI/opensuse?
-if is_sdboot; then
+if [ -n "$arg_portable" ]; then
+	if [ ! -d "$boot_root/EFI/systemd" ] && [ ! -d "$boot_root/EFI/opensuse" ]; then
+		boot_dst="/EFI/BOOT"
+	else
+		err "Bootloader is already installed permanently"
+	fi
+elif is_sdboot; then
 	boot_dst="/EFI/systemd"
 elif is_grub2; then
 	boot_dst="/EFI/opensuse"
