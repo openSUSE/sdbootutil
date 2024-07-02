@@ -1831,9 +1831,13 @@ generate_tpm2_predictions_pcrlock()
 	# Select the affected entries
 	select_entries_for_prediction
 
-	# Remove all the generated measurements.  This will keep the
-	# predictions at minimum and decrease the combinations
-	rm -fr /var/lib/pcrlock.d/*
+	# Remove older (1 week) generated measurements.  This will
+	# keep the predictions at minimum and decrease the
+	# combinations.  Removing all can be a problem in certain
+	# conditions.  For example, after the first boot some pcrlock
+	# files contain hashes for the original ESP assets, that are
+	# required for the event log aligment.
+	[ ! -d /var/lib/pcrlock.d ] || find /var/lib/pcrlock.d -name '*.pcrlock' -type f -mtime +7 -delete
 
 	pcrlock lock-firmware-code
 	pcrlock lock-firmware-config
