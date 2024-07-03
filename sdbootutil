@@ -1974,7 +1974,7 @@ generate_tpm2_predictions()
 	if is_pcr_oracle; then
 		generate_tpm2_predictions_pcr_oracle
 	elif have_pcrlock; then
-		[ -e /etc/sysconfig/fde-tools ] || return 0
+		[ -e /etc/sysconfig/fde-tools ] || { log_info "/etc/sysconfig/fde-tools not found. System not enrolled"; return 0; }
 		# shellcheck disable=SC1091
 		. /etc/sysconfig/fde-tools
 
