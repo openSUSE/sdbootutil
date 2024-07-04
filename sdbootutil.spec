@@ -69,20 +69,6 @@ Requires:       tukit
 %description tukit
 Plugin scripts for tukit to handle BLS config files
 
-%package rpm-scriptlets
-Summary:        Scripts to create boot entries on kernel updates
-Requires:       sdbootutil >= %{version}-%{release}
-# make sure to not replace scriptlets with nops on systems that
-# use grub2
-Conflicts:      grub2
-Conflicts:      suse-kernel-rpm-scriptlets
-Provides:       suse-kernel-rpm-scriptlets
-Obsoletes:      %{name}-filetriggers < %{version}
-
-%description rpm-scriptlets
-Scriptlets that call sdbootutil to create boot entries when
-kernels are installed or removed
-
 %package kernel-install
 Summary:        Hook script for kernel-install
 Requires:       sdbootutil >= %{version}-%{release}
@@ -103,19 +89,6 @@ install -D -m 755 sdbootutil %{buildroot}%{_bindir}/sdbootutil
 # services
 for i in sdbootutil-update-predictions.service; do
 	install -D -m 644 "$i" %{buildroot}%{_unitdir}/"$i"
-done
-
-mkdir -p %{buildroot}%{_prefix}/lib/module-init-tools/kernel-scriptlets
-for a in rpm; do
-    install -m 755 "$a-script" %{buildroot}%{_prefix}/lib/module-init-tools/kernel-scriptlets
-    for b in post posttrans postun pre preun; do
-       ln -s "$a-script" %{buildroot}%{_prefix}/lib/module-init-tools/kernel-scriptlets/$a-$b
-    done
-done
-for a in cert inkmp kmp; do
-    for b in post posttrans postun pre preun; do
-       ln -s /bin/true %{buildroot}%{_prefix}/lib/module-init-tools/kernel-scriptlets/$a-$b
-    done
 done
 
 # snapper
@@ -158,10 +131,6 @@ sdbootutil update
 %license LICENSE
 %{_bindir}/sdbootutil
 %{_unitdir}/sdbootutil-update-predictions.service
-
-%files rpm-scriptlets
-%dir %{_prefix}/lib/module-init-tools
-%{_prefix}/lib/module-init-tools/*
 
 %files snapper
 %dir %{_prefix}/lib/snapper
