@@ -3,12 +3,6 @@
 shopt -s extglob nullglob
 set -e
 
-# check whether it's a transactional system
-is_transactional()
-{
-    [ "$(stat -f -c %T /etc)" = "overlayfs" ]
-}
-
 callExt_post()
 {
     path="$1"
