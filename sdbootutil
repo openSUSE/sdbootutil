@@ -20,9 +20,11 @@ arg_entry_keys=()
 arg_no_variables=
 arg_no_reuse_initrd=
 arg_no_random_seed=
-arg_ask_pin=
 arg_portable=
 arg_only_default=
+arg_ask_pin_or_pw=
+arg_method=
+arg_signed_policy=
 have_snapshots=
 # for x in vmlinuz image vmlinux linux bzImage uImage Image zImage; do
 image=
@@ -45,7 +47,10 @@ fi
 # State file for transactional systems
 state_file="/var/lib/misc/transactional-update.state"
 
+update_initrd=
 update_predictions=
+
+luks2_devices=()
 
 rollback=()
 
@@ -83,9 +88,13 @@ helpandquit()
 		  --entry-keys		Comma separated list of keys
 		  --no-variables	Do not update UEFI variables
 		  --no-reuse-initrd	Always regenerate initrd
-		  --ask-pin		Ask recovery PIN for re-enrollment
 		  --portable		Handle bootloader on portable devices
 		  --only-default	Only list the default entry
+		  --ask-pin		Ask recovery PIN for re-enrollment
+					Ask TPM2 PIN when initial enrollment
+		  --ask-pw		Ask password when initial enrollment
+		  --method		"tpm2", "tpm2+pin", "fido2", "password"
+		  --signed-policy	Use signed policy for TPM2 enrollment
 		  -v, --verbose		More verbose output
 		  -h, --help		This screen
 
@@ -141,6 +150,14 @@ helpandquit()
 		force-update
 			    Update the bootloader in any case
 
+		enroll
+			    Enroll a TPM2 (+PIN), a FIDO2 key or a password for
+			    all devices
+
+		unenroll
+			    Unenroll a TPM2 (+PIN), a FIDO2 key or a password for
+			    all devices
+
 		update-predictions
 			    Update TPM2 predictions
 
@@ -152,6 +169,8 @@ helpandquit()
 		Variables:
 		SYSTEMD_COLORS		Set 0 to disable colored output
 		PIN			Recovery PIN / password (re-enrollment)
+		PIN			TPM2 PIN (initial enrollment; %u:pin)
+		PW			Password (initial enrollment; %u:pw)
 	EOF
 	exit 0
 }
@@ -585,7 +604,7 @@ mount_etc()
 	local snapshot_dir="$1"
 
 	# don't mount if we are within a transactional-update shell
-        [ -z "$TRANSACTIONAL_UPDATE" ] || return 0
+	[ -z "$TRANSACTIONAL_UPDATE" ] || return 0
 
 	IFS=',' read -ra fields <<< \
 	   $(findmnt --tab-file "${snapshot_dir}/etc/fstab" --noheadings --nofsroot --output OPTIONS /etc | sed 's#/sysroot##g' | sed 's#:/etc,#:'"${snapshot_dir}"'/etc,#g')
@@ -605,7 +624,7 @@ umount_etc()
 {
 	local snapshot_dir="$1"
 	# don't umount if we are within a transactional-update shell
-        [ -z "$TRANSACTIONAL_UPDATE" ] || return 0
+	[ -z "$TRANSACTIONAL_UPDATE" ] || return 0
 	umount "${snapshot_dir}/etc"
 }
 
@@ -657,7 +676,7 @@ make_free_space()
 	local id
 	while read -r id; do
 		free_space="$(boot_free_space)"
-		if [ "$total_size" -gt "$free_space" ];	then
+		if [ "$total_size" -gt "$free_space" ]; then
 			log_info "Removing boot entry $id"
 			bootctl unlink "$id"
 		else
@@ -821,6 +840,7 @@ remove_all_kernels()
 
 list_entries()
 {
+	# The password is read from "cryptenroll" kernel keyring
 	if [ ! -s "$entryfile" ]; then
 		if [ -n "$1" ]; then
 			update_entries_for_snapshot "$1"
@@ -1090,9 +1110,9 @@ show_snapper()
 
 calc_chksum()
 {
-    # shellcheck disable=SC2046
-    set -- $(sha1sum "$1")
-    chksum="$1"
+	# shellcheck disable=SC2046
+	set -- $(sha1sum "$1")
+	chksum="$1"
 }
 
 # map with kernel version as key and checksum as value
@@ -1397,7 +1417,7 @@ install_bootloader()
 		#
 		# NOTE: if this file change, update the linearized
 		# version in pcrlock_grub2_exec_cmdline
-	        [ -e "$boot_root$boot_dst/grub.cfg" ] || cat > "$boot_root$boot_dst/grub.cfg" <<-EOF
+		[ -e "$boot_root$boot_dst/grub.cfg" ] || cat > "$boot_root$boot_dst/grub.cfg" <<-EOF
 		timeout=8
 		function load_video {
 		  # A load_video call is added for each bls entry
@@ -1497,19 +1517,26 @@ set_default_snapshot()
 
 have_pcrlock()
 {
-	[ -e /usr/lib/systemd/systemd-pcrlock ]
+	[ -e /usr/bin/systemd-pcrlock ] || [ -e /usr/lib/systemd/systemd-pcrlock ]
+}
+
+have_pcr_oracle()
+{
+	[ -e /usr/bin/pcr-oracle ]
 }
 
 pcrlock()
 {
-	SYSTEMD_LOG_LEVEL="${SYSTEMD_LOG_LEVEL:-warning}" /usr/lib/systemd/systemd-pcrlock "$@"
+	local pcrlock_cmd="/usr/bin/systemd-pcrlock"
+	[ -e "$pcrlock_cmd" ] || pcrlock_cmd="/usr/lib/systemd/systemd-pcrlock"
+	SYSTEMD_LOG_LEVEL="${SYSTEMD_LOG_LEVEL:-warning}" "$pcrlock_cmd" "$@"
 }
 
 is_pcr_oracle()
 {
 	[ -e /etc/systemd/tpm2-pcr-public-key.pem ] && \
 	    [ -e /etc/systemd/tpm2-pcr-private-key.pem ] && \
-	    [ -e /usr/bin/pcr-oracle ]
+	    have_pcr_oracle
 }
 
 regex_entries_ids_for_prediction()
@@ -1855,15 +1882,15 @@ generate_tpm2_predictions_pcrlock()
 	pcrlock lock-firmware-config
 	# If secure boot is disabled, this can fail.  There is patch
 	# for the policy generation, and for the authority is planned
-	/usr/lib/systemd/systemd-pcrlock lock-secureboot-policy &> /dev/null || true
-	/usr/lib/systemd/systemd-pcrlock lock-secureboot-authority &> /dev/null || true
+	pcrlock lock-secureboot-policy &> /dev/null || true
+	pcrlock lock-secureboot-authority &> /dev/null || true
 	# uses / by default
 	pcrlock lock-gpt
 
 	# 630-shim-efi-application is not part of the pcrlock standards
 	# TODO: move to shim-pcrlock.rpm
 	local entry="shim.efi"
-	[ -f "$boot_dst/BOOT${firmware_arch^^}.EFI" ] || entry="BOOT${firmware_arch^^}.EFI"
+	[ -f "${boot_root}${boot_dst}/${entry}" ] || entry="BOOT${firmware_arch^^}.EFI"
 	pcrlock \
 	    lock-pe \
 	    --pcrlock=/var/lib/pcrlock.d/630-shim-efi-application.pcrlock.d/generated.pcrlock \
@@ -1886,10 +1913,11 @@ generate_tpm2_predictions_pcrlock()
 
 	# If the prediction fails, the system will ask for a password,
 	# but we can do a re-enrollment using the recovery PIN.  To
-	# register a recovery PIN disk-encryption-tool will call this
-	# script deploying in the @u keyring a "cryptsetup" entry.
-	# For re-enrollments we can use the same entry, the PIN
-	# environment variable, or the --ask-pin parameter.
+	# register a recovery PIN the installer (disk-encryption-tool,
+	# YaST) will call this script deploying in the %u keyring
+	# "cryptenroll" entry.  For re-enrollments we can use the same
+	# entry, the PIN environment variable, or the --ask-pin
+	# parameter.
 	local pin
 	local extra=()
 	local keyid="$(keyctl id %user:cryptenroll 2> /dev/null)" || true
@@ -1899,7 +1927,7 @@ generate_tpm2_predictions_pcrlock()
 	elif [ -n "$PIN" ]; then
 		pin="$PIN"
 		extra=("--recovery-pin=yes")
-	elif [ -n "$arg_ask_pin" ]; then
+	elif [ -n "$arg_ask_pin_or_pw" ]; then
 		read -s -p "Recovery PIN: " pin
 		extra=("--recovery-pin=yes")
 	fi
@@ -1988,12 +2016,388 @@ generate_tpm2_predictions()
 	if is_pcr_oracle; then
 		generate_tpm2_predictions_pcr_oracle
 	elif have_pcrlock; then
-		[ -e /etc/sysconfig/fde-tools ] || { log_info "/etc/sysconfig/fde-tools not found. System not enrolled"; return 0; }
+		[ -e /etc/sysconfig/fde-tools ] || { log_info "/etc/sysconfig/fde-tools not found"; return 0; }
 		# shellcheck disable=SC1091
 		. /etc/sysconfig/fde-tools
 
 		generate_tpm2_predictions_pcrlock "${FDE_SEAL_PCR_LIST}"
 	fi
+}
+
+have_luks2()
+{
+	[ "${#luks2_devices[@]}" -gt 0 ]
+}
+
+detect_luks2()
+{
+	local dev fstype
+	[ -z "$luks2_devices" ] || return 0
+	while read -r dev fstype; do
+		[ "$fstype" = 'crypto_LUKS' ] || continue
+		cryptsetup isLuks --type luks2 "$dev" || continue
+		luks2_devices+=("$dev")
+	done < <(lsblk --noheadings -o PATH,FSTYPE)
+	have_luks2
+}
+
+have_tpm2()
+{
+	[ -n "$(systemd-cryptenroll --tpm2-device=list 2>/dev/null)" ]
+}
+
+have_fido2()
+{
+	[ -n "$(systemd-cryptenroll --fido2-device=list 2>/dev/null)" ]
+}
+
+add_crypttab_option()
+{
+	# This version will share the same options for all crypto_LUKS
+	# devices.  This imply that all of them will be unlocked by the
+	# same TPM2, or the same FIDO2 key
+	local option="$1"
+
+	local crypttab
+	crypttab="$(mktemp -t crypttab.XXXXXX)"
+	echo "# File created by sdbootutil.  Comments will be removed" > "$crypttab"
+
+	local name
+	local device
+	local key
+	local opts
+	while read -r name device key opts; do
+		[[ "$name" = \#* ]] && continue
+		if [[ ! "$opts" =~ "$option" ]]; then
+			[ -z "$opts" ] && opts="$option" || opts="$opts,$option"
+			# crypttab has changed so initrd needs to be updated
+			update_initrd=1
+		fi
+		echo "$name $device ${key:-none} $opts" >> "$crypttab"
+	done < /etc/crypttab
+
+	mv "$crypttab" /etc/crypttab
+	chmod 644 /etc/crypttab
+}
+
+remove_crypttab_option()
+{
+	# Similar to add_crypttab_option, the option will be removed
+	# from all the entries
+	local option="$1"
+
+	local crypttab
+	crypttab="$(mktemp -t crypttab.XXXXXX)"
+	echo "# File created by sdbootutil.  Comments will be removed" > "$crypttab"
+
+	local name
+	local device
+	local key
+	local opts
+	while read -r name device key opts; do
+		[[ "$name" = \#* ]] && continue
+		if [[ "$opts" =~ "$option" ]]; then
+			opts="${opts//,$option}"
+			opts="${opts//$option}"
+			# crypttab has changed so initrd needs to be updated
+			update_initrd=1
+		fi
+		echo "$name $device ${key:-none} $opts" >> "$crypttab"
+	done < /etc/crypttab
+
+	mv "$crypttab" /etc/crypttab
+	chmod 644 /etc/crypttab
+}
+
+generate_rsa_key()
+{
+	pcr-oracle \
+		--rsa-generate-key \
+		--private-key /etc/systemd/tpm2-pcr-private-key.pem \
+		--public-key /etc/systemd/tpm2-pcr-public-key.pem \
+		store-public-key
+}
+
+enroll_pcrlock()
+{
+	local dev="$1"
+	local tpm_pin="$2"
+	local extra_args=()
+
+	if [ -z "$tpm_pin" ]; then
+		echo "Enrolling with TPM2 (pcrlock): $dev"
+	else
+		echo "Enrolling with TPM2+PIN (pcrlock): $dev"
+		extra_args+=(--tpm2-with-pin=1)
+	fi
+
+	# The password is read from "cryptenroll" kernel keyring
+	# XXX: Wipe is separated by now (possible systemd bug)
+	systemd-cryptenroll \
+		--wipe-slot=tpm2 \
+		"$dev"
+
+	# Note that the PCRs are now not stored in the LUKS2 header
+	NEWPIN="$tpm_pin" systemd-cryptenroll \
+		--tpm2-device=auto \
+		"${extra_args[@]}" \
+		--tpm2-pcrlock=/var/lib/systemd/pcrlock.json \
+		"$dev"
+}
+
+enroll_pcroracle()
+{
+	local dev="$1"
+	local tpm_pin="$2"
+	local extra_args=()
+
+	if [ -z "$tpm_pin" ]; then
+		echo "Enrolling with TPM2 (pcr-oracle): $dev"
+	else
+		echo "Enrolling with TPM2+PIN (pcr-oracle): $dev"
+		extra_args+=(--tpm2-with-pin=1)
+	fi
+
+	# The password is read from "cryptenroll" kernel keyring
+	# XXX: Wipe is separated by now (possible systemd bug)
+	systemd-cryptenroll \
+		--wipe-slot=tpm2 \
+		"$dev"
+
+	# Note that the PCRs are now not stored in the LUKS2 header
+	NEWPIN="$tpm_pin" systemd-cryptenroll \
+		--tpm2-device=auto \
+		"${extra_args[@]}" \
+		--tpm2-public-key=/etc/systemd/tpm2-pcr-public-key.pem \
+		--tpm2-public-key-pcrs="${FDE_SEAL_PCR_LIST}" \
+		"$dev"
+}
+
+enroll_fido2()
+{
+	local dev="$1"
+
+	echo "Enrolling with FIDO2: $dev"
+
+	# The password is read from "cryptenroll" kernel keyring
+	# XXX: Wipe is separated by now (possible systemd bug)
+	systemd-cryptenroll \
+		--wipe-slot=fido2 \
+		"$dev"
+
+	# The password is read from "cryptenroll" kernel keyring
+	systemd-cryptenroll --fido2-device=auto "$dev"
+}
+
+enroll_password()
+{
+	local dev="$1"
+	local pw="$2"
+
+	echo "Enrolling with password: $dev"
+
+	# The password is read from "cryptenroll" kernel keyring
+	NEWPASSWORD="$pw" systemd-cryptenroll --wipe-slot=password --password "$dev"
+}
+
+enroll_device()
+{
+	local dev="$1"
+	local pin_or_pw="$2"
+
+	case "$arg_method" in
+		"tpm2"|"tpm2+pin")
+			if [ -z "$signed_policy" ] && have_pcrlock; then
+				enroll_pcrlock "$dev" "$pin_or_pw"
+			elif have_pcr_oracle; then
+				enroll_pcr_oracle "$dev" "$pin_or_pw"
+			else
+				log_info "No TMP2 enrollment mechanism found"
+			fi
+			;;
+
+		"fido2")
+			enroll_fido2 "$dev"
+			;;
+
+		"password")
+			enroll_password "$dev" "$pin_or_pw"
+			;;
+
+		*)
+			err "Unexpected parameter for --method=: $arg_method"
+			;;
+	esac
+}
+
+enroll()
+{
+	[ -e /etc/crypttab ] || { log_info "/etc/crypttab not found. No encrypted devices?"; return 0; }
+	[ -e /usr/bin/systemd-cryptenroll ] || { log_info "systemd-cryptenroll not found"; return 0; }
+	detect_luks2 || { log_info "No LUKS2 devices found"; return 0; }
+
+	have_pcrlock || have_pcr_oracle || err "Nor systemd-pcrlock not pcr-oracle found"
+
+	# Prepare /etc/crypttab and update initrd if required
+	case "$arg_method" in
+		"tpm2"|"tpm2+pin")
+			have_tpm2 || err "No TPM2 found found"
+			add_crypttab_option 'tpm2-device=auto'
+			;;
+
+		"fido2")
+			have_fido2 || err "No FIDO2 key found"
+			add_crypttab_option 'fido2-device=auto'
+			;;
+	esac
+	if [ "$update_initrd" = "1" ]; then
+		arg_no_reuse_initrd=1
+		install_all_kernels "$root_snapshot"
+		# Avoid the call of generate_tpm2_predictions at the
+		# end of the script
+		update_predictions=
+	fi
+
+	# If systemd-pcrlock is missing then we need to use
+	# pcr-oracle.  For this we need to generate the RSA keys
+	# early.  Also we need to set the PCRs used to assest the
+	# system status
+	if [ "$arg_method" = "tpm2" ] || [ "$arg_method" = "tpm2+pin" ]; then
+		if [ -z "${FDE_SEAL_PCR_LIST}" ]; then
+			if is_sdboot; then
+				FDE_SEAL_PCR_LIST="0,2,4,7,9"
+			elif is_grub2; then
+				FDE_SEAL_PCR_LIST="0,2,4,7,8,9"
+			else
+				err "Bootloader not detected"
+			fi
+		fi
+		[ -e /etc/sysconfig/fde-tools ] || echo "FDE_SEAL_PCR_LIST=${FDE_SEAL_PCR_LIST}" > /etc/sysconfig/fde-tools
+		# shellcheck disable=SC1091
+		. /etc/sysconfig/fde-tools
+
+		if ! have_pcrlock && have_pcr_oracle; then
+			generate_rsa_key
+		fi
+
+		# During the initial enrollment it is expected that
+		# for systemd-pcrlock the recovery PIN will be
+		# extracted from the %u keyring "cryptenroll" entry
+		generate_tpm2_predictions
+	fi
+
+	# For the PIN (tpm2+pin) or password (password), we can get it
+	# from the %u keyring "pin" or "pw" entry, the PIN or PW
+	# environment variable, or introduced by the user
+	local pin_or_pw keyid
+	if [ "$arg_method" = "tpm2+pin" ]; then
+		keyid="$(keyctl id %user:pin 2> /dev/null)" || true
+		if [ -n "$keyid" ]; then
+			pin_or_pw="$(keyctl pipe "$keyid")"
+		elif [ -n "$PIN" ]; then
+			pin_or_pw="$PIN"
+		elif [ -n "$arg_ask_pin_or_pw" ]; then
+			read -s -p "TPM2 PIN: " pin_or_pw
+		else
+			err "Use %u:pin, PIN or --ask-pin to provide the TPM2 PIN"
+		fi
+	elif [ "$arg_method" = "password" ]; then
+		local keyid="$(keyctl id %user:pw 2> /dev/null)" || true
+		if [ -n "$keyid" ]; then
+			pin_or_pw="$(keyctl pipe "$keyid")"
+		elif [ -n "$PW" ]; then
+			pin_or_pw="$PW"
+		elif [ -n "$arg_ask_pin_or_pw" ]; then
+			read -s -p "Password: " pin_or_pw
+		else
+			err "Use %u:pw, PW or --ask-pw to provide the password"
+		fi
+	fi
+
+	for dev in "${luks2_devices[@]}"; do
+		enroll_device "$dev" "$pin_or_pw"
+	done
+}
+
+unenroll_device()
+{
+	local dev="$1"
+
+	case "$arg_method" in
+		"tpm2"|"tpm2+pin")
+			systemd-cryptenroll \
+				--wipe-slot=tpm2 \
+				"$dev"
+			;;
+
+		"fido2")
+			systemd-cryptenroll \
+				--wipe-slot=fido2 \
+				"$dev"
+			;;
+
+		"password")
+			systemd-cryptenroll \
+				--wipe-slot=password \
+				"$dev"
+			;;
+
+		*)
+			err "Unexpected parameter for --method=: $arg_method"
+			;;
+	esac
+}
+
+unenroll()
+{
+	[ -e /etc/crypttab ] || { log_info "/etc/crypttab not found. No encrypted devices?"; return 0; }
+	[ -e /usr/bin/systemd-cryptenroll ] || { log_info "systemd-cryptenroll not found"; return 0; }
+	detect_luks2 || { log_info "No LUKS2 devices found"; return 0; }
+
+	# Prepare /etc/crypttab and update initrd if required
+	case "$arg_method" in
+		"tpm2"|"tpm2+pin")
+			have_tpm2 || err "No TPM2 found found"
+			remove_crypttab_option 'tpm2-device=auto'
+			;;
+
+		"fido2")
+			have_fido2 || err "No FIDO2 key found"
+			remove_crypttab_option 'fido2-device=auto'
+			;;
+	esac
+	if [ "$update_initrd" = "1" ]; then
+		arg_no_reuse_initrd=1
+		install_all_kernels "$root_snapshot"
+		# Avoid the call of generate_tpm2_predictions at the
+		# end of the script
+		update_predictions=
+	fi
+
+	# If systemd-pcrlock is missing then we need to use
+	# pcr-oracle.  For this we need to generate the RSA keys
+	# early.  Also we need to set the PCRs used to assest the
+	# system status
+	if [ "$arg_method" = "tpm2" ] || [ "$arg_method" = "tpm2+pin" ]; then
+		# Maybe we can remove fde-tools, but it is OK to keep
+		# it, as is a user configuration file
+		# [ ! -e /etc/sysconfig/fde-tools ] || rm /etc/sysconfig/fde-tools
+
+		pcrlock remove-policy &> /dev/null || true
+		rm -fr /var/lib/pcrlock.d
+		rm -f /var/lib/systemd/pcrlock.json
+		rm -f "${boot_root}${boot_dst}/pcrlock.json"
+
+		rm -f /etc/systemd/tpm2-pcr-private-key.pem
+		rm -f /etc/systemd/tpm2-pcr-public-key.pem
+		rm -f /etc/systemd/tpm2-pcr-signature.json
+		rm -f "${boot_root}${boot_dst}/tpm2-pcr-public-key.pem"
+		rm -f "${boot_root}${boot_dst}/tpm2-pcr-signature.json"
+	fi
+
+	for dev in "${luks2_devices[@]}"; do
+		unenroll_device "$dev"
+	done
 }
 
 bootloader_name()
@@ -2025,12 +2429,12 @@ main_menu()
 
 ####### main #######
 
-getopttmp=$(getopt -o hc:v --long help,flicker,verbose,esp-path:,entry-token:,arch:,image:,entry-keys:,no-variables,no-reuse-initrd,no-random-seed,ask-pin,portable,all -n "${0##*/}" -- "$@")
+getopttmp=$(getopt -o hc:v --long help,flicker,verbose,esp-path:,entry-token:,arch:,image:,entry-keys:,no-variables,no-reuse-initrd,no-random-seed,all,portable,only-default,ask-pin,ask-pw,method:,signed-policy -n "${0##*/}" -- "$@")
 eval set -- "$getopttmp"
 
 while true ; do
-        case "$1" in
-                -h|--help) helpandquit ;;
+	case "$1" in
+		-h|--help) helpandquit ;;
 		--flicker) dialog_altenate_screen=--keep-tite; shift ;;
 		-v|--verbose) verbose=$((++verbose)); shift ;;
 		--esp-path) arg_esp_path="$2"; shift 2 ;;
@@ -2041,13 +2445,15 @@ while true ; do
 		--no-variables) arg_no_variables=1; shift ;;
 		--no-reuse-initrd) arg_no_reuse_initrd=1; shift ;;
 		--no-random-seed) arg_no_random_seed=1; shift ;;
-		--ask-pin) arg_ask_pin=1; shift ;;
+		--all) arg_all_entries=1; shift ;;
 		--portable) arg_portable=1; shift ;;
 		--only-default) arg_only_default=1; shift ;;
-		--all) arg_all_entries=1; shift ;;
-                --) shift ; break ;;
-                *) echo "Internal error!" ; exit 1 ;;
-        esac
+		--ask-pin|--ask-pw) arg_ask_pin_or_pw=1; shift ;;
+		--method) arg_method="$2"; shift 2 ;;
+		--signed-policy) arg_signed_policy=1; shift ;;
+		--) shift ; break ;;
+		*) echo "Internal error!" ; exit 1 ;;
+	esac
 done
 
 if [ -z "$SYSTEMD_LOG_LEVEL" -a -n "$verbose" ]; then
@@ -2060,7 +2466,7 @@ if [ -z "$SYSTEMD_LOG_LEVEL" -a -n "$verbose" ]; then
 fi
 
 case "$1" in
-	install|needs-update|update|force-update|add-kernel|remove-kernel|set-default-snapshot|add-all-kernels|mkinitrd|remove-all-kernels|is-installed|list-snapshots|list-entries|list-kernels|show-entry|is-bootable|update-predictions|bootloader) ;;
+	install|needs-update|update|force-update|add-kernel|remove-kernel|set-default-snapshot|add-all-kernels|mkinitrd|remove-all-kernels|is-installed|list-snapshots|list-entries|list-kernels|show-entry|is-bootable|enroll|unenroll|update-predictions|bootloader) ;;
 	kernels|snapshots|entries|"") stty_size; interactive=1 ;;
 	*) err "unknown command $1" ;;
 esac
@@ -2161,6 +2567,10 @@ elif [ "$1" = "show-entry" ]; then
 	show_entry_fields "${3:-$root_snapshot}" "$2"
 elif [ "$1" = "is-bootable" ]; then
 	is_bootable "${2:-$root_snapshot}"
+elif [ "$1" = "enroll" ]; then
+	enroll
+elif [ "$1" = "unenroll" ]; then
+	unenroll
 elif [ "$1" = "update-predictions" ]; then
 	update_predictions=1
 elif [ "$1" = "kernels" ]; then
