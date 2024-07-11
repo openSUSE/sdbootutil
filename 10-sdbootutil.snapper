@@ -21,7 +21,7 @@ create_snapshot()
 
 	is_transactional && return 0
 
-	/usr/bin/sdbootutil add-all-kernels "$num"
+	/usr/bin/sdbootutil add-all-kernels "$num" || :
 }
 
 delete_snapshot()
