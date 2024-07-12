@@ -406,7 +406,8 @@ find_conf_file()
 {
 	local kernel_version="${1:?}"
 	local snapshot="$2"
-	local id="$(entry_conf_file "$kernel_version" "$snapshot")"
+	local id
+	id="$(entry_conf_file "$kernel_version" "$snapshot")"
 
 	update_entries_for_snapshot "$snapshot"
 
@@ -466,7 +467,8 @@ remove_kernel()
 	local kernel_version="$2"
 	[ -n "$kernel_version" ] || err "Missing kernel version"
 	settle_entry_token "${snapshot}"
-	local id="$(entry_conf_file "$kernel_version" "$snapshot")"
+	local id
+	id="$(entry_conf_file "$kernel_version" "$snapshot")"
 	run_command_output bootctl unlink "$id"
 
 	# This action will require to update the PCR predictions
@@ -536,7 +538,7 @@ set_os_release()
 
 	for file in "${os_release_files[@]}"; do
 		[ -f "$file" ] || continue
-		eval $(sed -ne '/^[A-Z_]\+=/s/^/os_release_/p' < "$file")
+		eval "$(sed -ne '/^[A-Z_]\+=/s/^/os_release_/p' < "$file")"
 		break
 	done
 }
@@ -607,7 +609,7 @@ mount_etc()
 	[ -z "$TRANSACTIONAL_UPDATE" ] || return 0
 
 	IFS=',' read -ra fields <<< \
-	   $(findmnt --tab-file "${snapshot_dir}/etc/fstab" --noheadings --nofsroot --output OPTIONS /etc | sed 's#/sysroot##g' | sed 's#:/etc,#:'"${snapshot_dir}"'/etc,#g')
+	   "$(findmnt --tab-file "${snapshot_dir}/etc/fstab" --noheadings --nofsroot --output OPTIONS /etc | sed 's#/sysroot##g' | sed 's#:/etc,#:'"${snapshot_dir}"'/etc,#g')"
 
 	local lower=""
 	local upper=""
@@ -899,7 +901,8 @@ show_entry_fields()
 	local kernel_version="$2"
 	[ -n "$kernel_version" ] || err "Missing kernel version"
 	settle_entry_token "${snapshot}"
-	local id="$(entry_conf_file "$kernel_version" "$snapshot")"
+	local id
+	id="$(entry_conf_file "$kernel_version" "$snapshot")"
 
 	local conf
 	conf="$(find_conf_file "${kernel_version}" "${snapshot}")"
@@ -913,7 +916,7 @@ show_entry_fields()
 			*) continue ;;
 		esac
 
-		if [ -z "$arg_entry_keys" ] || [[ ${arg_entry_keys[@]} =~ "all" ]] || [[ ${arg_entry_keys[@]} =~ "$k" ]]; then
+		if [ -z "$arg_entry_keys" ] || [[ ${arg_entry_keys[*]} == *"all"* ]] || [[ ${arg_entry_keys[*]} == *"$k"* ]]; then
 			echo -e "$k\t$v"
 		fi
 	done < "$conf"
@@ -1314,7 +1317,8 @@ find_grub2()
 {
 	local prefix=""
 	[ -z "$have_snapshots" ] || prefix="/.snapshots/${1-$root_snapshot}/snapshot"
-	local grub2="$prefix/usr/share/efi/$(uname -m)/grub.efi"
+	local grub2
+	grub2="$prefix/usr/share/efi/$(uname -m)/grub.efi"
 	[ -e "$grub2" ] || grub2="$prefix/usr/share/grub2/$(uname -m)-efi/grub.efi"
 	echo "$grub2"
 }
@@ -1564,7 +1568,7 @@ regex_entries_ids_for_prediction()
 		done
 	else
 		while read -r id; do
-			if [ "${#snaphosts[@]}" -lt 3 ]; then
+			if [ "${#snapshots[@]}" -lt 3 ]; then
 				snapshots[$id]=1
 			fi
 		done < <(jq -r '.root|sort_by(.date)[-2:]|.[]|.number' "$snapperfile")
@@ -1667,9 +1671,9 @@ pcrlock_grub2_kernel_initrd()
 		locks+=( "$tmpdir/element-$n.pcrlock" )
 	done
 	jq --slurp '{"records": [.[].records[0]]}' \
-	   ${locks[@]} \
+	   "${locks[@]}" \
 	   > "/var/lib/pcrlock.d/710-grub2-kernel-initrd-entry.pcrlock.d/kernel-initrd-$suffix.pcrlock"
-	rm ${locks[@]}
+	rm "${locks[@]}"
 }
 
 pcrlock_grub2_exec_cmdline()
@@ -1704,9 +1708,9 @@ pcrlock_grub2_exec_cmdline()
 		rm "$tmpdir/line"
 	done
 	jq --slurp '{"records": [.[].records[0]]}' \
-	   ${locks[@]} \
+	   "${locks[@]}" \
 	   > "/var/lib/pcrlock.d/650-grub2-entry-exec-cmdline.pcrlock.d/exec-cmdline-$suffix.pcrlock"
-	rm ${locks[@]}
+	rm "${locks[@]}"
 }
 
 pcrlock_grub2_entry_files()
@@ -1731,9 +1735,9 @@ pcrlock_grub2_entry_files()
 	done < <(jq --raw-output 'map(.path) | .[]' "$entries")
 
 	jq --slurp '{"records": [.[].records[0]]}' \
-	   ${locks[@]} \
+	   "${locks[@]}" \
 	   > "/var/lib/pcrlock.d/643-grub2-entry-files.pcrlock.d/generated$suffix.pcrlock"
-	rm ${locks[@]}
+	rm "${locks[@]}"
 }
 
 pcrlock_sdboot()
@@ -1920,7 +1924,8 @@ generate_tpm2_predictions_pcrlock()
 	# parameter.
 	local pin
 	local extra=()
-	local keyid="$(keyctl id %user:cryptenroll 2> /dev/null)" || true
+	local keyid
+	keyid="$(keyctl id %user:cryptenroll 2> /dev/null)" || true
 	if [ -n "$keyid" ]; then
 		pin="$(keyctl pipe "$keyid")"
 		extra=("--recovery-pin=yes")
@@ -1928,7 +1933,7 @@ generate_tpm2_predictions_pcrlock()
 		pin="$PIN"
 		extra=("--recovery-pin=yes")
 	elif [ -n "$arg_ask_pin_or_pw" ]; then
-		read -s -p "Recovery PIN: " pin
+		read -r -s -p "Recovery PIN: " pin
 		extra=("--recovery-pin=yes")
 	fi
 
@@ -1957,7 +1962,7 @@ get_pcrs()
 	while read -r dev; do
 		pcrs=$(cryptsetup luksDump --dump-json-metadata "$dev" | jq -r "$jq_pcr")
 		[ -z "$pcrs" ] || echo "$pcrs"
-	done <<<$(blkid -t TYPE=crypto_LUKS -o device)
+	done <<<"$(blkid -t TYPE=crypto_LUKS -o device)"
 }
 
 generate_tpm2_predictions_pcr_oracle()
@@ -2068,7 +2073,7 @@ add_crypttab_option()
 	local opts
 	while read -r name device key opts; do
 		[[ "$name" = \#* ]] && continue
-		if [[ ! "$opts" =~ "$option" ]]; then
+		if [[ "$opts" != *"$option"* ]]; then
 			[ -z "$opts" ] && opts="$option" || opts="$opts,$option"
 			# crypttab has changed so initrd needs to be updated
 			update_initrd=1
@@ -2096,7 +2101,7 @@ remove_crypttab_option()
 	local opts
 	while read -r name device key opts; do
 		[[ "$name" = \#* ]] && continue
-		if [[ "$opts" =~ "$option" ]]; then
+		if [[ "$opts" == *"$option"* ]]; then
 			opts="${opts//,$option}"
 			opts="${opts//$option}"
 			# crypttab has changed so initrd needs to be updated
@@ -2207,7 +2212,7 @@ enroll_device()
 
 	case "$arg_method" in
 		"tpm2"|"tpm2+pin")
-			if [ -z "$signed_policy" ] && have_pcrlock; then
+			if [ -z "$arg_signed_policy" ] && have_pcrlock; then
 				enroll_pcrlock "$dev" "$pin_or_pw"
 			elif have_pcr_oracle; then
 				enroll_pcr_oracle "$dev" "$pin_or_pw"
@@ -2297,18 +2302,19 @@ enroll()
 		elif [ -n "$PIN" ]; then
 			pin_or_pw="$PIN"
 		elif [ -n "$arg_ask_pin_or_pw" ]; then
-			read -s -p "TPM2 PIN: " pin_or_pw
+			read -r -s -p "TPM2 PIN: " pin_or_pw
 		else
 			err "Use %u:pin, PIN or --ask-pin to provide the TPM2 PIN"
 		fi
 	elif [ "$arg_method" = "password" ]; then
-		local keyid="$(keyctl id %user:pw 2> /dev/null)" || true
+		local keyid
+		keyid="$(keyctl id %user:pw 2> /dev/null)" || true
 		if [ -n "$keyid" ]; then
 			pin_or_pw="$(keyctl pipe "$keyid")"
 		elif [ -n "$PW" ]; then
 			pin_or_pw="$PW"
 		elif [ -n "$arg_ask_pin_or_pw" ]; then
-			read -s -p "Password: " pin_or_pw
+			read -r -s -p "Password: " pin_or_pw
 		else
 			err "Use %u:pw, PW or --ask-pw to provide the password"
 		fi
@@ -2456,7 +2462,7 @@ while true ; do
 	esac
 done
 
-if [ -z "$SYSTEMD_LOG_LEVEL" -a -n "$verbose" ]; then
+if [ -z "$SYSTEMD_LOG_LEVEL" ] && [ -n "$verbose" ]; then
 	if [ "$verbose" -gt 1 ]; then
 		SYSTEMD_LOG_LEVEL=debug
 	else
@@ -2474,6 +2480,7 @@ esac
 [ -n "$arg_esp_path" ] && export SYSTEMD_ESP_PATH="$arg_esp_path"
 
 # XXX: bootctl should have json output for that too
+# shellcheck disable=SC2016
 eval "$(bootctl 2>/dev/null | sed -ne 's/Firmware Arch: *\(\w\+\)/firmware_arch="\1"/p;s/ *token: *\(\w\+\)/entry_token="\1"/p;s, *\$BOOT: *\([^ ]\+\).*,boot_root="\1",p')"
 read -r root_uuid root_device < <(findmnt / -v -r -n -o UUID,SOURCE)
 root_subvol=""
