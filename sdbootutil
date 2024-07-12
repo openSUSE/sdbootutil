@@ -1744,9 +1744,9 @@ pcrlock_sdboot()
 {
 	# 641-sdboot-loader-conf.pcrlock is not part of the pcrlock
 	# standards
-	if [ -e "{$boot_root}/loader/loader.conf" ]; then
+	if [ -e "${boot_root}/loader/loader.conf" ]; then
 		pcrlock \
-			lock-raw "{$boot_root}/loader/loader.conf" \
+			lock-raw "${boot_root}/loader/loader.conf" \
 			--pcr=5 \
 			--pcrlock=/var/lib/pcrlock.d/641-sdboot-loader-conf.pcrlock
 	fi
