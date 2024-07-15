@@ -22,6 +22,7 @@ arg_no_reuse_initrd=
 arg_no_random_seed=
 arg_ask_pin=
 arg_portable=
+arg_only_default=
 have_snapshots=
 # for x in vmlinuz image vmlinux linux bzImage uImage Image zImage; do
 image=
@@ -84,6 +85,7 @@ helpandquit()
 		  --no-reuse-initrd	Always regenerate initrd
 		  --ask-pin		Ask recovery PIN for re-enrollment
 		  --portable		Handle bootloader on portable devices
+		  --only-default	Only list the default entry
 		  -v, --verbose		More verbose output
 		  -h, --help		This screen
 
@@ -834,6 +836,8 @@ list_entries()
 		color=
 		if [ "$isdefault" = "true" ]; then
 			color="$color_bu"
+		elif [ -n "$arg_only_default" ]; then
+			continue
 		fi
 		if [ "$isreported" = "false" ]; then
 			color="$color${color_green}"
@@ -2039,6 +2043,7 @@ while true ; do
 		--no-random-seed) arg_no_random_seed=1; shift ;;
 		--ask-pin) arg_ask_pin=1; shift ;;
 		--portable) arg_portable=1; shift ;;
+		--only-default) arg_only_default=1; shift ;;
 		--all) arg_all_entries=1; shift ;;
                 --) shift ; break ;;
                 *) echo "Internal error!" ; exit 1 ;;
