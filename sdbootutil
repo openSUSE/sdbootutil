@@ -2213,7 +2213,12 @@ enroll_device()
 	case "$arg_method" in
 		"tpm2"|"tpm2+pin")
 			if [ -z "$arg_signed_policy" ] && have_pcrlock; then
-				enroll_pcrlock "$dev" "$pin_or_pw"
+				enroll_pcrlock "$dev" "$pin_or_pw" || {
+					echo "Enrollment with systemd-pcrlock failed"
+					echo "Re-trying with pcr-oracle"
+					unernroll_pcrlock
+					enroll_pcr_oracle "$dev" "$pin_or_pw"
+				}
 			elif have_pcr_oracle; then
 				enroll_pcr_oracle "$dev" "$pin_or_pw"
 			else
@@ -2325,6 +2330,23 @@ enroll()
 	done
 }
 
+unenroll_pcrlock()
+{
+	pcrlock remove-policy &> /dev/null || true
+	rm -fr /var/lib/pcrlock.d
+	rm -f /var/lib/systemd/pcrlock.json
+	rm -f "${boot_root}${boot_dst}/pcrlock.json"
+}
+
+unenroll_pcr_oracle()
+{
+	rm -f /etc/systemd/tpm2-pcr-private-key.pem
+	rm -f /etc/systemd/tpm2-pcr-public-key.pem
+	rm -f /etc/systemd/tpm2-pcr-signature.json
+	rm -f "${boot_root}${boot_dst}/tpm2-pcr-public-key.pem"
+	rm -f "${boot_root}${boot_dst}/tpm2-pcr-signature.json"
+}
+
 unenroll_device()
 {
 	local dev="$1"
@@ -2388,17 +2410,8 @@ unenroll()
 		# Maybe we can remove fde-tools, but it is OK to keep
 		# it, as is a user configuration file
 		# [ ! -e /etc/sysconfig/fde-tools ] || rm /etc/sysconfig/fde-tools
-
-		pcrlock remove-policy &> /dev/null || true
-		rm -fr /var/lib/pcrlock.d
-		rm -f /var/lib/systemd/pcrlock.json
-		rm -f "${boot_root}${boot_dst}/pcrlock.json"
-
-		rm -f /etc/systemd/tpm2-pcr-private-key.pem
-		rm -f /etc/systemd/tpm2-pcr-public-key.pem
-		rm -f /etc/systemd/tpm2-pcr-signature.json
-		rm -f "${boot_root}${boot_dst}/tpm2-pcr-public-key.pem"
-		rm -f "${boot_root}${boot_dst}/tpm2-pcr-signature.json"
+		unenroll_pcrlock
+		unenroll_pcr_oracle
 	fi
 
 	for dev in "${luks2_devices[@]}"; do
