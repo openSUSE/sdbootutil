@@ -2025,7 +2025,7 @@ main_menu()
 
 ####### main #######
 
-getopttmp=$(getopt -o hc:v --long help,flicker,verbose,esp-path:,entry-token:,arch:,image:,entry-keys:,no-variables,no-reuse-initrd,no-random-seed,ask-pin,portable,all -n "${0##*/}" -- "$@")
+getopttmp=$(getopt -o hc:v --long help,flicker,verbose,esp-path:,entry-token:,arch:,image:,entry-keys:,no-variables,no-reuse-initrd,no-random-seed,ask-pin,portable,only-default,all -n "${0##*/}" -- "$@")
 eval set -- "$getopttmp"
 
 while true ; do
