@@ -1551,8 +1551,9 @@ regex_entries_ids_for_prediction()
 	[ -s "$snapperfile" ] || update_snapper
 
 	# Select the default and the active snapshots.  Also include
-	# one extra snapshot if is passed as a parameter, that refers
-	# the snapshot from where we are installing the kernel
+	# one extra snapshot if it is passed as a parameter, that
+	# refers to the snapshot from where we are installing the
+	# kernel
 	declare -A snapshots
 	[ -z "$snapshot" ] || snapshots["$snapshot"]=1
 	local id
@@ -1564,7 +1565,9 @@ regex_entries_ids_for_prediction()
 		# shellcheck disable=SC1090
 		. "${state_file}"
 		for id in $LAST_WORKING_SNAPSHOTS; do
-			snapshots[$id]=1
+			if [ "${#snapshots[@]}" -lt 3 ]; then
+				snapshots[$id]=1
+			fi
 		done
 	else
 		while read -r id; do
