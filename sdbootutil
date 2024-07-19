@@ -1870,12 +1870,9 @@ pcrlock_grub2()
 	fi
 }
 
-generate_tpm2_predictions_pcrlock()
+clean_pcrlock_d()
 {
-	local pcrs="$1"
-
-	# Select the affected entries
-	select_entries_for_prediction
+	[ -d /var/lib/pcrlock.d ] || return
 
 	# Remove older (1 week) generated measurements.  This will
 	# keep the predictions at minimum and decrease the
@@ -1883,7 +1880,23 @@ generate_tpm2_predictions_pcrlock()
 	# conditions.  For example, after the first boot some pcrlock
 	# files contain hashes for the original ESP assets, that are
 	# required for the event log aligment.
-	[ ! -d /var/lib/pcrlock.d ] || find /var/lib/pcrlock.d -name '*.pcrlock' -type f -mtime +7 -delete
+	find /var/lib/pcrlock.d -name '*.pcrlock' -type f -mtime +7 -delete
+
+	# Sometimes, like in tests, the user will generate new entries
+	# and reboot in a short period of time
+	if [ "$(find /var/lib/pcrlock.d -type f -name '*-7.pcrlock' | wc -l)" -gt 0 ]; then
+		rm -fr /var/lib/pcrlock.d
+	fi
+}
+
+generate_tpm2_predictions_pcrlock()
+{
+	local pcrs="$1"
+
+	# Select the affected entries
+	select_entries_for_prediction
+
+	clean_pcrlock_d
 
 	pcrlock lock-firmware-code
 	pcrlock lock-firmware-config
