@@ -1872,7 +1872,7 @@ pcrlock_grub2()
 
 clean_pcrlock_d()
 {
-	[ -d /var/lib/pcrlock.d ] || return
+	[ -d /var/lib/pcrlock.d ] || return 0
 
 	# Remove older (1 week) generated measurements.  This will
 	# keep the predictions at minimum and decrease the
