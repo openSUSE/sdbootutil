@@ -1389,9 +1389,8 @@ install_bootloader()
 		install -p -D "$bootloader" "$boot_root$boot_dst/grub.efi"
 
 		# boot entry point
-		for i in MokManager fallback; do
-			install -p -D "$prefix$shimdir/$i.efi" "$boot_root/EFI/BOOT/$i.efi"
-		done
+		install -p -D "$prefix$shimdir/MokManager.efi" "$boot_root/EFI/BOOT/MokManager.efi"
+		[ -n "$arg_portable" ] || install -p -D "$prefix$shimdir/fallback.efi" "$boot_root/EFI/BOOT/fallback.efi"
 		install -p -D "$prefix$shimdir/shim.efi" "$boot_root/EFI/BOOT/BOOT${firmware_arch^^}.EFI"
 	else
 		log_info "Installing $bldr_name into $boot_root"
