@@ -114,7 +114,6 @@ install -d -m755 %{buildroot}%{_prefix}/lib/tmpfiles.d
 for i in kernel-install-sdbootutil.conf; do
   install -m 755 $i %{buildroot}%{_prefix}/lib/tmpfiles.d/$i
 done
-mkdir -p %{buildroot}/etc/kernel/install.d
 
 %transfiletriggerin -- /usr/lib/systemd/boot/efi /usr/share/efi/%_build_arch
 cat > /dev/null || :
@@ -147,11 +146,5 @@ sdbootutil update
 %dir %{_prefix}/lib/kernel/install.d
 %{_prefix}/lib/kernel/install.d/*
 %{_prefix}/lib/tmpfiles.d/kernel-install-sdbootutil.conf
-%dir /etc/kernel
-%dir /etc/kernel/install.d
-%ghost %config(noreplace,missingok) /etc/kernel/install.d/50-depmod.install
-%ghost %config(noreplace,missingok) /etc/kernel/install.d/50-dracut.install
-%ghost %config(noreplace,missingok) /etc/kernel/install.d/51-dracut-rescue.install
-%ghost %config(noreplace,missingok) /etc/kernel/install.d/90-loaderentry.install
 
 %changelog
