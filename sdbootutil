@@ -1941,14 +1941,14 @@ generate_tpm2_predictions_pcrlock()
 	local extra=()
 	local keyid
 	keyid="$(keyctl id %user:cryptenroll 2> /dev/null)" || true
-	if [ -n "$keyid" ]; then
-		pin="$(keyctl pipe "$keyid")"
+	if [ -n "$arg_ask_pin_or_pw" ]; then
+		read -r -s -p "Recovery PIN: " pin
 		extra=("--recovery-pin=yes")
 	elif [ -n "$PIN" ]; then
 		pin="$PIN"
 		extra=("--recovery-pin=yes")
-	elif [ -n "$arg_ask_pin_or_pw" ]; then
-		read -r -s -p "Recovery PIN: " pin
+	elif [ -n "$keyid" ]; then
+		pin="$(keyctl pipe "$keyid")"
 		extra=("--recovery-pin=yes")
 	fi
 
@@ -2317,24 +2317,24 @@ enroll()
 	local pin_or_pw keyid
 	if [ "$arg_method" = "tpm2+pin" ]; then
 		keyid="$(keyctl id %user:pin 2> /dev/null)" || true
-		if [ -n "$keyid" ]; then
-			pin_or_pw="$(keyctl pipe "$keyid")"
+		if [ -n "$arg_ask_pin_or_pw" ]; then
+			read -r -s -p "TPM2 PIN: " pin_or_pw
 		elif [ -n "$PIN" ]; then
 			pin_or_pw="$PIN"
-		elif [ -n "$arg_ask_pin_or_pw" ]; then
-			read -r -s -p "TPM2 PIN: " pin_or_pw
+		elif [ -n "$keyid" ]; then
+			pin_or_pw="$(keyctl pipe "$keyid")"
 		else
 			err "Use %u:pin, PIN or --ask-pin to provide the TPM2 PIN"
 		fi
 	elif [ "$arg_method" = "password" ]; then
 		local keyid
 		keyid="$(keyctl id %user:pw 2> /dev/null)" || true
-		if [ -n "$keyid" ]; then
-			pin_or_pw="$(keyctl pipe "$keyid")"
+		if [ -n "$arg_ask_pin_or_pw" ]; then
+			read -r -s -p "Password: " pin_or_pw
 		elif [ -n "$PW" ]; then
 			pin_or_pw="$PW"
-		elif [ -n "$arg_ask_pin_or_pw" ]; then
-			read -r -s -p "Password: " pin_or_pw
+		elif [ -n "$keyid" ]; then
+			pin_or_pw="$(keyctl pipe "$keyid")"
 		else
 			err "Use %u:pw, PW or --ask-pw to provide the password"
 		fi
