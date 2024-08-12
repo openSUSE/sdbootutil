@@ -47,7 +47,6 @@ fi
 # State file for transactional systems
 state_file="/var/lib/misc/transactional-update.state"
 
-update_initrd=
 update_predictions=
 
 luks2_devices=()
@@ -2091,7 +2090,7 @@ add_crypttab_option()
 		if [[ "$opts" != *"$option"* ]]; then
 			[ -z "$opts" ] && opts="$option" || opts="$opts,$option"
 			# crypttab has changed so initrd needs to be updated
-			update_initrd=1
+			arg_no_reuse_initrd=1
 		fi
 		echo "$name $device ${key:-none} $opts" >> "$crypttab"
 	done < /etc/crypttab
@@ -2120,7 +2119,7 @@ remove_crypttab_option()
 			opts="${opts//,$option}"
 			opts="${opts//$option}"
 			# crypttab has changed so initrd needs to be updated
-			update_initrd=1
+			arg_no_reuse_initrd=1
 		fi
 		echo "$name $device ${key:-none} $opts" >> "$crypttab"
 	done < /etc/crypttab
@@ -2275,8 +2274,7 @@ enroll()
 			add_crypttab_option 'fido2-device=auto'
 			;;
 	esac
-	if [ "$update_initrd" = "1" ]; then
-		arg_no_reuse_initrd=1
+	if [ "$arg_no_reuse_initrd" = "1" ]; then
 		install_all_kernels "$root_snapshot"
 		# Avoid the call of generate_tpm2_predictions at the
 		# end of the script
@@ -2409,8 +2407,7 @@ unenroll()
 			remove_crypttab_option 'fido2-device=auto'
 			;;
 	esac
-	if [ "$update_initrd" = "1" ]; then
-		arg_no_reuse_initrd=1
+	if [ "$arg_no_reuse_initrd" = "1" ]; then
 		install_all_kernels "$root_snapshot"
 		# Avoid the call of generate_tpm2_predictions at the
 		# end of the script
