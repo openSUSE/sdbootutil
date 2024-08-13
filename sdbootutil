@@ -11,7 +11,6 @@ interactive=
 verbose=
 nl=$'\n'
 shimdir="/usr/share/efi/$(uname -m)"
-grub2moddir="/usr/share/grub2/$(uname -m)-efi"
 arg_esp_path="$SYSTEMD_ESP_PATH"
 arg_entry_token=
 arg_arch=
@@ -1317,8 +1316,10 @@ find_grub2()
 	local prefix=""
 	[ -z "$have_snapshots" ] || prefix="/.snapshots/${1-$root_snapshot}/snapshot"
 	local grub2
-	grub2="$prefix/usr/share/efi/$(uname -m)/grub.efi"
-	[ -e "$grub2" ] || grub2="$prefix/usr/share/grub2/$(uname -m)-efi/grub.efi"
+	# The old grub.efi will contain the BLS patches, but we cannot
+	# use it because we also dropped the process of creating the
+	# configuration file and installing bli.mod
+	grub2="/usr/share/grub2/$(uname -m)-efi/grubbls.efi"
 	echo "$grub2"
 }
 
@@ -1410,29 +1411,6 @@ install_bootloader()
 	if is_sdboot "$snapshot"; then
 		[ -s "$boot_root/loader/entries.srel" ] || echo type1 > "$boot_root/loader/entries.srel"
 		[ -e "$boot_root/loader/loader.conf" ] || echo -e "#timeout 3\n#console-mode keep\n" > "$boot_root/loader/loader.conf"
-	elif is_grub2 "$snapshot"; then
-		# Minimal configuration file for now.  The theme can
-		# come later with:
-		#   * rsync the theme in /boot/efi
-		#   * grub memdisk, removing unused modules (fs,
-		#     crypto, LVM, RAID)
-		#
-		# NOTE: if this file change, update the linearized
-		# version in pcrlock_grub2_exec_cmdline
-		[ -e "$boot_root$boot_dst/grub.cfg" ] || cat > "$boot_root$boot_dst/grub.cfg" <<-EOF
-		timeout=8
-		function load_video {
-		  # A load_video call is added for each bls entry
-		  true
-		}
-		# Required to populate EFI varidables
-		insmod bli
-		blscfg
-		EOF
-
-		[ -e "$boot_root/EFI/BOOT/grub.cfg" ] || cp "$boot_root$boot_dst/grub.cfg" "$boot_root/EFI/BOOT/grub.cfg"
-		mkdir -p "$boot_root$boot_dst/$(uname -m)-efi"
-		cp -a "$prefix$grub2moddir/bli.mod" "$boot_root$boot_dst/$(uname -m)-efi"
 	fi
 
 	# Create boot menu entry if it does not exist
@@ -1684,11 +1662,13 @@ pcrlock_grub2_exec_cmdline()
 	local initrd="$3"
 	local suffix="$4"
 	# Serialization of the executed lines.  It depends on the
-	# config file and the hard-coded commands generated for each
-	# bls entry (like the call to load_video or loading gzio).
-	local lines=("timeout=8"
-		     "insmod bli"
-		     "blscfg"
+	# config file inside grub2bls.efi, and the hard-coded commands
+	# generated for each bls entry (like the call to load_video or
+	# loading gzio).
+	#
+	# Note that if grubenv is present, it will be loaded and this
+	# sequence gets invalidated.
+	local lines=("blscfg"
 		     "load_video"
 		     "true"
 		     "set gfxpayload=keep"
@@ -1789,22 +1769,6 @@ pcrlock_sdboot()
 
 pcrlock_grub2()
 {
-	# 641-grub2-grub-cfg.pcrlock is not part of the pcrlock
-	# standards
-	if [ -e "${boot_root}${boot_dst}/grub.cfg" ]; then
-		pcrlock \
-			lock-raw "${boot_root}${boot_dst}/grub.cfg" \
-			--pcr=9 \
-			--pcrlock=/var/lib/pcrlock.d/641-grub2-grub-cfg.pcrlock
-	fi
-
-	# 642-grub2-bli-mod.pcrlock is not part of the pcrlock
-	# standards
-	pcrlock \
-	    lock-raw "${boot_root}${boot_dst}/$(uname -m)-efi/bli.mod" \
-	    --pcr=9 \
-	    --pcrlock=/var/lib/pcrlock.d/642-grub2-bli-mod.pcrlock
-
 	# 643-grub2-entry-files.pcrlock is not part of the pcrlock
 	# standards
 	mkdir -p /var/lib/pcrlock.d/643-grub2-entry-files.pcrlock.d
