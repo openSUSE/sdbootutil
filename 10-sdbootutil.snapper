@@ -52,7 +52,7 @@ set_default_snapshot()
 		fi
 	fi
 
-	/usr/bin/sdbootutil set-default-snapshot "$num"
+	/usr/bin/sdbootutil set-default-snapshot "$num" || :
 }
 
 h()
