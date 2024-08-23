@@ -1655,25 +1655,13 @@ pcrlock_grub2_kernel_initrd()
 	rm "${locks[@]}"
 }
 
-pcrlock_grub2_exec_cmdline()
+pcrlock_grub2_cmdline()
 {
 	local linux="$1"
 	local cmdline="$2"
 	local initrd="$3"
 	local suffix="$4"
-	# Serialization of the executed lines.  It depends on the
-	# config file inside grub2bls.efi, and the hard-coded commands
-	# generated for each bls entry (like the call to load_video or
-	# loading gzio).
-	#
-	# Note that if grubenv is present, it will be loaded and this
-	# sequence gets invalidated.
-	local lines=("blscfg"
-		     "load_video"
-		     "true"
-		     "set gfxpayload=keep"
-		     "insmod gzio")
-	lines+=( "$linux" "$cmdline" "$initrd" )
+	local lines=("$linux" "$cmdline" "$initrd")
 
 	local locks=()
 	local n=0
@@ -1690,7 +1678,7 @@ pcrlock_grub2_exec_cmdline()
 	done
 	jq --slurp '{"records": [.[].records[0]]}' \
 	   "${locks[@]}" \
-	   > "/var/lib/pcrlock.d/650-grub2-entry-exec-cmdline.pcrlock.d/exec-cmdline-$suffix.pcrlock"
+	   > "/var/lib/pcrlock.d/650-grub2-entry-cmdline.pcrlock.d/cmdline-$suffix.pcrlock"
 	rm "${locks[@]}"
 }
 
@@ -1784,32 +1772,31 @@ pcrlock_grub2()
 	# is always the first disk (hd0)
 	grub_drive="(hd0,gpt$partno)"
 
-	# Join all the executed lines, and the cmdline in a single
-	# pcrlock file
-	mkdir -p /var/lib/pcrlock.d/650-grub2-entry-exec-cmdline.pcrlock.d
+	# Join linux, initrd and cmdline in a single pcrlock file
+	mkdir -p /var/lib/pcrlock.d/650-grub2-entry-cmdline.pcrlock.d
 	n=0
 	while read -r options; do
 		read -r kernel
 		read -r initrd
 		n=$((n+1))
-		pcrlock_grub2_exec_cmdline "linux ${grub_drive}$kernel $options" \
-					   "${grub_drive}$kernel $options" \
-					   "initrd ${grub_drive}$initrd" "$n"
+		pcrlock_grub2_cmdline "linux ${grub_drive}$kernel $options" \
+				      "${grub_drive}$kernel $options" \
+				      "initrd ${grub_drive}$initrd" "$n"
 	done < <(jq --raw-output '.[] | .options, .linux, .initrd[0]' "$entryfile")
 
-	# Generate variation for 650-grub2-entry-exec-cmdline
-	# component that contains the current cmdline and the current
-	# initrd, even if this will never be used again.  This is
-	# required because disk-encryption-tool generates a new initrd
-	# during the first boot, making the event log impossible to
-	# align for systemd-pcrlock
+	# Generate variation for 650-grub2-entry-cmdline component
+	# that contains the current cmdline and the current initrd,
+	# even if this will never be used again.  This is required
+	# because disk-encryption-tool generates a new initrd during
+	# the first boot, making the event log impossible to align for
+	# systemd-pcrlock
 	if [ "$SDB_ADD_INITIAL_COMPONENT" = "1" ]; then
 		while read -r options; do
 			read -r kernel
 			read -r initrd
-			pcrlock_grub2_exec_cmdline "linux ${grub_drive}$kernel $options" \
-						   "${grub_drive}$kernel $options" \
-						   "initrd ${grub_drive}$initrd" "0"
+			pcrlock_grub2_cmdline "linux ${grub_drive}$kernel $options" \
+					      "${grub_drive}$kernel $options" \
+					      "initrd ${grub_drive}$initrd" "0"
 		done < <(jq --raw-output '.[] | .options, .linux, .initrd[0]' "$initialentryfile")
 	fi
 
