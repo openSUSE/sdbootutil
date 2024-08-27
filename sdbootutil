@@ -2101,6 +2101,10 @@ enroll_pcrlock()
 		extra_args+=(--tpm2-with-pin=1)
 	fi
 
+	if [ ! -f /var/lib/systemd/pcrlock.json ]; then
+		warn "Could not find /var/lib/systemd/pcrlock.json"
+	fi
+
 	# The password is read from "cryptenroll" kernel keyring
 	# XXX: Wipe is separated by now (possible systemd bug)
 	systemd-cryptenroll \
@@ -2126,6 +2130,10 @@ enroll_pcroracle()
 	else
 		echo "Enrolling with TPM2+PIN (pcr-oracle): $dev"
 		extra_args+=(--tpm2-with-pin=1)
+	fi
+
+	if [ ! -f /etc/systemd/tpm2-pcr-signature.json ]; then
+		warn "Could not find /etc/systemd/tpm2-pcr-signature.json"
 	fi
 
 	# The password is read from "cryptenroll" kernel keyring
