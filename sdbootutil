@@ -2117,6 +2117,9 @@ enroll_pcrlock()
 		"${extra_args[@]}" \
 		--tpm2-pcrlock=/var/lib/systemd/pcrlock.json \
 		"$dev"
+	# cryptenroll exits successfully even if the token was not enrolled
+	# Manually check if the device has a tpm2 slot enrolled
+	systemd-cryptenroll "$dev" | grep "tpm2"
 }
 
 enroll_pcroracle()
@@ -2149,6 +2152,9 @@ enroll_pcroracle()
 		--tpm2-public-key=/etc/systemd/tpm2-pcr-public-key.pem \
 		--tpm2-public-key-pcrs="${FDE_SEAL_PCR_LIST}" \
 		"$dev"
+	# cryptenroll exits successfully even if the token was not enrolled
+	# Manually check if the device has a tpm2 slot enrolled
+	systemd-cryptenroll "$dev" | grep "tpm2"
 }
 
 enroll_fido2()
