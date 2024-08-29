@@ -21,6 +21,7 @@ arg_no_reuse_initrd=
 arg_no_random_seed=
 arg_portable=
 arg_only_default=
+arg_default_snapshot=
 arg_ask_pin_or_pw=
 arg_method=
 arg_signed_policy=
@@ -88,6 +89,7 @@ helpandquit()
 		  --no-reuse-initrd	Always regenerate initrd
 		  --portable		Handle bootloader on portable devices
 		  --only-default	Only list the default entry
+		  --default-snapshot	[SNAPSHOT] refers to the default snapshot
 		  --ask-pin		Ask recovery PIN for re-enrollment
 					Ask TPM2 PIN when initial enrollment
 		  --ask-pw		Ask password when initial enrollment
@@ -503,7 +505,7 @@ set_snapper_title_and_sortkey()
 	local type date desc important pre_num
 	local snapshot_info
 
-	update_snapper
+	[ -s "$snapperfile" ] || update_snapper
 
 	# shellcheck disable=SC2046
 	IFS="|" read -r type date desc important pre_num <<< \
@@ -1040,7 +1042,7 @@ show_entry()
 list_snapshots()
 {
 	[ -n "$have_snapshots"  ] || { log_info "System does not support snapshots."; return 0; }
-	update_snapper 2>"$tmpfile" || err "$(cat "$tmpfile")"
+	[ -s "$snapperfile" ] || update_snapper 2>"$tmpfile" || err "$(cat "$tmpfile")"
 
 	local n=0
 	while read -r n isdefault title; do
@@ -1313,8 +1315,6 @@ find_sdboot()
 
 find_grub2()
 {
-	local prefix=""
-	[ -z "$have_snapshots" ] || prefix="/.snapshots/${1-$root_snapshot}/snapshot"
 	local grub2
 	# The old grub.efi will contain the BLS patches, but we cannot
 	# use it because we also dropped the process of creating the
@@ -2411,7 +2411,7 @@ main_menu()
 
 ####### main #######
 
-getopttmp=$(getopt -o hc:v --long help,flicker,verbose,esp-path:,entry-token:,arch:,image:,entry-keys:,no-variables,no-reuse-initrd,no-random-seed,all,portable,only-default,ask-pin,ask-pw,method:,signed-policy -n "${0##*/}" -- "$@")
+getopttmp=$(getopt -o hc:v --long help,flicker,verbose,esp-path:,entry-token:,arch:,image:,entry-keys:,no-variables,no-reuse-initrd,no-random-seed,all,portable,only-default,default-snapshot,ask-pin,ask-pw,method:,signed-policy -n "${0##*/}" -- "$@")
 eval set -- "$getopttmp"
 
 while true ; do
@@ -2430,6 +2430,7 @@ while true ; do
 		--all) arg_all_entries=1; shift ;;
 		--portable) arg_portable=1; shift ;;
 		--only-default) arg_only_default=1; shift ;;
+		--default-snapshot) arg_default_snapshot=1; shift ;;
 		--ask-pin|--ask-pw) arg_ask_pin_or_pw=1; shift ;;
 		--method) arg_method="$2"; shift 2 ;;
 		--signed-policy) arg_signed_policy=1; shift ;;
@@ -2468,8 +2469,13 @@ if [ "$(stat -f -c %T /)" = "btrfs" ] && [ -d /.snapshots ]; then
 fi
 root_snapshot=""
 if [ -n "$have_snapshots" ]; then
-	root_snapshot="${root_subvol#"${subvol_prefix}"/.snapshots/}"
-	root_snapshot="${root_snapshot%/snapshot}"
+	if [ -n "$arg_default_snapshot" ]; then
+		[ -s "$snapperfile" ] || update_snapper
+		read -r root_snapshot <<< "$(jq -r '.root[]|select(.default==true)|.number' < "$snapperfile")"
+	else
+		root_snapshot="${root_subvol#"${subvol_prefix}"/.snapshots/}"
+		root_snapshot="${root_snapshot%/snapshot}"
+	fi
 fi
 
 if [ -n "$arg_esp_path" ] && [ "$boot_root" != "$arg_esp_path" ]; then
