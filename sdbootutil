@@ -1047,6 +1047,8 @@ show_entry()
 update_entry_conf()
 {
 	local conf="$1"
+	local snapshot="$2"
+
 	local subvol=""
 	[ -z "$have_snapshots" ] || subvol="${subvol_prefix}/.snapshots/${snapshot}/snapshot"
 
