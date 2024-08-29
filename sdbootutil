@@ -131,6 +131,12 @@ helpandquit()
 			   Show fields for an entry with an specified kernel
 			   version
 
+		update-entry VERSION [SNAPSHOT]
+			   Update "options" field from /etc/cmdline for an entry
+
+		update-all-entries [SNAPSHOT]
+			   Update "options" field from /etc/cmdline for all entries
+
 		set-default-snapshot [SNAPSHOT]
 			   Make SNAPSHOT the default for next boot.
 			   Also install all kernels if needed
@@ -827,7 +833,6 @@ install_all_kernels()
 		log_info "installing $kv"
 		install_kernel "${snapshot}" "$kv"
 	done
-
 }
 
 remove_all_kernels()
@@ -905,7 +910,7 @@ show_entry_fields()
 	id="$(entry_conf_file "$kernel_version" "$snapshot")"
 
 	local conf
-	conf="$(find_conf_file "${kernel_version}" "${snapshot}")"
+	conf="$(find_conf_file "$kernel_version" "$snapshot")"
 
 	[ -z "$verbose" ] || echo -e "ID\t$id"
 	local k
@@ -1037,6 +1042,52 @@ show_entry()
 				;;
 		esac
 	done
+}
+
+update_entry_conf()
+{
+	local conf="$1"
+	local subvol=""
+	[ -z "$have_snapshots" ] || subvol="${subvol_prefix}/.snapshots/${snapshot}/snapshot"
+
+	local boot_options=
+	for i in /etc/kernel/cmdline /usr/lib/kernel/cmdline /proc/cmdline; do
+		[ -f "$i" ] || continue
+		boot_options="$(sedrootflags "$subvol" < "$i")"
+		break
+	done
+
+	cp "$conf" "$tmpdir/entry.conf"
+	sed -i "s|^options\s*.*$|options    $boot_options|g" "$tmpdir/entry.conf"
+	cp "$tmpdir/entry.conf" "$conf"
+}
+
+update_entry()
+{
+	local snapshot="$1"
+	local kernel_version="$2"
+
+	settle_entry_token "${snapshot}"
+	local id
+	id="$(entry_conf_file "$kernel_version" "$snapshot")"
+
+	local conf="$(find_conf_file "$kernel_version" "$snapshot")"
+	[ -f "$conf" ] || return 0
+
+	echo "Updating $id"
+	update_entry_conf "$conf" "$snapshot"
+
+	# This action will require to update the PCR predictions
+	update_predictions=1
+}
+
+update_all_entries()
+{
+	local snapshot="$1"
+	update_entries_for_snapshot "$1"
+	while read -r conf; do
+		update_entry_conf "$conf" "$snapshot"
+	done < <(jq '.[]|.path' < "$entryfile")
 }
 
 list_snapshots()
@@ -2466,7 +2517,7 @@ if [ -z "$SYSTEMD_LOG_LEVEL" ] && [ -n "$verbose" ]; then
 fi
 
 case "$1" in
-	install|needs-update|update|force-update|add-kernel|remove-kernel|set-default-snapshot|add-all-kernels|mkinitrd|remove-all-kernels|is-installed|list-snapshots|list-entries|list-kernels|show-entry|is-bootable|enroll|unenroll|update-predictions|bootloader) ;;
+	install|needs-update|update|force-update|add-kernel|remove-kernel|set-default-snapshot|add-all-kernels|mkinitrd|remove-all-kernels|is-installed|list-snapshots|list-entries|list-kernels|show-entry|update-entry|update-all-entries|is-bootable|enroll|unenroll|update-predictions|bootloader) ;;
 	kernels|snapshots|entries|"") stty_size; interactive=1 ;;
 	*) err "unknown command $1" ;;
 esac
@@ -2571,6 +2622,10 @@ elif [ "$1" = "list-snapshots" ]; then
 	list_snapshots
 elif [ "$1" = "show-entry" ]; then
 	show_entry_fields "${3:-$root_snapshot}" "$2"
+elif [ "$1" = "update-entry" ]; then
+	update_entry "${3:-$root_snapshot}" "$2"
+elif [ "$1" = "update-all-entries" ]; then
+	update_all_entries "${2:-$root_snapshot}"
 elif [ "$1" = "is-bootable" ]; then
 	is_bootable "${2:-$root_snapshot}"
 elif [ "$1" = "enroll" ]; then
