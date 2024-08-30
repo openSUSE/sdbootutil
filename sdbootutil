@@ -2195,11 +2195,11 @@ enroll_device()
 				enroll_pcrlock "$dev" "$pin_or_pw" || {
 					echo "Enrollment with systemd-pcrlock failed"
 					echo "Re-trying with pcr-oracle"
-					unernroll_pcrlock
-					enroll_pcr_oracle "$dev" "$pin_or_pw"
+					unenroll_pcrlock
+					enroll_pcroracle "$dev" "$pin_or_pw"
 				}
 			elif have_pcr_oracle; then
-				enroll_pcr_oracle "$dev" "$pin_or_pw"
+				enroll_pcroracle "$dev" "$pin_or_pw"
 			else
 				log_info "No TMP2 enrollment mechanism found"
 			fi
