@@ -2196,6 +2196,9 @@ enroll_device()
 					echo "Enrollment with systemd-pcrlock failed"
 					echo "Re-trying with pcr-oracle"
 					unenroll_pcrlock
+					# this function generates /etc/systemd/tpm2-pcr-public-key.pem
+					# which is needed by enroll_pcroracle
+					generate_rsa_key
 					enroll_pcroracle "$dev" "$pin_or_pw"
 				}
 			elif have_pcr_oracle; then
