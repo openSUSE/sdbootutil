@@ -1089,7 +1089,7 @@ update_all_entries()
 	update_entries_for_snapshot "$1"
 	while read -r conf; do
 		update_entry_conf "$conf" "$snapshot"
-	done < <(jq '.[]|.path' < "$entryfile")
+	done < <(jq -r '.[]|.path' < "$entryfile")
 }
 
 list_snapshots()
