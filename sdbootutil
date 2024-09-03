@@ -327,7 +327,7 @@ sedrootflags()
 {
 	local subvol="$1"
 	# - delete BOOT_IMAGE= and initrd=
-	# - make sure root= refers to uuid
+	# - replace or add root= to refers to UUID or mapped device (if encrypted)
 	# - replace or add rootflags to point at correct subvolume
 	# - replace or add systemd.machine-id to match current machine-id
 	#
@@ -341,9 +341,12 @@ sedrootflags()
 	# already there). Since we always operate on the same line,
 	# "empty" t jumps are used to reset the condition after very
 	# s///.
-	local sed_arguments=("-e s/[ \t]\+/ /g"\
-		"-e s/\<\(BOOT_IMAGE\|initrd\)=[^ ]* \?//"\
-		"-e s/\<root=[^ ]*/root=UUID=$root_uuid/;tb;s,\$, root=UUID=$root_uuid,;tc;:c;:b")
+	local root_param="UUID=$root_uuid"
+	[ -z "$root_device_is_crypt" ] || root_param="$root_device"
+	local sed_arguments=("-e s/[ \t]\+/ /g"
+		"-e s/\<\(BOOT_IMAGE\|initrd\)=[^ ]* \?//"
+		"-e s/\$//;ta;:a"
+		"-e s,\<root=[^ ]*,root=$root_param,;tb;s,\$, root=$root_param,;tc;:c;:b")
 	[ -z "$have_snapshots" ] || sed_arguments+=("-e s,\<rootflags=subvol=[^ ]*,rootflags=subvol=$subvol,;td;s,\$, rootflags=subvol=$subvol,;te;:e;:d")
 	[ -z "$machine_id" ] || sed_arguments+=("-e s,\<systemd.machine_id=[^ ]*,systemd.machine_id=$machine_id,;tf;s,\$, systemd.machine_id=$machine_id,;tg;:g;:f")
 	sed "${sed_arguments[@]}"
@@ -362,7 +365,7 @@ update_entries_for_subvol()
 	local ext="${2:-}"
 
 	[ -z "$ext" ] || ext="|$ext"
-	update_entries jq "[.[]|select(has(\"options\"))|select(.options|test(\"root=UUID=$root_uuid .*rootflags=subvol=$subvol\")$ext)]"
+	update_entries jq "[.[]|select(has(\"options\"))|select(.options|test(\"root=(?:UUID=$root_uuid|$root_device) .*rootflags=subvol=$subvol\")$ext)]"
 }
 
 update_entries_for_snapshot()
@@ -379,7 +382,7 @@ update_entries_for_snapshot_invert()
 
 update_entries_for_this_system()
 {
-	update_entries jq "[.[]|select(has(\"options\"))|select(.options|test(\"root=UUID=$root_uuid\"))]"
+	update_entries jq "[.[]|select(has(\"options\"))|select(.options|test(\"root=(?:UUID=$root_uuid|$root_device)\"))]"
 }
 
 entry_conf_file()
@@ -2531,6 +2534,8 @@ esac
 # shellcheck disable=SC2016
 eval "$(bootctl 2>/dev/null | sed -ne 's/Firmware Arch: *\(\w\+\)/firmware_arch="\1"/p;s/ *token: *\(\w\+\)/entry_token="\1"/p;s, *\$BOOT: *\([^ ]\+\).*,boot_root="\1",p')"
 read -r root_uuid root_device < <(findmnt / -v -r -n -o UUID,SOURCE)
+root_device_is_crypt=
+[ "$(lsblk --noheadings -o TYPE "$root_device")" = "crypt" ] && root_device_is_crypt=1
 root_subvol=""
 subvol_prefix=""
 if [ "$(stat -f -c %T /)" = "btrfs" ] && [ -d /.snapshots ]; then
