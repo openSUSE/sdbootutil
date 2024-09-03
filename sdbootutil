@@ -1079,8 +1079,6 @@ update_entry()
 	echo "Updating $id"
 	update_entry_conf "$conf" "$snapshot"
 
-	# This action will require to update the PCR predictions
-	update_predictions=1
 }
 
 update_all_entries()
@@ -1090,6 +1088,9 @@ update_all_entries()
 	while read -r conf; do
 		update_entry_conf "$conf" "$snapshot"
 	done < <(jq -r '.[]|.path' < "$entryfile")
+
+	# This action will require to update the PCR predictions
+	update_predictions=1
 }
 
 list_snapshots()
