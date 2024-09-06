@@ -1954,16 +1954,28 @@ generate_tpm2_predictions_pcrlock()
 	elif [ -n "$keyid" ]; then
 		pin="$(keyctl pipe "$keyid")"
 		extra=("--recovery-pin=yes")
+	else
+		# No PIN was provided, systemd-pcrlock will generate one
+		# Add this argument to show it
+		extra=("--recovery-pin=show")
 	fi
 
-	PIN="$pin" pcrlock --pcr="$pcrs" "${extra[@]}" make-policy || {
+	local output
+	if ! output="$(PIN="$pin" pcrlock --pcr="$pcrs" "${extra[@]}" make-policy)"; then
 		echo "Error creating the policy!"
 		if [ -z "$pin" ]; then
 			echo "Please, provide the recovery PIN to register the new policy"
 		else
 			echo "Provided PIN incorrect or TPM2 locked after too many retries"
 		fi
-	}
+	elif [ -z "$pin" ]; then
+		if ! echo "$output" | grep "recovery PIN"; then
+			echo "Unable to find the generated recovery PIN"
+		elif [ -x /usr/bin/qrencode ]; then
+				echo "You can also scan it with your mobile phone:"
+				echo "$output" | grep "recovery PIN" | cut -d":" -f2 | qrencode -t utf8i
+		fi
+	fi
 
 	# Publish the assets in the ESP, so can be imported by
 	# dracut-pcr-signature
