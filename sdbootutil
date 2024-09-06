@@ -1978,7 +1978,9 @@ generate_tpm2_predictions_pcrlock()
 			echo "Unable to find the generated recovery PIN"
 		elif [ -x /usr/bin/qrencode ]; then
 				echo "You can also scan it with your mobile phone:"
-				echo "$output" | grep "recovery PIN" | cut -d":" -f2 | qrencode -t utf8i
+				local split
+				IFS=":" read -r -a split <<< "$output"
+				echo "${split[1]}" | qrencode -t utf8i
 		fi
 	fi
 
