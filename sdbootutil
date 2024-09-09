@@ -28,6 +28,7 @@ arg_signed_policy=
 have_snapshots=
 # for x in vmlinuz image vmlinux linux bzImage uImage Image zImage; do
 image=
+recovery_key_id=
 
 color_red=
 color_end=
@@ -93,7 +94,7 @@ helpandquit()
 		  --ask-pin		Ask recovery PIN for re-enrollment
 					Ask TPM2 PIN when initial enrollment
 		  --ask-pw		Ask password when initial enrollment
-		  --method		"tpm2", "tpm2+pin", "fido2", "password"
+		  --method		"tpm2", "tpm2+pin", "fido2", "password", "recovery-key"
 		  --signed-policy	Use signed policy for TPM2 enrollment
 		  -v, --verbose		More verbose output
 		  -h, --help		This screen
@@ -2321,6 +2322,48 @@ enroll_password()
 	NEWPASSWORD="$pw" systemd-cryptenroll --wipe-slot=password --password "$dev"
 }
 
+enroll_recovery_key()
+{
+	local dev="$1"
+
+	echo "Enrolling with recovery key: $dev"
+
+	local recovery_key
+	# This function will be called for every device. Let systemd generate a secure recovery key
+	# only the first time. Unlock the LUKS2 header by using the TPM2 slot
+	if [ -z "$recovery_key_id" ]; then
+			if recovery_key=$(systemd-cryptenroll --wipe-slot=recovery --recovery-key --unlock-tpm2-device=auto "$dev"); then
+			echo "Recovery key: $recovery_key"
+
+			if [ -x /usr/bin/qrencode ]; then
+					echo "You can also scan it with your mobile phone:"
+					echo "$recovery_key" | qrencode -t utf8i
+			fi
+
+			# Add the generated recovery key to the kernel keyring, so that it is available to
+			# sdbootutil --method=tpm2
+			read -r recovery_key_id < <(echo -n "$recovery_key" | keyctl padd user cryptenroll @u)
+		else
+			echo "Unable to generate a recovery key for $dev"
+		fi
+	else
+		# A recovery key has already been generated, use it for all the devices
+		recovery_key="$(keyctl pipe "$recovery_key_id")"
+		if ! tmp_rk=$(systemd-cryptenroll --wipe-slot=recovery --recovery-key --unlock-tpm2-device=auto "$dev"); then
+			echo "Unable to access device $dev"
+			return 1
+		fi
+		# systemd-cryptenroll always generated a random recovery key, but we want $recovery_key
+		# Replace it by using cryptsetup
+		read -r -a split < <(systemd-cryptenroll /dev/vda3 | grep recovery)
+		keyslot="${split[0]}"
+		# cryptsetup can only read the new passphrase from a keyfile
+		echo -n "$recovery_key" > recovery_key
+		cryptsetup luksChangeKey --key-slot "$keyslot" "$dev" recovery_key < <(echo "$tmp_rk")
+		rm recovery_key
+	fi
+}
+
 enroll_device()
 {
 	local dev="$1"
@@ -2351,6 +2394,10 @@ enroll_device()
 
 		"password")
 			enroll_password "$dev" "$pin_or_pw"
+			;;
+
+		"recovery-key")
+			enroll_recovery_key "$dev"
 			;;
 
 		*)
@@ -2485,6 +2532,12 @@ unenroll_device()
 		"password")
 			systemd-cryptenroll \
 				--wipe-slot=password \
+				"$dev"
+			;;
+
+		"recovery_key")
+			systemd-cryptenroll \
+				--wipe-slot=recovery \
 				"$dev"
 			;;
 
