@@ -25,10 +25,12 @@ arg_default_snapshot=
 arg_ask_pin_or_pw=
 arg_method=
 arg_signed_policy=
+arg_generate_pin=
 have_snapshots=
 # for x in vmlinuz image vmlinux linux bzImage uImage Image zImage; do
 image=
 recovery_key_id=
+tpm2_policy_enrolled=
 
 color_red=
 color_end=
@@ -96,6 +98,7 @@ helpandquit()
 		  --ask-pw		Ask password when initial enrollment
 		  --method		"tpm2", "tpm2+pin", "fido2", "password", "recovery-key"
 		  --signed-policy	Use signed policy for TPM2 enrollment
+		  --generate-pin	Generate a random TPM2 recovery pin for TPM2 enrollment
 		  -v, --verbose		More verbose output
 		  -h, --help		This screen
 
@@ -2025,13 +2028,16 @@ generate_tpm2_predictions_pcrlock()
 	if [ -n "$arg_ask_pin_or_pw" ]; then
 		read -r -s -p "Recovery PIN: " pin
 		extra=("--recovery-pin=yes")
+	elif [ -n "$arg_generate_pin" ]; then
+		extra=("--recovery-pin=show")
 	elif [ -n "$PIN" ]; then
 		pin="$PIN"
 		extra=("--recovery-pin=yes")
 	elif [ -n "$keyid" ]; then
 		pin="$(keyctl pipe "$keyid")"
 		extra=("--recovery-pin=yes")
-	else
+	# During the TPM2 enrollment (not when update-predictions is called by itself or by other commands)
+	elif [ -n "$tpm2_policy_enrolled" ]; then
 		# No PIN was provided, systemd-pcrlock will generate one
 		# Add this argument to show it
 		extra=("--recovery-pin=show")
@@ -2045,14 +2051,21 @@ generate_tpm2_predictions_pcrlock()
 		else
 			echo "Provided PIN incorrect or TPM2 locked after too many retries"
 		fi
-	elif [ -z "$pin" ]; then
+	elif [ -z "$pin" ] && [ -n "$tpm2_policy_enrolled" ]; then
 		if ! echo "$output" | grep "recovery PIN"; then
 			echo "Unable to find the generated recovery PIN"
 		elif [ -x /usr/bin/qrencode ]; then
 				echo "You can also scan it with your mobile phone:"
 				local split
 				IFS=":" read -r -a split <<< "$output"
-				echo "${split[1]}" | qrencode -t utf8i
+				pin="${split[1]}"
+				echo "$pin" | qrencode -t utf8i
+
+				# Add the generated recovery PIN to the kernel keyring, so that it is available to
+				# sdbootutil --method=recovery-key
+				echo -n "$pin" | keyctl padd user pin @u > /dev/null
+				# Make the key expire after 2 minutes
+				keyctl timeout %user:pin 120
 		fi
 	fi
 
@@ -2337,7 +2350,8 @@ enroll_recovery_key()
 
 	local recovery_key
 	# This function will be called for every device. Let systemd generate a secure recovery key
-	# only the first time. Unlock the LUKS2 header by using the TPM2 slot
+	# only the first time and if there is no recovery pin selected (%user:pin or %user:cryptenroll).
+	# Unlock the LUKS2 header by using the TPM2 slot
 	if [ -z "$recovery_key_id" ]; then
 			if recovery_key=$(systemd-cryptenroll --wipe-slot=recovery --recovery-key --unlock-tpm2-device=auto "$dev"); then
 			echo "Recovery key: $recovery_key"
@@ -2348,8 +2362,12 @@ enroll_recovery_key()
 			fi
 
 			# Add the generated recovery key to the kernel keyring, so that it is available to
-			# sdbootutil --method=tpm2
+			# systemd-cryptenroll
 			read -r recovery_key_id < <(echo -n "$recovery_key" | keyctl padd user cryptenroll @u)
+			keyctl timeout %user:cryptenroll 120
+			# And to --method=tpm2
+			read -r recovery_key_id < <(echo -n "$recovery_key" | keyctl padd user recoverypin @u)
+			keyctl timeout %user:recoverypin 120
 		else
 			echo "Unable to generate a recovery key for $dev"
 		fi
@@ -2360,13 +2378,13 @@ enroll_recovery_key()
 			echo "Unable to access device $dev"
 			return 1
 		fi
-		# systemd-cryptenroll always generated a random recovery key, but we want $recovery_key
+		# systemd-cryptenroll always generates a random recovery key, but we want $recovery_key
 		# Replace it by using cryptsetup
 		read -r -a split < <(systemd-cryptenroll /dev/vda3 | grep recovery)
 		keyslot="${split[0]}"
 		# cryptsetup can only read the new passphrase from a keyfile
 		echo -n "$recovery_key" > recovery_key
-		cryptsetup luksChangeKey --key-slot "$keyslot" "$dev" recovery_key < <(echo "$tmp_rk")
+		cryptsetup luksChangeKey --key-slot "$keyslot" "$dev" recovery_key <<<"$tmp_rk"
 		rm recovery_key
 	fi
 }
@@ -2378,6 +2396,7 @@ enroll_device()
 
 	case "$arg_method" in
 		"tpm2"|"tpm2+pin")
+			tpm2_policy_enrolled=1
 			if [ -z "$arg_signed_policy" ] && have_pcrlock; then
 				enroll_pcrlock "$dev" "$pin_or_pw" || {
 					echo "Enrollment with systemd-pcrlock failed"
@@ -2495,6 +2514,10 @@ enroll()
 		else
 			err "Use %u:pw, PW or --ask-pw to provide the password"
 		fi
+	fi
+
+	if [ "$arg_method" == "recovery-key" ] && tmp_key_id=$(keyctl id %user:pin); then
+		recovery_key_id="$tmp_key_id"
 	fi
 
 	for dev in "${luks2_devices[@]}"; do
@@ -2625,7 +2648,7 @@ main_menu()
 
 ####### main #######
 
-getopttmp=$(getopt -o hc:v --long help,flicker,verbose,esp-path:,entry-token:,arch:,image:,entry-keys:,no-variables,no-reuse-initrd,no-random-seed,all,portable,only-default,default-snapshot,ask-pin,ask-pw,method:,signed-policy -n "${0##*/}" -- "$@")
+getopttmp=$(getopt -o hc:v --long help,flicker,verbose,esp-path:,entry-token:,arch:,image:,entry-keys:,no-variables,no-reuse-initrd,no-random-seed,all,portable,only-default,default-snapshot,ask-pin,ask-pw,method:,signed-policy,generate-pin -n "${0##*/}" -- "$@")
 eval set -- "$getopttmp"
 
 while true ; do
@@ -2648,6 +2671,7 @@ while true ; do
 		--ask-pin|--ask-pw) arg_ask_pin_or_pw=1; shift ;;
 		--method) arg_method="$2"; shift 2 ;;
 		--signed-policy) arg_signed_policy=1; shift ;;
+		--generate-pin) arg_generate_pin=1; shift ;;
 		--) shift ; break ;;
 		*) echo "Internal error!" ; exit 1 ;;
 	esac
