@@ -25,6 +25,7 @@ arg_default_snapshot=
 arg_ask_pin_or_pw=
 arg_method=
 arg_signed_policy=
+arg_generate_pin=
 have_snapshots=
 # for x in vmlinuz image vmlinux linux bzImage uImage Image zImage; do
 image=
@@ -1954,6 +1955,8 @@ generate_tpm2_predictions_pcrlock()
 	if [ -n "$arg_ask_pin_or_pw" ]; then
 		read -r -s -p "Recovery PIN: " pin
 		extra=("--recovery-pin=yes")
+	elif [ -n "$arg_generate_pin" ]; then
+		extra=("--recovery-pin=show")
 	elif [ -n "$PIN" ]; then
 		pin="$PIN"
 		extra=("--recovery-pin=yes")
@@ -2554,7 +2557,7 @@ main_menu()
 
 ####### main #######
 
-getopttmp=$(getopt -o hc:v --long help,flicker,verbose,esp-path:,entry-token:,arch:,image:,entry-keys:,no-variables,no-reuse-initrd,no-random-seed,all,portable,only-default,default-snapshot,ask-pin,ask-pw,method:,signed-policy -n "${0##*/}" -- "$@")
+getopttmp=$(getopt -o hc:v --long help,flicker,verbose,esp-path:,entry-token:,arch:,image:,entry-keys:,no-variables,no-reuse-initrd,no-random-seed,all,portable,only-default,default-snapshot,ask-pin,ask-pw,method:,signed-policy,generate-pin -n "${0##*/}" -- "$@")
 eval set -- "$getopttmp"
 
 while true ; do
@@ -2577,6 +2580,7 @@ while true ; do
 		--ask-pin|--ask-pw) arg_ask_pin_or_pw=1; shift ;;
 		--method) arg_method="$2"; shift 2 ;;
 		--signed-policy) arg_signed_policy=1; shift ;;
+		--generate-pin) arg_generate_pin=1; shift ;;
 		--) shift ; break ;;
 		*) echo "Internal error!" ; exit 1 ;;
 	esac
