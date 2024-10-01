@@ -1,7 +1,7 @@
 #
 # spec file for package sdbootutil
 #
-# Copyright (c) 2023 SUSE LLC
+# Copyright (c) 2024 SUSE LLC
 #
 # All modifications and additions to the file contributed by third parties
 # remain the property of their copyright owners, unless otherwise agreed
@@ -33,18 +33,21 @@ Summary:        script to install shim with sd-boot
 License:        MIT
 URL:            https://en.opensuse.org/openSUSE:Usr_merge
 Source:         %{name}-%{version}.tar
-Requires:       efibootmgr
-Requires:       systemd-boot
-Requires:       jq
-Requires:       sed
-Requires:       pcr-oracle
+Requires:       dracut-pcr-signature
 Requires:       dialog
+Requires:       efibootmgr
+Requires:       jq
+Requires:       pcr-oracle
+Requires:       sed
+Requires:       (systemd-boot or grub2-x86_64-efi-bls)
 # While systemd-pcrlock is in experimental
 Requires:       systemd-experimental
-Requires:       dracut-pcr-signature
-Supplements:    (systemd-boot and shim)
+# While bootctl is in udev
+Requires:       udev
 Requires:       (%{name}-snapper if (snapper and btrfsprogs))
 Requires:       (%{name}-tukit if read-only-root-fs)
+Supplements:    (systemd-boot and shim)
+Supplements:    (grub2-x86_64-efi-bls and shim)
 ExclusiveArch:  aarch64 ppc64le riscv64 x86_64
 
 %description
