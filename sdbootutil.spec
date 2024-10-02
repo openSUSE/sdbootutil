@@ -39,7 +39,6 @@ Requires:       efibootmgr
 Requires:       jq
 Requires:       pcr-oracle
 Requires:       sed
-Requires:       (systemd-boot or grub2-x86_64-efi-bls)
 # While systemd-pcrlock is in experimental
 Requires:       systemd-experimental
 # While bootctl is in udev
