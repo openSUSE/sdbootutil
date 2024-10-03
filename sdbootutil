@@ -219,8 +219,11 @@ warn()
 
 is_sdboot()
 {
-	# If systemd-boot and grub2-bls are co-installed, we favor
+	# LOADER_TYPE has preference, but is is not present and
+	# systemd-boot and grub2-bls are co-installed, we favor
 	# grub2-bls in the detection
+	[ -z "$LOADER_TYPE" ] || { [ "$LOADER_TYPE" = "systemd-boot" ]; return; }
+
 	local sdboot grub2_bls
 	sdboot="$(find_sdboot "${1-$root_snapshot}")"
 	grub2_bls="$(find_grub2_bls "${1-$root_snapshot}")"
@@ -229,8 +232,11 @@ is_sdboot()
 
 is_grub2_bls()
 {
-	# If systemd-boot and grub2-bls are co-installed, we favor
+	# LOADER_TYPE has preference, but is is not present and
+	# systemd-boot and grub2-bls are co-installed, we favor
 	# grub2-bls in the detection
+	[ -z "$LOADER_TYPE" ] || { [ "$LOADER_TYPE" = "grub2-bls" ]; return; }
+
 	local grub2_bls
 	grub2_bls="$(find_grub2_bls "${1-$root_snapshot}")"
 	[ -e "$grub2_bls" ]
@@ -2612,6 +2618,8 @@ case "$firmware_arch" in
 	aa64) image=Image ;;
 	*) err "Unsupported architecture $firmware_arch" ;;
 esac
+
+[ -e /etc/sysconfig/bootloader ] && . /etc/sysconfig/bootloader
 
 # XXX: Unify both in /EFI/opensuse?
 if [ -n "$arg_portable" ]; then
