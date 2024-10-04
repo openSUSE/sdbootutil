@@ -1506,7 +1506,8 @@ install_bootloader()
 	fi
 
 	# Create boot menu entry if it does not exist
-	[ -n "$arg_no_variables" ] || [ -n "$arg_portable" ] || efibootmgr | grep -q 'Boot.*openSUSE Boot Manager' || efibootmgr -q --create --disk "$drive" --part "$partno" --label "openSUSE Boot Manager" --loader "$entry" || true
+	local escaped_entry="${entry//\//\\\\}"
+	[ -n "$arg_no_variables" ] || [ -n "$arg_portable" ] || efibootmgr | grep -q "Boot.*openSUSE Boot Manager.*${escaped_entry}" || efibootmgr -q --create --disk "$drive" --part "$partno" --label "openSUSE Boot Manager ($bldr_name)" --loader "$entry" || true
 
 	# Make it the first option
 	if [ -z "$arg_no_variables" ] && [ -z "$arg_portable" ]; then
@@ -1515,11 +1516,11 @@ install_bootloader()
 		boot_order="${boot_order#BootOrder: }"
 
 		local boot_entry
-		boot_entry="$(efibootmgr | grep 'Boot.*openSUSE Boot Manager')"
+		boot_entry="$(efibootmgr | grep "Boot.*openSUSE Boot Manager.*${escaped_entry}")"
 		boot_entry="${boot_entry%\* *}"
 		boot_entry="${boot_entry#Boot}"
 
-		efibootmgr -D -o "$boot_entry,$boot_order" || true
+		efibootmgr -q -D -o "$boot_entry,$boot_order" || true
 	fi
 
 	# This action will require to update the PCR predictions
