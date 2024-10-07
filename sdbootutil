@@ -1408,10 +1408,26 @@ find_sdboot()
 find_grub2_bls()
 {
 	local grub2_bls
+
+	local grub2_arch="$(uname -m)"
+	case "$grub2_arch" in
+		i[[3456]]86) grub2_arch=i386 ;;
+		x86_64) grub2_arch=x86_64 ;;
+		amd64) grub2_arch=x86_64 ;;
+		sparc) grub2_arch=sparc64 ;;
+		mipsel|mips64el) grub2_arch=mipsel ;;
+		mips|mips64) grub2_arch=mips ;;
+		arm*) grub2_arch=arm ;;
+		aarch64*) grub2_arch=arm64 ;;
+		loongarch64) grub2_arch=loongarch64 ;;
+		riscv32*) grub2_arch=riscv32 ;;
+		riscv64*) grub2_arch=riscv64 ;;
+	esac
+	
 	# The old grub.efi will contain the BLS patches, but we cannot
 	# use it because we also dropped the process of creating the
 	# configuration file and installing bli.mod
-	grub2_bls="/usr/share/grub2/$(uname -m)-efi/grubbls.efi"
+	grub2_bls="/usr/share/grub2/${grub2_arch}-efi/grubbls.efi"
 	echo "$grub2_bls"
 }
 
