@@ -30,6 +30,7 @@ have_snapshots=
 # for x in vmlinuz image vmlinux linux bzImage uImage Image zImage; do
 image=
 recovery_key_id=
+tpm2_policy_enrolled=
 
 color_red=
 color_end=
@@ -1964,7 +1965,8 @@ generate_tpm2_predictions_pcrlock()
 	elif [ -n "$keyid" ]; then
 		pin="$(keyctl pipe "$keyid")"
 		extra=("--recovery-pin=yes")
-	else
+	# During the TPM2 enrollment (not when update-predictions is called by itself or by other commands)
+	elif [ -n "$tpm2_policy_enrolled" ]; then
 		# No PIN was provided, systemd-pcrlock will generate one
 		# Add this argument to show it
 		extra=("--recovery-pin=show")
@@ -1978,7 +1980,7 @@ generate_tpm2_predictions_pcrlock()
 		else
 			echo "Provided PIN incorrect or TPM2 locked after too many retries"
 		fi
-	elif [ -z "$pin" ]; then
+	elif [ -z "$pin" ] && [ -n "$tpm2_policy_enrolled" ]; then
 		if ! echo "$output" | grep "recovery PIN"; then
 			echo "Unable to find the generated recovery PIN"
 		elif [ -x /usr/bin/qrencode ]; then
@@ -2320,6 +2322,7 @@ enroll_device()
 
 	case "$arg_method" in
 		"tpm2"|"tpm2+pin")
+			tpm2_policy_enrolled=1
 			if [ -z "$arg_signed_policy" ] && have_pcrlock; then
 				enroll_pcrlock "$dev" "$pin_or_pw" || {
 					echo "Enrollment with systemd-pcrlock failed"
