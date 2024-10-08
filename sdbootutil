@@ -26,11 +26,13 @@ arg_ask_pin_or_pw=
 arg_method=
 arg_signed_policy=
 arg_generate_pin=
+arg_unlock=
 have_snapshots=
 # for x in vmlinuz image vmlinux linux bzImage uImage Image zImage; do
 image=
 recovery_key_id=
 tpm2_policy_enrolled=
+unlock_extra_arg=
 
 color_red=
 color_end=
@@ -99,6 +101,7 @@ helpandquit()
 		  --method		"tpm2", "tpm2+pin", "fido2", "password", "recovery-key"
 		  --signed-policy	Use signed policy for TPM2 enrollment
 		  --generate-pin	Generate a random TPM2 recovery pin for TPM2 enrollment
+		  --unlock		"fido2", "tpm2", "passphrase", "recovery"
 		  -v, --verbose		More verbose output
 		  -h, --help		This screen
 
@@ -2239,6 +2242,41 @@ generate_rsa_key()
 		store-public-key
 }
 
+unlock_method()
+{
+	local dev="$1"
+	local enrollment="$2"
+	case "$arg_unlock" in
+		"tpm2")
+			unlock_extra_arg="--unlock-tpm2-device=auto"
+			;;
+		"fido2")
+			unlock_extra_arg="--unlock-fido2-device=auto"
+			;;
+		"passphrase"|"recovery-key")
+			# The passphrase in this case should be set in the %user:cryptenroll key
+			# If it has not been set, systemd will ask it to the user
+			;;
+		"auto"|*)
+			local slots
+			if ! slots=$(systemd-cryptenroll "$dev"); then
+				echo "Unable to get current slots for device $dev"
+				return 1
+			fi
+			# Do not use TPM2 slot for enrolling TPM2
+			if [ "$enrollment" != "tpm2" ] && echo "$slots" | grep -q tpm2; then
+				echo "Unlocking using TPM2"
+				unlock_extra_arg="--unlock-tpm2-device=auto"
+			# Same for FIDO2
+			elif [ "$enrollment" != "fido2" ] && echo "$slots" | grep -q fido2; then
+				echo "Unlocking using FIDO2"
+				unlock_extra_arg="--unlock-fido2-device=auto"
+			fi
+			# Use %user:cryptenroll or let systemd-cryptenroll ask the passphrase
+			;;
+	esac
+}
+
 enroll_pcrlock()
 {
 	local dev="$1"
@@ -2256,14 +2294,14 @@ enroll_pcrlock()
 		warn "Could not find /var/lib/systemd/pcrlock.json"
 	fi
 
-	# The password is read from "cryptenroll" kernel keyring
-	# XXX: Wipe is separated by now (possible systemd bug)
-	systemd-cryptenroll \
-		--wipe-slot=tpm2 \
-		"$dev"
+	unlock_method "$dev" "tpm2"
+	if [ -n "$unlock_extra_arg" ]; then
+		extra_args+=("$unlock_extra_arg")
+	fi
 
 	# Note that the PCRs are now not stored in the LUKS2 header
 	NEWPIN="$tpm_pin" systemd-cryptenroll \
+		--wipe-slot=tpm2 \
 		--tpm2-device=auto \
 		"${extra_args[@]}" \
 		--tpm2-pcrlock=/var/lib/systemd/pcrlock.json \
@@ -2290,14 +2328,14 @@ enroll_pcroracle()
 		warn "Could not find /etc/systemd/tpm2-pcr-signature.json"
 	fi
 
-	# The password is read from "cryptenroll" kernel keyring
-	# XXX: Wipe is separated by now (possible systemd bug)
-	systemd-cryptenroll \
-		--wipe-slot=tpm2 \
-		"$dev"
+	unlock_method "$dev" "tpm2"
+	if [ -n "$unlock_extra_arg" ]; then
+		extra_args+=("$unlock_extra_arg")
+	fi
 
 	# Note that the PCRs are now not stored in the LUKS2 header
 	NEWPIN="$tpm_pin" systemd-cryptenroll \
+		--wipe-slot=tpm2 \
 		--tpm2-device=auto \
 		"${extra_args[@]}" \
 		--tpm2-public-key=/etc/systemd/tpm2-pcr-public-key.pem \
@@ -2314,14 +2352,12 @@ enroll_fido2()
 
 	echo "Enrolling with FIDO2: $dev"
 
-	# The password is read from "cryptenroll" kernel keyring
-	# XXX: Wipe is separated by now (possible systemd bug)
-	systemd-cryptenroll \
-		--wipe-slot=fido2 \
-		"$dev"
+	unlock_method "$dev" "fido2"
+	if [ -n "$unlock_extra_arg" ]; then
+		extra_args+=("$unlock_extra_arg")
+	fi
 
-	# The password is read from "cryptenroll" kernel keyring
-	systemd-cryptenroll --fido2-device=auto "$dev"
+	systemd-cryptenroll --wipe-slot=fido2 --fido2-device=auto "$dev"
 }
 
 enroll_password()
@@ -2331,7 +2367,11 @@ enroll_password()
 
 	echo "Enrolling with password: $dev"
 
-	# The password is read from "cryptenroll" kernel keyring
+	unlock_method "$dev" "password"
+	if [ -n "$unlock_extra_arg" ]; then
+		extra_args+=("$unlock_extra_arg")
+	fi
+
 	NEWPASSWORD="$pw" systemd-cryptenroll --wipe-slot=password --password "$dev"
 }
 
@@ -2341,12 +2381,18 @@ enroll_recovery_key()
 
 	echo "Enrolling with recovery key: $dev"
 
+	local extra_args
+	unlock_method "$dev" "recovery-key"
+	if [ -n "$unlock_extra_arg" ]; then
+		extra_args="$unlock_extra_arg"
+	fi
+
 	local recovery_key
 	# This function will be called for every device. Let systemd generate a secure recovery key
 	# only the first time and if there is no recovery pin selected (%user:pin or %user:cryptenroll).
 	# Unlock the LUKS2 header by using the TPM2 slot
 	if [ -z "$recovery_key_id" ]; then
-			if recovery_key=$(systemd-cryptenroll --wipe-slot=recovery --recovery-key --unlock-tpm2-device=auto "$dev"); then
+		if recovery_key=$(systemd-cryptenroll --wipe-slot=recovery --recovery-key "${extra_args[@]}" "$dev"); then
 			echo "Recovery key: $recovery_key"
 
 			if [ -x /usr/bin/qrencode ]; then
@@ -2367,7 +2413,7 @@ enroll_recovery_key()
 	else
 		# A recovery key has already been generated, use it for all the devices
 		recovery_key="$(keyctl pipe "$recovery_key_id")"
-		if ! tmp_rk=$(systemd-cryptenroll --wipe-slot=recovery --recovery-key --unlock-tpm2-device=auto "$dev"); then
+		if ! tmp_rk=$(systemd-cryptenroll --wipe-slot=recovery --recovery-key "${extra_args[@]}" "$dev"); then
 			echo "Unable to access device $dev"
 			return 1
 		fi
@@ -2643,7 +2689,7 @@ main_menu()
 
 ####### main #######
 
-getopttmp=$(getopt -o hc:v --long help,flicker,verbose,esp-path:,entry-token:,arch:,image:,entry-keys:,no-variables,no-reuse-initrd,no-random-seed,all,portable,only-default,default-snapshot,ask-pin,ask-pw,method:,signed-policy,generate-pin -n "${0##*/}" -- "$@")
+getopttmp=$(getopt -o hc:v --long help,flicker,verbose,esp-path:,entry-token:,arch:,image:,entry-keys:,no-variables,no-reuse-initrd,no-random-seed,all,portable,only-default,default-snapshot,ask-pin,ask-pw,method:,signed-policy,generate-pin,unlock: -n "${0##*/}" -- "$@")
 eval set -- "$getopttmp"
 
 while true ; do
@@ -2667,6 +2713,7 @@ while true ; do
 		--method) arg_method="$2"; shift 2 ;;
 		--signed-policy) arg_signed_policy=1; shift ;;
 		--generate-pin) arg_generate_pin=1; shift ;;
+		--unlock) arg_unlock="$2"; shift 2 ;;
 		--) shift ; break ;;
 		*) echo "Internal error!" ; exit 1 ;;
 	esac
