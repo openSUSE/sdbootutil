@@ -2664,7 +2664,9 @@ elif is_sdboot; then
 elif is_grub2_bls; then
 	boot_dst="/EFI/opensuse"
 else
-	err "Bootloader not detected"
+	msg="Bootloader not detected"
+	[ -z "$LOADER_TYPE" ] || msg+=". /etc/sysconfig/bootloader has LOADER_TYPE=\"$LOADER_TYPE\", but only \"systemd-boot\" or \"grub2-bls\" are recognized."
+	err "$msg"
 fi
 
 # Keep initial components before they are replaced by some actions
