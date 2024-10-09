@@ -2017,7 +2017,7 @@ generate_tpm2_predictions_pcrlock()
 	local pin
 	local extra=()
 	local keyid
-	keyid="$(keyctl id %user:cryptenroll 2> /dev/null)" || true
+	keyid="$(keyctl id %user:recoverypin 2> /dev/null)" || true
 	if [ -n "$arg_ask_pin_or_pw" ]; then
 		read -r -s -p "Recovery PIN: " pin
 		extra=("--recovery-pin=yes")
@@ -2056,9 +2056,9 @@ generate_tpm2_predictions_pcrlock()
 
 				# Add the generated recovery PIN to the kernel keyring, so that it is available to
 				# sdbootutil --method=recovery-key
-				echo -n "$pin" | keyctl padd user pin @u > /dev/null
+				echo -n "$pin" | keyctl padd user recoverykey @u > /dev/null
 				# Make the key expire after 2 minutes
-				keyctl timeout %user:pin 120
+				keyctl timeout %user:recoverykey 120
 		fi
 	fi
 
@@ -2509,7 +2509,9 @@ enroll()
 		fi
 	fi
 
-	if [ "$arg_method" == "recovery-key" ] && tmp_key_id=$(keyctl id %user:pin); then
+	# When calling --method=tpm2 and a recovery PIN is generated, it is also set in
+	# %user:recoverykey to be used as recovery key by --method=recovery-key
+	if [ "$arg_method" == "recovery-key" ] && tmp_key_id=$(keyctl id %user:recoverykey); then
 		recovery_key_id="$tmp_key_id"
 	fi
 
