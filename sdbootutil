@@ -2545,7 +2545,7 @@ unenroll_device()
 				"$dev"
 			;;
 
-		"recovery_key")
+		"recovery-key")
 			systemd-cryptenroll \
 				--wipe-slot=recovery \
 				"$dev"
