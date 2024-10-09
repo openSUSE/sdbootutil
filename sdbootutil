@@ -31,7 +31,6 @@ have_snapshots=
 # for x in vmlinuz image vmlinux linux bzImage uImage Image zImage; do
 image=
 recovery_key_id=
-tpm2_policy_enrolled=
 unlock_extra_arg=
 
 color_red=
@@ -2020,6 +2019,10 @@ generate_tpm2_predictions_pcrlock()
 	local pin
 	local extra=()
 	local keyid
+	local tpm2_policy_enrolled
+	if [ "$arg_method" = "tpm2" ] || [ "$arg_method" = "tpm2+pin" ]; then
+		tpm2_policy_enrolled=1
+	fi
 	keyid="$(keyctl id %user:recoverypin 2> /dev/null)" || true
 	if [ -n "$arg_ask_pin_or_pw" ]; then
 		read -r -s -p "Recovery PIN: " pin
@@ -2055,7 +2058,10 @@ generate_tpm2_predictions_pcrlock()
 				local split
 				IFS=":" read -r -a split <<< "$output"
 				pin="${split[1]}"
-				echo "$pin" | qrencode -t utf8i
+				# Trim the output
+				pin="${pin## }"
+				pin="${pin%% }"
+				qrencode -t utf8i "$pin"
 
 				# Add the generated recovery PIN to the kernel keyring, so that it is available to
 				# sdbootutil --method=recovery-key
@@ -2300,15 +2306,18 @@ enroll_pcrlock()
 	fi
 
 	# Note that the PCRs are now not stored in the LUKS2 header
-	NEWPIN="$tpm_pin" systemd-cryptenroll \
+	if NEWPIN="$tpm_pin" systemd-cryptenroll \
 		--wipe-slot=tpm2 \
 		--tpm2-device=auto \
 		"${extra_args[@]}" \
 		--tpm2-pcrlock=/var/lib/systemd/pcrlock.json \
-		"$dev"
-	# cryptenroll exits successfully even if the token was not enrolled
-	# Manually check if the device has a tpm2 slot enrolled
-	systemd-cryptenroll "$dev" | grep "tpm2"
+		"$dev"; then
+		# cryptenroll exits successfully even if the token was not enrolled
+		# Manually check if the device has a tpm2 slot enrolled
+		systemd-cryptenroll "$dev" | grep -q "tpm2"
+	else
+		return 1
+	fi
 }
 
 enroll_pcroracle()
@@ -2334,16 +2343,19 @@ enroll_pcroracle()
 	fi
 
 	# Note that the PCRs are now not stored in the LUKS2 header
-	NEWPIN="$tpm_pin" systemd-cryptenroll \
+	if NEWPIN="$tpm_pin" systemd-cryptenroll \
 		--wipe-slot=tpm2 \
 		--tpm2-device=auto \
 		"${extra_args[@]}" \
 		--tpm2-public-key=/etc/systemd/tpm2-pcr-public-key.pem \
 		--tpm2-public-key-pcrs="${FDE_SEAL_PCR_LIST}" \
-		"$dev"
-	# cryptenroll exits successfully even if the token was not enrolled
-	# Manually check if the device has a tpm2 slot enrolled
-	systemd-cryptenroll "$dev" | grep "tpm2"
+		"$dev"; then
+		# cryptenroll exits successfully even if the token was not enrolled
+		# Manually check if the device has a tpm2 slot enrolled
+		systemd-cryptenroll "$dev" | grep -q "tpm2"
+	else
+		return 1
+	fi
 }
 
 enroll_fido2()
@@ -2435,7 +2447,6 @@ enroll_device()
 
 	case "$arg_method" in
 		"tpm2"|"tpm2+pin")
-			tpm2_policy_enrolled=1
 			if [ -z "$arg_signed_policy" ] && have_pcrlock; then
 				enroll_pcrlock "$dev" "$pin_or_pw" || {
 					echo "Enrollment with systemd-pcrlock failed"
@@ -2606,7 +2617,7 @@ unenroll_device()
 				"$dev"
 			;;
 
-		"recovery_key")
+		"recovery-key")
 			systemd-cryptenroll \
 				--wipe-slot=recovery \
 				"$dev"
