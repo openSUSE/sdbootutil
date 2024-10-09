@@ -1994,7 +1994,10 @@ generate_tpm2_predictions_pcrlock()
 				local split
 				IFS=":" read -r -a split <<< "$output"
 				pin="${split[1]}"
-				echo "$pin" | qrencode -t utf8i
+				# Trim the output
+				pin="${pin## }"
+				pin="${pin%% }"
+				qrencode -t utf8i "$pin"
 
 				# Add the generated recovery PIN to the kernel keyring, so that it is available to
 				# sdbootutil --method=recovery-key
