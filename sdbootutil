@@ -2344,9 +2344,12 @@ enroll_recovery_key()
 			fi
 
 			# Add the generated recovery key to the kernel keyring, so that it is available to
-			# sdbootutil --method=tpm2
+			# systemd-cryptenroll
 			read -r recovery_key_id < <(echo -n "$recovery_key" | keyctl padd user cryptenroll @u)
 			keyctl timeout %user:cryptenroll 120
+			# And to --method=tpm2
+			read -r recovery_key_id < <(echo -n "$recovery_key" | keyctl padd user recoverypin @u)
+			keyctl timeout %user:recoverypin 120
 		else
 			echo "Unable to generate a recovery key for $dev"
 		fi
