@@ -2251,6 +2251,8 @@ enroll_pcrlock()
 		# cryptenroll exits successfully even if the token was not enrolled
 		# Manually check if the device has a tpm2 slot enrolled
 		systemd-cryptenroll "$dev" | grep -q "tpm2"
+	else
+		return 1
 	fi
 }
 
@@ -2277,16 +2279,19 @@ enroll_pcroracle()
 	fi
 
 	# Note that the PCRs are now not stored in the LUKS2 header
-	NEWPIN="$tpm_pin" systemd-cryptenroll \
+	if NEWPIN="$tpm_pin" systemd-cryptenroll \
 		--wipe-slot=tpm2 \
 		--tpm2-device=auto \
 		"${extra_args[@]}" \
 		--tpm2-public-key=/etc/systemd/tpm2-pcr-public-key.pem \
 		--tpm2-public-key-pcrs="${FDE_SEAL_PCR_LIST}" \
-		"$dev"
-	# cryptenroll exits successfully even if the token was not enrolled
-	# Manually check if the device has a tpm2 slot enrolled
-	systemd-cryptenroll "$dev" | grep "tpm2"
+		"$dev"; then
+		# cryptenroll exits successfully even if the token was not enrolled
+		# Manually check if the device has a tpm2 slot enrolled
+		systemd-cryptenroll "$dev" | grep -q "tpm2"
+	else
+		return 1
+	fi
 }
 
 enroll_fido2()
