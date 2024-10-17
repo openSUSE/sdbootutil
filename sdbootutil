@@ -132,10 +132,10 @@ helpandquit()
 			   version
 
 		update-entry VERSION [SNAPSHOT]
-			   Update "options" field from /etc/cmdline for an entry
+			   Update "options" field from /etc/kernel/cmdline for an entry
 
 		update-all-entries [SNAPSHOT]
-			   Update "options" field from /etc/cmdline for all entries
+			   Update "options" field from /etc/kernel/cmdline for all entries
 
 		set-default-snapshot [SNAPSHOT]
 			   Make SNAPSHOT the default for next boot.
