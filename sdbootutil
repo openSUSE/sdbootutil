@@ -2183,7 +2183,7 @@ add_crypttab_option()
 		echo "$name $device ${key:-none} $opts" >> "$crypttab"
 	done < /etc/crypttab
 
-	mv "$crypttab" /etc/crypttab
+	mv -Z "$crypttab" /etc/crypttab
 	chmod 644 /etc/crypttab
 }
 
@@ -2212,7 +2212,7 @@ remove_crypttab_option()
 		echo "$name $device ${key:-none} $opts" >> "$crypttab"
 	done < /etc/crypttab
 
-	mv "$crypttab" /etc/crypttab
+	mv -Z "$crypttab" /etc/crypttab
 	chmod 644 /etc/crypttab
 }
 
