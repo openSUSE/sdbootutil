@@ -620,6 +620,11 @@ mount_chroot()
 {
 	local snapshot_dir="$1"
 
+	#This is needed so that the rootfs appears in the mounts under
+	#the chroot, allowing dracut to properly detect the fs type
+	#and load the relevant module
+	mount --bind "$snapshot_dir $snapshot_dir"
+
 	mount -t tmpfs -o size=10m tmpfs "$snapshot_dir/run"
 	for i in proc dev sys var tmp; do
 		mount --bind "/$i" "$snapshot_dir/$i"
@@ -633,6 +638,8 @@ umount_chroot()
 	for i in proc dev sys var tmp run; do
 		umount "$snapshot_dir/$i"
 	done
+
+	umount "$snapshot_dir"
 }
 
 mount_etc()
