@@ -2136,16 +2136,34 @@ have_luks2()
 	[ "${#luks2_devices[@]}" -gt 0 ]
 }
 
-detect_luks2()
-{
-	local dev fstype
-	[ -z "$luks2_devices" ] || return 0
-	while read -r dev fstype; do
-		[ "$fstype" = 'crypto_LUKS' ] || continue
-		cryptsetup isLuks --type luks2 "$dev" || continue
-		luks2_devices+=("$dev")
-	done < <(lsblk --noheadings -o PATH,FSTYPE)
-	have_luks2
+detect_luks2() {
+    local dev fstype name crypttab_dev device_path
+    [ "${#luks2_devices[@]}" -eq 0 ] || return 0
+
+    # Read the crypttab file and process each line
+    while read -r name crypttab_dev _; do
+        # Skip lines that don't start with "cr_"
+        [[ "$name" =~ ^cr_ ]] || continue
+
+        # Handle UUID format in crypttab
+        if [[ "$crypttab_dev" =~ ^UUID= ]]; then
+            device_path=$(blkid -U "${crypttab_dev#UUID=}")
+        else
+            device_path="$crypttab_dev"
+        fi
+
+        # Match devices from lsblk output with crypttab devices
+        while read -r dev fstype; do
+            [ "$fstype" = 'crypto_LUKS' ] || continue
+            if [ "$dev" = "$device_path" ]; then
+                if cryptsetup isLuks --type luks2 "$dev"; then
+                    luks2_devices+=("$dev")
+                fi
+            fi
+        done < <(lsblk --noheadings -o PATH,FSTYPE)
+    done < /etc/crypttab
+    
+    have_luks2
 }
 
 have_tpm2()
@@ -2158,33 +2176,31 @@ have_fido2()
 	[ -n "$(systemd-cryptenroll --fido2-device=list 2>/dev/null)" ]
 }
 
-add_crypttab_option()
-{
-	# This version will share the same options for all crypto_LUKS
-	# devices.  This imply that all of them will be unlocked by the
-	# same TPM2, or the same FIDO2 key
-	local option="$1"
+add_crypttab_option() {
+    # This version will share the same options for all crypto_LUKS
+    # devices. This implies that all of them will be unlocked by the
+    # same TPM2, or the same FIDO2 key
+    local option="$1"
+    local crypttab_file="/etc/crypttab"
+    local update_initrd=0
 
-	local crypttab
-	crypttab="$(mktemp -t crypttab.XXXXXX)"
-	echo "# File created by sdbootutil.  Comments will be removed" > "$crypttab"
+    # Create a backup of the original file
+    cp "$crypttab_file" "${crypttab_file}.bak"
 
-	local name
-	local device
-	local key
-	local opts
-	while read -r name device key opts; do
-		[[ "$name" = \#* ]] && continue
-		if [[ "$opts" != *"$option"* ]]; then
-			[ -z "$opts" ] && opts="$option" || opts="$opts,$option"
-			# crypttab has changed so initrd needs to be updated
-			arg_no_reuse_initrd=1
-		fi
-		echo "$name $device ${key:-none} $opts" >> "$crypttab"
-	done < /etc/crypttab
+    # Use sed to add the option if it's not already present and line starts with cr_
+    sed -i -E "/^cr_/ {
+        s/(\S+\s+\S+\s+\S+\s*)(.*)/\1\2/
+        /$option/! {
+            s/$/,${option}/
+        }
+    }" "$crypttab_file"
 
-	mv -Z "$crypttab" /etc/crypttab
-	chmod 644 /etc/crypttab
+    # Check if the sed command made any changes
+    if ! cmp -s "${crypttab_file}" "${crypttab_file}.bak"; then
+        update_initrd=1
+    fi
+
+    chmod 600 "$crypttab_file"
 }
 
 remove_crypttab_option()
