@@ -4,7 +4,8 @@
 set -e
 shopt -s nullglob
 
-# set to --keep-title to use altenate screen. Better for debugging but causes flicker
+# set to --keep-title to use altenate screen. Better for debugging but
+# causes flicker
 dialog_altenate_screen=
 dialog_backtitle="sdbootutil"
 interactive=
@@ -36,8 +37,9 @@ unlock_extra_arg=
 
 color_red=
 color_end=
-# The shell is interactive and the colors haven't been disabled forcefully
-# or the shell is not interactive but the colors have been forcefully enabled
+# The shell is interactive and the colors haven't been disabled
+# forcefully or the shell is not interactive but the colors have been
+# forcefully enabled
 if { [[ "$-" == *i* ]] \
     && [ "$SYSTEMD_COLORS" != "false" ] && [ "$SYSTEMD_COLORS" != "0" ]; } \
     || [[ "$-" != *i* ]] \
@@ -102,7 +104,8 @@ helpandquit()
 		  --method		"tpm2", "tpm2+pin", "fido2", "password", "recovery-key"
 		  --signed-policy	Use signed policy for TPM2 enrollment
 		  --generate-pin	Generate a random TPM2 recovery pin for TPM2 enrollment
-		  --unlock		"fido2", "tpm2", "passphrase", "recovery"
+		  --unlock		Override autodetected unlock mechanism
+					"tpm2", "fido2", "password", "recovery-key"
 		  -v, --verbose		More verbose output
 		  -h, --help		This screen
 
@@ -204,8 +207,10 @@ log_info()
 
 d(){
 	local retval=0
-	# Bash makes it a bit annoying to read the output of a different FD into a variable, it
-	# only supports reading stdout by itself. So redirect 3 to stdout and 1 to the real stdout.
+	# Bash makes it a bit annoying to read the output of a
+	# different FD into a variable, it only supports reading
+	# stdout by itself. So redirect 3 to stdout and 1 to the real
+	# stdout.
 	exec {stdoutfd}>&1
 	result="$(dialog $dialog_altenate_screen --backtitle "$dialog_backtitle" --output-fd 3 "$@" 3>&1 1>&${stdoutfd})" || retval=$?
 	# Word splitting makes it necessary to use eval here.
@@ -286,7 +291,8 @@ run_command_output()
 	fi
 }
 
-# Given the number of total item pairs, outputs the number of items to display at once
+# Given the number of total item pairs, outputs the number of items to
+# display at once
 menuheight()
 {
 	local height=$(($1 / 2))
@@ -347,18 +353,21 @@ detect_parent()
 sedrootflags()
 {
 	local subvol="$1"
-	# - delete BOOT_IMAGE= and initrd=
-	# - replace or add root= to refers to UUID or mapped device (if encrypted)
-	# - replace or add rootflags to point at correct subvolume
-	# - replace or add systemd.machine-id to match current machine-id
+	# - Delete BOOT_IMAGE= and initrd=
+	# - Replace or add root= to refers to UUID or mapped device
+	#   (if encrypted)
+	# - Replace or add rootflags to point at correct subvolume
+	# - Replace or add systemd.machine-id to match current
+	#   machine-id
 	#
-	# from the sed manual:
+	# From the sed manual:
 	# ‘t’
-	#     branch conditionally (that is: jump to a label) _only if_ a ‘s///’
-	#     command has succeeded since the last input line was read or another
-	#     conditional branch was taken.
-	# we use the t command to jump over an expression that appends a
-	# parameter if replacing the parameter succeeded (ie it was
+	#     branch conditionally (that is: jump to a label) _only
+	#     if_ a ‘s///’ command has succeeded since the last input
+	#     line was read or another conditional branch was taken.
+	#
+	# We use the t command to jump over an expression that appends
+	# a parameter if replacing the parameter succeeded (ie it was
 	# already there). Since we always operate on the same line,
 	# "empty" t jumps are used to reset the condition after very
 	# s///.
@@ -416,8 +425,8 @@ entry_conf_file()
 	# ordering rules, using only rpmvercmp() with the entry
 	# filename.  To provide an order we add a prefix ("system")
 	# for entries that are not RO, making it newer that any other
-	# entry name that start with the "snapper" prefix:
-	# ("system" > "snapper").
+	# entry name that start with the "snapper" prefix: ("system" >
+	# "snapper").
 	local prefix=""
 	local subvol=""
 	[ -z "$have_snapshots" ] || subvol="${subvol_prefix}/.snapshots/${snapshot}/snapshot"
@@ -635,9 +644,9 @@ mount_chroot()
 {
 	local snapshot_dir="$1"
 
-	#This is needed so that the rootfs appears in the mounts under
-	#the chroot, allowing dracut to properly detect the fs type
-	#and load the relevant module
+	# This is needed so that the rootfs appears in the mounts
+	# under the chroot, allowing dracut to properly detect the fs
+	# type and load the relevant module
 	mount --bind "$snapshot_dir $snapshot_dir"
 
 	mount -t tmpfs -o size=10m tmpfs "$snapshot_dir/run"
@@ -661,7 +670,7 @@ mount_etc()
 {
 	local snapshot_dir="$1"
 
-	# don't mount if we are within a transactional-update shell
+	# Don't mount if we are within a transactional-update shell
 	[ -z "$TRANSACTIONAL_UPDATE" ] || return 0
 
 	IFS=',' read -ra fields <<< \
@@ -681,7 +690,8 @@ mount_etc()
 umount_etc()
 {
 	local snapshot_dir="$1"
-	# don't umount if we are within a transactional-update shell
+
+	# Don't umount if we are within a transactional-update shell
 	[ -z "$TRANSACTIONAL_UPDATE" ] || return 0
 	umount "${snapshot_dir}/etc"
 }
@@ -1250,10 +1260,10 @@ find_kernels()
 	done
 }
 
-# map that uses expected path on the ESP for each installed kernel as key. The
-# value is the entry id if an entry exists.
+# Map that uses expected path on the ESP for each installed kernel as
+# key.  The value is the entry id if an entry exists.
 declare -A installed_kernels
-# map of ESP path to id of kernels that are not in the subvol
+# Map of ESP path to id of kernels that are not in the subvol
 declare -A stale_kernels
 is_bootable=
 update_kernels()
@@ -1892,10 +1902,10 @@ pcrlock_grub2_bls_kernel_initrd()
 	for element in "${elements[@]}"; do
 		n=$((n+1))
 		pcrlock \
-		    lock-raw \
-		    --pcr=9 \
-		    --pcrlock "$tmpdir/element-$n.pcrlock" \
-		    "$element" 2> /dev/null || pcrlock_manual_raw 9 "$tmpdir/element-$n.pcrlock" "$element"
+			lock-raw \
+			--pcr=9 \
+			--pcrlock "$tmpdir/element-$n.pcrlock" \
+			"$element" 2> /dev/null || pcrlock_manual_raw 9 "$tmpdir/element-$n.pcrlock" "$element"
 		locks+=( "$tmpdir/element-$n.pcrlock" )
 	done
 	jq --slurp '{"records": [.[].records[0]]}' \
@@ -1918,10 +1928,10 @@ pcrlock_grub2_bls_cmdline()
 		n=$((n+1))
 		echo -n "$line" > "$tmpdir/line"
 		pcrlock \
-		    lock-raw \
-		    --pcr=8 \
-		    --pcrlock "$tmpdir/line-$n.pcrlock" \
-		    "$tmpdir/line"
+			lock-raw \
+			--pcr=8 \
+			--pcrlock "$tmpdir/line-$n.pcrlock" \
+			"$tmpdir/line"
 		locks+=( "$tmpdir/line-$n.pcrlock" )
 		rm "$tmpdir/line"
 	done
@@ -1945,10 +1955,10 @@ pcrlock_grub2_bls_entry_files()
 			i="$base$i"
 		fi
 		pcrlock \
-		    lock-raw \
-		    --pcr=9 \
-		    --pcrlock="$tmpdir/entry-$n.pcrlock" \
-		    "$i"
+			lock-raw \
+			--pcr=9 \
+			--pcrlock="$tmpdir/entry-$n.pcrlock" \
+			"$i"
 		locks+=( "$tmpdir/entry-$n.pcrlock" )
 	done < <(jq --raw-output 'map(.path) | .[]' "$entries")
 
@@ -1976,9 +1986,9 @@ pcrlock_sdboot()
 	while read -r i; do
 		n=$((n+1))
 		pcrlock \
-		    lock-pe \
-		    --pcrlock=/var/lib/pcrlock.d/650-kernel-efi-application.pcrlock.d/linux-"$n".pcrlock \
-		    "${boot_root}/$i"
+			lock-pe \
+			--pcrlock=/var/lib/pcrlock.d/650-kernel-efi-application.pcrlock.d/linux-"$n".pcrlock \
+			"${boot_root}/$i"
 	done < <(jq --raw-output 'map(.linux) | unique | .[]' "$entryfile")
 
 	# Join the cmdline and the initrd in a single component
@@ -2119,18 +2129,18 @@ generate_tpm2_predictions_pcrlock()
 	local entry="shim.efi"
 	[ -f "${boot_root}${boot_dst}/${entry}" ] || entry="BOOT${firmware_arch^^}.EFI"
 	pcrlock \
-	    lock-pe \
-	    --pcrlock=/var/lib/pcrlock.d/630-shim-efi-application.pcrlock.d/generated.pcrlock \
-	    "${boot_root}${boot_dst}/${entry}"
+		lock-pe \
+		--pcrlock=/var/lib/pcrlock.d/630-shim-efi-application.pcrlock.d/generated.pcrlock \
+		"${boot_root}${boot_dst}/${entry}"
 
 	# 640-boot-loader-efi-application is not part of the pcrlock
 	# standards
 	# This is measuring the systemd-boot EFI binary (named grub.efi)
 	# TODO: move to systemd-boot-pcrlock.rpm
 	pcrlock \
-	    lock-pe \
-	    --pcrlock=/var/lib/pcrlock.d/640-boot-loader-efi-application.pcrlock.d/generated.pcrlock \
-	    "${boot_root}${boot_dst}/grub.efi"
+		lock-pe \
+		--pcrlock=/var/lib/pcrlock.d/640-boot-loader-efi-application.pcrlock.d/generated.pcrlock \
+		"${boot_root}${boot_dst}/grub.efi"
 
 	if is_sdboot; then
 		pcrlock_sdboot
@@ -2183,28 +2193,30 @@ generate_tpm2_predictions_pcrlock()
 		if ! echo "$output" | grep "recovery PIN"; then
 			echo "Unable to find the generated recovery PIN"
 		elif [ -x /usr/bin/qrencode ]; then
-				echo "You can also scan it with your mobile phone:"
-				local split
-				IFS=":" read -r -a split <<< "$output"
-				pin="${split[1]}"
-				# Trim the output
-				pin="${pin## }"
-				pin="${pin%% }"
-				qrencode -t utf8i "$pin"
+			echo "You can also scan it with your mobile phone:"
+			local split
+			IFS=":" read -r -a split <<< "$output"
+			pin="${split[1]}"
+			# Trim the output
+			pin="${pin## }"
+			pin="${pin%% }"
+			qrencode -t utf8i "$pin"
 
-				# Add the generated recovery PIN to the kernel keyring, so that it is available to
-				# sdbootutil --method=recovery-key
-				echo -n "$pin" | keyctl padd user recoverykey @u > /dev/null
-				# Make the key expire after 2 minutes
-				keyctl timeout %user:recoverykey 120
+			# Add the generated recovery PIN to the kernel
+			# keyring, so that it is available to
+			# sdbootutil --method=recovery-key
+			echo -n "$pin" | keyctl padd user recoverykey @u > /dev/null
+			# Make the key expire after 2 minutes
+			keyctl timeout %user:recoverykey 120
 		fi
 	fi
 
 	# Publish the assets in the ESP, so can be imported by
 	# dracut-pcr-signature
-	[ -e /var/lib/systemd/pcrlock.json ] && cp /var/lib/systemd/pcrlock.json "${boot_root}${boot_dst}" && {
-		echo "NVIndex policy created"
-	}
+	[ -e /var/lib/systemd/pcrlock.json ] && \
+		cp /var/lib/systemd/pcrlock.json "${boot_root}${boot_dst}" && {
+			echo "NVIndex policy created"
+		}
 }
 
 get_pcrs()
@@ -2248,12 +2260,12 @@ generate_tpm2_predictions_pcr_oracle()
 		for entry in "${entries[@]}"; do
 			log_info "Generate prediction for $entry with PCRs $pcrs"
 			if ! pcr-oracle \
-				--private-key /etc/systemd/tpm2-pcr-private-key.pem \
-				--from eventlog \
-				--output /etc/systemd/tpm2-pcr-signature.json \
-				--target-platform=systemd \
-				--boot-entry "${entry}" \
-				sign "$pcrs"; then
+			     --private-key /etc/systemd/tpm2-pcr-private-key.pem \
+			     --from eventlog \
+			     --output /etc/systemd/tpm2-pcr-signature.json \
+			     --target-platform=systemd \
+			     --boot-entry "${entry}" \
+			     sign "$pcrs"; then
 				err "Failed to install TPM predictions for ${entry}"
 			fi
 		done
@@ -2262,9 +2274,10 @@ generate_tpm2_predictions_pcr_oracle()
 	# Publish the assets in the ESP, so can be imported by
 	# dracut-pcr-signature
 	cp /etc/systemd/tpm2-pcr-public-key.pem "${boot_root}${boot_dst}"
-	[ -e /etc/systemd/tpm2-pcr-signature.json ] && cp /etc/systemd/tpm2-pcr-signature.json "${boot_root}${boot_dst}" && {
-		echo "Signed policy created"
-	}
+	[ -e /etc/systemd/tpm2-pcr-signature.json ] && \
+		cp /etc/systemd/tpm2-pcr-signature.json "${boot_root}${boot_dst}" && {
+			echo "Signed policy created"
+		}
 }
 
 generate_tpm2_predictions()
@@ -2313,8 +2326,8 @@ have_fido2()
 add_crypttab_option()
 {
 	# This version will share the same options for all crypto_LUKS
-	# devices.  This imply that all of them will be unlocked by the
-	# same TPM2, or the same FIDO2 key
+	# devices.  This imply that all of them will be unlocked by
+	# the same TPM2, or the same FIDO2 key
 	local option="$1"
 
 	local crypttab
@@ -2329,7 +2342,8 @@ add_crypttab_option()
 		[[ "$name" = \#* ]] && continue
 		if [[ "$opts" != *"$option"* ]]; then
 			[ -z "$opts" ] && opts="$option" || opts="$opts,$option"
-			# crypttab has changed so initrd needs to be updated
+			# crypttab has changed so initrd needs to be
+			# updated
 			arg_no_reuse_initrd=1
 		fi
 		echo "$name $device ${key:-none} $opts" >> "$crypttab"
@@ -2358,7 +2372,8 @@ remove_crypttab_option()
 		if [[ "$opts" == *"$option"* ]]; then
 			opts="${opts//,$option}"
 			opts="${opts//$option}"
-			# crypttab has changed so initrd needs to be updated
+			# crypttab has changed so initrd needs to be
+			# updated
 			arg_no_reuse_initrd=1
 		fi
 		echo "$name $device ${key:-none} $opts" >> "$crypttab"
@@ -2388,9 +2403,10 @@ unlock_method()
 		"fido2")
 			unlock_extra_arg="--unlock-fido2-device=auto"
 			;;
-		"passphrase"|"recovery-key")
-			# The passphrase in this case should be set in the %user:cryptenroll key
-			# If it has not been set, systemd will ask it to the user
+		"password"|"recovery-key")
+			# The password in this case should be set in
+			# the %user:cryptenroll key.  If it has not
+			# been set, systemd will ask it to the user
 			;;
 		"auto"|*)
 			local slots
@@ -2407,7 +2423,8 @@ unlock_method()
 				echo "Unlocking using FIDO2"
 				unlock_extra_arg="--unlock-fido2-device=auto"
 			fi
-			# Use %user:cryptenroll or let systemd-cryptenroll ask the passphrase
+			# Use %user:cryptenroll or let
+			# systemd-cryptenroll ask the passphrase
 			;;
 	esac
 }
@@ -2436,13 +2453,14 @@ enroll_pcrlock()
 
 	# Note that the PCRs are now not stored in the LUKS2 header
 	if NEWPIN="$tpm_pin" systemd-cryptenroll \
-		--wipe-slot=tpm2 \
-		--tpm2-device=auto \
-		"${extra_args[@]}" \
-		--tpm2-pcrlock=/var/lib/systemd/pcrlock.json \
-		"$dev"; then
-		# cryptenroll exits successfully even if the token was not enrolled
-		# Manually check if the device has a tpm2 slot enrolled
+		 --wipe-slot=tpm2 \
+		 --tpm2-device=auto \
+		 "${extra_args[@]}" \
+		 --tpm2-pcrlock=/var/lib/systemd/pcrlock.json \
+		 "$dev"; then
+		# systemd-cryptenroll exits successfully even if the
+		# token was not enrolled.  Manually check if the
+		# device has a tpm2 slot enrolled
 		systemd-cryptenroll "$dev" | grep -q "tpm2"
 	else
 		return 1
@@ -2473,14 +2491,15 @@ enroll_pcroracle()
 
 	# Note that the PCRs are now not stored in the LUKS2 header
 	if NEWPIN="$tpm_pin" systemd-cryptenroll \
-		--wipe-slot=tpm2 \
-		--tpm2-device=auto \
-		"${extra_args[@]}" \
-		--tpm2-public-key=/etc/systemd/tpm2-pcr-public-key.pem \
-		--tpm2-public-key-pcrs="${FDE_SEAL_PCR_LIST}" \
-		"$dev"; then
-		# cryptenroll exits successfully even if the token was not enrolled
-		# Manually check if the device has a tpm2 slot enrolled
+		 --wipe-slot=tpm2 \
+		 --tpm2-device=auto \
+		 "${extra_args[@]}" \
+		 --tpm2-public-key=/etc/systemd/tpm2-pcr-public-key.pem \
+		 --tpm2-public-key-pcrs="${FDE_SEAL_PCR_LIST}" \
+		 "$dev"; then
+		# systemd-cryptenroll exits successfully even if the
+		# token was not enrolled.  Manually check if the
+		# device has a tpm2 slot enrolled
 		systemd-cryptenroll "$dev" | grep -q "tpm2"
 	else
 		return 1
@@ -2529,19 +2548,22 @@ enroll_recovery_key()
 	fi
 
 	local recovery_key
-	# This function will be called for every device. Let systemd generate a secure recovery key
-	# only the first time and if there is no recovery pin selected (%user:pin or %user:cryptenroll).
-	# Unlock the LUKS2 header by using the TPM2 slot
+	# This function will be called for every device. Let systemd
+	# generate a secure recovery key only the first time and if
+	# there is no recovery pin selected (%user:pin or
+	# %user:cryptenroll).  Unlock the LUKS2 header by using the
+	# TPM2 slot
 	if [ -z "$recovery_key_id" ]; then
 		if recovery_key=$(systemd-cryptenroll --wipe-slot=recovery --recovery-key "${extra_args[@]}" "$dev"); then
 			echo "Recovery key: $recovery_key"
 
 			if [ -x /usr/bin/qrencode ]; then
-					echo "You can also scan it with your mobile phone:"
-					echo "$recovery_key" | qrencode -t utf8i
+				echo "You can also scan it with your mobile phone:"
+				echo "$recovery_key" | qrencode -t utf8i
 			fi
 
-			# Add the generated recovery key to the kernel keyring, so that it is available to
+			# Add the generated recovery key to the kernel
+			# keyring, so that it is available to
 			# systemd-cryptenroll
 			read -r recovery_key_id < <(echo -n "$recovery_key" | keyctl padd user cryptenroll @u)
 			keyctl timeout %user:cryptenroll 120
@@ -2552,17 +2574,20 @@ enroll_recovery_key()
 			echo "Unable to generate a recovery key for $dev"
 		fi
 	else
-		# A recovery key has already been generated, use it for all the devices
+		# A recovery key has already been generated, use it
+		# for all the devices
 		recovery_key="$(keyctl pipe "$recovery_key_id")"
 		if ! tmp_rk=$(systemd-cryptenroll --wipe-slot=recovery --recovery-key "${extra_args[@]}" "$dev"); then
 			echo "Unable to access device $dev"
 			return 1
 		fi
-		# systemd-cryptenroll always generates a random recovery key, but we want $recovery_key
-		# Replace it by using cryptsetup
+		# systemd-cryptenroll always generates a random
+		# recovery key, but we want $recovery_key Replace it
+		# by using cryptsetup
 		read -r -a split < <(systemd-cryptenroll /dev/vda3 | grep recovery)
 		keyslot="${split[0]}"
-		# cryptsetup can only read the new passphrase from a keyfile
+		# cryptsetup can only read the new passphrase from a
+		# keyfile
 		echo -n "$recovery_key" > recovery_key
 		cryptsetup luksChangeKey --key-slot "$keyslot" "$dev" recovery_key <<<"$tmp_rk"
 		rm recovery_key
@@ -2581,8 +2606,10 @@ enroll_device()
 					echo "Enrollment with systemd-pcrlock failed"
 					echo "Re-trying with pcr-oracle"
 					unenroll_pcrlock
-					# this function generates /etc/systemd/tpm2-pcr-public-key.pem
-					# which is needed by enroll_pcroracle
+					# This function generates
+					# /etc/systemd/tpm2-pcr-public-key.pem
+					# which is needed by
+					# enroll_pcroracle
 					generate_rsa_key
 					enroll_pcroracle "$dev" "$pin_or_pw"
 				}
@@ -2695,8 +2722,9 @@ enroll()
 		fi
 	fi
 
-	# When calling --method=tpm2 and a recovery PIN is generated, it is also set in
-	# %user:recoverykey to be used as recovery key by --method=recovery-key
+	# When calling --method=tpm2 and a recovery PIN is generated,
+	# it is also set in %user:recoverykey to be used as recovery
+	# key by --method=recovery-key
 	if [ "$arg_method" == "recovery-key" ] && tmp_key_id=$(keyctl id %user:recoverykey); then
 		recovery_key_id="$tmp_key_id"
 	fi
