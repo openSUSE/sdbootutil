@@ -27,7 +27,6 @@ arg_default_snapshot=
 arg_ask_pin_or_pw=
 arg_method=
 arg_signed_policy=
-arg_generate_pin=
 arg_unlock=
 have_snapshots=
 # for x in vmlinuz image vmlinux linux bzImage uImage Image zImage; do
@@ -103,7 +102,6 @@ helpandquit()
 		  --ask-pw		Ask password when initial enrollment
 		  --method		"tpm2", "tpm2+pin", "fido2", "password", "recovery-key"
 		  --signed-policy	Use signed policy for TPM2 enrollment
-		  --generate-pin	Generate a random TPM2 recovery pin for TPM2 enrollment
 		  --unlock		Override autodetected unlock mechanism
 					"tpm2", "fido2", "password", "recovery-key"
 		  -v, --verbose		More verbose output
@@ -2158,57 +2156,47 @@ generate_tpm2_predictions_pcrlock()
 	local pin
 	local extra=()
 	local keyid
-	local tpm2_policy_enrolled
-	if [ "$arg_method" = "tpm2" ] || [ "$arg_method" = "tpm2+pin" ]; then
-		tpm2_policy_enrolled=1
-	fi
 	keyid="$(keyctl id %user:recoverypin 2> /dev/null)" || true
 	if [ -n "$arg_ask_pin_or_pw" ]; then
 		read -r -s -p "Recovery PIN: " pin
 		extra=("--recovery-pin=yes")
-	elif [ -n "$arg_generate_pin" ]; then
-		extra=("--recovery-pin=show")
 	elif [ -n "$PIN" ]; then
 		pin="$PIN"
 		extra=("--recovery-pin=yes")
 	elif [ -n "$keyid" ]; then
 		pin="$(keyctl pipe "$keyid")"
 		extra=("--recovery-pin=yes")
-	# During the TPM2 enrollment (not when update-predictions is called by itself or by other commands)
-	elif [ -n "$tpm2_policy_enrolled" ]; then
-		# No PIN was provided, systemd-pcrlock will generate one
-		# Add this argument to show it
+	else
+		# No PIN was provided, systemd-pcrlock will generate
+		# one
 		extra=("--recovery-pin=show")
 	fi
 
 	local output
-	if ! output="$(PIN="$pin" pcrlock --pcr="$pcrs" "${extra[@]}" make-policy)"; then
-		echo "Error creating the policy!"
-		if [ -z "$pin" ]; then
-			echo "Please, provide the recovery PIN to register the new policy"
-		else
-			echo "Provided PIN incorrect or TPM2 locked after too many retries"
-		fi
-	elif [ -z "$pin" ] && [ -n "$tpm2_policy_enrolled" ]; then
-		if ! echo "$output" | grep "recovery PIN"; then
-			echo "Unable to find the generated recovery PIN"
-		elif [ -x /usr/bin/qrencode ]; then
-			echo "You can also scan it with your mobile phone:"
-			local split
-			IFS=":" read -r -a split <<< "$output"
-			pin="${split[1]}"
-			# Trim the output
-			pin="${pin## }"
-			pin="${pin%% }"
-			qrencode -t utf8i "$pin"
+	output="$(PIN="$pin" pcrlock --pcr="$pcrs" "${extra[@]}" make-policy)"
+	local pcrlock_status=$?
 
-			# Add the generated recovery PIN to the kernel
-			# keyring, so that it is available to
-			# sdbootutil --method=recovery-key
-			echo -n "$pin" | keyctl padd user recoverykey @u > /dev/null
-			# Make the key expire after 2 minutes
-			keyctl timeout %user:recoverykey 120
+	if [ $pcrlock_status -ne 0 ]; then
+		echo "Error creating the policy!"
+	elif echo "$output" | grep -q "recovery PIN"; then
+		local split
+		IFS=":" read -r -a split <<< "$output"
+		pin="${split[1]}"
+		pin="${pin## }"
+		pin="${pin%% }"
+
+		echo "Recovery PIN: $pin"
+		if [ -x /usr/bin/qrencode ]; then
+			echo "You can also scan it with your mobile phone:"
+			qrencode -t utf8i "$pin"
 		fi
+
+		# Add the generated recovery PIN to the kernel
+		# keyring, so that it is available to `sdbootutil
+		# --method=recovery-key`
+		echo -n "$pin" | keyctl padd user recoverykey @u > /dev/null
+		# Make the key expire after 2 minutes
+		keyctl timeout %user:recoverykey 120
 	fi
 
 	# Publish the assets in the ESP, so can be imported by
@@ -2556,10 +2544,9 @@ enroll_recovery_key()
 	if [ -z "$recovery_key_id" ]; then
 		if recovery_key=$(systemd-cryptenroll --wipe-slot=recovery --recovery-key "${extra_args[@]}" "$dev"); then
 			echo "Recovery key: $recovery_key"
-
 			if [ -x /usr/bin/qrencode ]; then
 				echo "You can also scan it with your mobile phone:"
-				echo "$recovery_key" | qrencode -t utf8i
+				qrencode -t utf8i "$recovery_key"
 			fi
 
 			# Add the generated recovery key to the kernel
@@ -2857,7 +2844,7 @@ main_menu()
 
 ####### main #######
 
-getopttmp=$(getopt -o hc:v --long help,flicker,verbose,esp-path:,entry-token:,arch:,image:,entry-keys:,no-variables,no-reuse-initrd,no-random-seed,all,sync,portable,only-default,default-snapshot,ask-pin,ask-pw,method:,signed-policy,generate-pin,unlock: -n "${0##*/}" -- "$@")
+getopttmp=$(getopt -o hc:v --long help,flicker,verbose,esp-path:,entry-token:,arch:,image:,entry-keys:,no-variables,no-reuse-initrd,no-random-seed,all,sync,portable,only-default,default-snapshot,ask-pin,ask-pw,method:,signed-policy,unlock: -n "${0##*/}" -- "$@")
 eval set -- "$getopttmp"
 
 while true ; do
@@ -2881,7 +2868,6 @@ while true ; do
 		--ask-pin|--ask-pw) arg_ask_pin_or_pw=1; shift ;;
 		--method) arg_method="$2"; shift 2 ;;
 		--signed-policy) arg_signed_policy=1; shift ;;
-		--generate-pin) arg_generate_pin=1; shift ;;
 		--unlock) arg_unlock="$2"; shift 2 ;;
 		--) shift ; break ;;
 		*) echo "Internal error!" ; exit 1 ;;
