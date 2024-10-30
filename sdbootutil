@@ -24,15 +24,13 @@ arg_portable=
 arg_sync=
 arg_only_default=
 arg_default_snapshot=
-arg_ask_pin_or_pw=
+arg_ask_key_pin_or_pw=
 arg_method=
 arg_signed_policy=
-arg_unlock=
 have_snapshots=
 # for x in vmlinuz image vmlinux linux bzImage uImage Image zImage; do
 image=
-recovery_key_id=
-unlock_extra_arg=
+unlock_method=
 
 color_red=
 color_end=
@@ -97,13 +95,12 @@ helpandquit()
 		  --portable		Handle bootloader on portable devices
 		  --only-default	Only list the default entry
 		  --default-snapshot	[SNAPSHOT] refers to the default snapshot
+		  --ask-key		Ask recovery Key when initial enrollment (or randomly generated)
 		  --ask-pin		Ask recovery PIN for re-enrollment
 					Ask TPM2 PIN when initial enrollment
 		  --ask-pw		Ask password when initial enrollment
 		  --method		"tpm2", "tpm2+pin", "fido2", "password", "recovery-key"
 		  --signed-policy	Use signed policy for TPM2 enrollment
-		  --unlock		Override autodetected unlock mechanism
-					"tpm2", "fido2", "password", "recovery-key"
 		  -v, --verbose		More verbose output
 		  -h, --help		This screen
 
@@ -190,9 +187,11 @@ helpandquit()
 
 		Variables:
 		SYSTEMD_COLORS		Set 0 to disable colored output
-		PIN			Recovery PIN / password (re-enrollment)
-		PIN			TPM2 PIN (initial enrollment; %u:pin)
-		PW			Password (initial enrollment; %u:pw)
+		KEY			Recovery key (initial enrollment; %u:sdbootutil)
+		PIN			TPM2 PIN (initial enrollment; %u:sdbootutil)
+		PIN			Recovery PIN (re-enrollment; %u:sdbootutil)
+		PW			Password / Recovery Key (initial enrollment; %u:sdbootutil)
+					(%u:cryptenroll for changes via systemd-cryptenroll)
 	EOF
 	exit 0
 }
@@ -545,13 +544,13 @@ set_snapper_title_and_sortkey()
 	[ -s "$snapperfile" ] || update_snapper
 
 	# shellcheck disable=SC2046
-	IFS="|" read -r type date desc important pre_num <<< \
+	IFS="|" read -r type date desc important pre_num <<<\
 		$(jq -r --arg snapshot "$snapshot" \
 		'.["root"][]|select(.number==( $snapshot|tonumber))|[.type,.date,(.description|gsub("\\|";"_")),.userdata.important,."pre-number"//""]|join("|")'\
 		< "$snapperfile")
 
 	if [ -z "$desc" ] && [ "$type" = "post" ] && [ -n "$pre_num" ]; then
-		read -r desc <<< "$(jq -r --arg snapshot "$pre_num" '.["root"][]|select(.number==($snapshot|tonumber))|.description' < "$snapperfile")"
+		read -r desc <<<"$(jq -r --arg snapshot "$pre_num" '.["root"][]|select(.number==($snapshot|tonumber))|.description' < "$snapperfile")"
 	fi
 
 	if [ "$important" = "yes" ]; then important="*"; else important=""; fi
@@ -671,13 +670,13 @@ mount_etc()
 	# Don't mount if we are within a transactional-update shell
 	[ -z "$TRANSACTIONAL_UPDATE" ] || return 0
 
-	IFS=',' read -ra fields <<< \
+	IFS=',' read -ra fields <<<\
 	   "$(findmnt --tab-file "${snapshot_dir}/etc/fstab" --noheadings --nofsroot --output OPTIONS /etc | sed 's#/sysroot##g' | sed 's#:/etc,#:'"${snapshot_dir}"'/etc,#g')"
 
 	local lower=""
 	local upper=""
 	for element in "${fields[@]}"; do
-		IFS='=' read -r key value <<< "$element"
+		IFS='=' read -r key value <<<"$element"
 		[ "$key" = "lowerdir" ] && lower="$value"
 		[ "$key" = "upperdir" ] && upper="$value"
 	done
@@ -1439,7 +1438,8 @@ find_grub2_bls()
 {
 	local grub2_bls
 
-	local grub2_arch="$(uname -m)"
+	local grub2_arch
+	grub2_arch="$(uname -m)"
 	case "$grub2_arch" in
 		i[[3456]]86) grub2_arch=i386 ;;
 		x86_64) grub2_arch=x86_64 ;;
@@ -2150,18 +2150,22 @@ generate_tpm2_predictions_pcrlock()
 	# but we can do a re-enrollment using the recovery PIN.  To
 	# register a recovery PIN the installer (disk-encryption-tool,
 	# YaST) will call this script deploying in the %u keyring
-	# "cryptenroll" entry.  For re-enrollments we can use the same
-	# entry, the PIN environment variable, or the --ask-pin
-	# parameter.
+	# "sdbootutil[-pin]" entry.  For re-enrollments we can use the
+	# same entry, the PIN environment variable, or the
+	# --ask-{key,pin,pw} parameter.
 	local pin
 	local extra=()
-	local keyid
-	keyid="$(keyctl id %user:recoverypin 2> /dev/null)" || true
-	if [ -n "$arg_ask_pin_or_pw" ]; then
+	local keyid keyid_int
+	keyid="$(keyctl id %user:sdbootutil 2> /dev/null)" || true
+	keyid_int="$(keyctl id %user:sdbootutil-pin 2> /dev/null)" || true
+	if [ -n "$arg_ask_key_pin_or_pw" ]; then
 		read -r -s -p "Recovery PIN: " pin
 		extra=("--recovery-pin=yes")
 	elif [ -n "$PIN" ]; then
 		pin="$PIN"
+		extra=("--recovery-pin=yes")
+	elif [ -n "$keyid_int" ]; then
+		pin="$(keyctl pipe "$keyid_int")"
 		extra=("--recovery-pin=yes")
 	elif [ -n "$keyid" ]; then
 		pin="$(keyctl pipe "$keyid")"
@@ -2180,7 +2184,7 @@ generate_tpm2_predictions_pcrlock()
 		echo "Error creating the policy!"
 	elif echo "$output" | grep -q "recovery PIN"; then
 		local split
-		IFS=":" read -r -a split <<< "$output"
+		IFS=":" read -r -a split <<<"$output"
 		pin="${split[1]}"
 		pin="${pin## }"
 		pin="${pin%% }"
@@ -2194,9 +2198,9 @@ generate_tpm2_predictions_pcrlock()
 		# Add the generated recovery PIN to the kernel
 		# keyring, so that it is available to `sdbootutil
 		# --method=recovery-key`
-		echo -n "$pin" | keyctl padd user recoverykey @u > /dev/null
+		echo -n "$pin" | keyctl padd user sdbootutil-pin @u > /dev/null
 		# Make the key expire after 2 minutes
-		keyctl timeout %user:recoverykey 120
+		keyctl timeout %user:sdbootutil-pin 120
 	fi
 
 	# Publish the assets in the ESP, so can be imported by
@@ -2380,50 +2384,38 @@ generate_rsa_key()
 		store-public-key
 }
 
-unlock_method()
+set_unlock_method()
 {
 	local dev="$1"
-	local enrollment="$2"
-	case "$arg_unlock" in
-		"tpm2")
-			unlock_extra_arg="--unlock-tpm2-device=auto"
-			;;
-		"fido2")
-			unlock_extra_arg="--unlock-fido2-device=auto"
-			;;
-		"password"|"recovery-key")
-			# The password in this case should be set in
-			# the %user:cryptenroll key.  If it has not
-			# been set, systemd will ask it to the user
-			;;
-		"auto"|*)
-			local slots
-			if ! slots=$(systemd-cryptenroll "$dev"); then
-				echo "Unable to get current slots for device $dev"
-				return 1
-			fi
-			# Do not use TPM2 slot for enrolling TPM2
-			if [ "$enrollment" != "tpm2" ] && echo "$slots" | grep -q tpm2; then
-				echo "Unlocking using TPM2"
-				unlock_extra_arg="--unlock-tpm2-device=auto"
-			# Same for FIDO2
-			elif [ "$enrollment" != "fido2" ] && echo "$slots" | grep -q fido2; then
-				echo "Unlocking using FIDO2"
-				unlock_extra_arg="--unlock-fido2-device=auto"
-			fi
-			# Use %user:cryptenroll or let
-			# systemd-cryptenroll ask the passphrase
-			;;
-	esac
+
+	unlock_method=
+
+	# If %user:cryptenroll is set, use it as an automatic
+	# unlocker, if not, try the TPM2 or the FIDO2 key
+	local keyid
+	keyid="$(keyctl id %user:cryptenroll 2> /dev/null)" || true
+	[ -z "$keyid" ] || return 0
+
+	local slots
+	slots=$(systemd-cryptenroll "$dev")
+	# Do not use TPM2 slot for enrolling TPM2
+	if [ "$enrollment" != "tpm2" ] && echo "$slots" | grep -q tpm2; then
+		echo "Unlocking using TPM2"
+		unlock_method="--unlock-tpm2-device=auto"
+		# Same for FIDO2
+	elif [ "$enrollment" != "fido2" ] && echo "$slots" | grep -q fido2; then
+		echo "Unlocking using FIDO2"
+		unlock_method="--unlock-fido2-device=auto"
+	fi
 }
 
 enroll_pcrlock()
 {
 	local dev="$1"
-	local tpm_pin="$2"
+	local tpm2_pin="$2"
 	local extra_args=()
 
-	if [ -z "$tpm_pin" ]; then
+	if [ -z "$tpm2_pin" ]; then
 		echo "Enrolling with TPM2 (pcrlock): $dev"
 	else
 		echo "Enrolling with TPM2+PIN (pcrlock): $dev"
@@ -2434,13 +2426,13 @@ enroll_pcrlock()
 		warn "Could not find /var/lib/systemd/pcrlock.json"
 	fi
 
-	unlock_method "$dev" "tpm2"
-	if [ -n "$unlock_extra_arg" ]; then
-		extra_args+=("$unlock_extra_arg")
+	set_unlock_method "$dev"
+	if [ -n "$unlock_method" ]; then
+		extra_args+=("$unlock_method")
 	fi
 
 	# Note that the PCRs are now not stored in the LUKS2 header
-	if NEWPIN="$tpm_pin" systemd-cryptenroll \
+	if NEWPIN="$tpm2_pin" systemd-cryptenroll \
 		 --wipe-slot=tpm2 \
 		 --tpm2-device=auto \
 		 "${extra_args[@]}" \
@@ -2472,9 +2464,9 @@ enroll_pcroracle()
 		warn "Could not find /etc/systemd/tpm2-pcr-signature.json"
 	fi
 
-	unlock_method "$dev" "tpm2"
-	if [ -n "$unlock_extra_arg" ]; then
-		extra_args+=("$unlock_extra_arg")
+	set_unlock_method "$dev"
+	if [ -n "$unlock_method" ]; then
+		extra_args+=("$unlock_method")
 	fi
 
 	# Note that the PCRs are now not stored in the LUKS2 header
@@ -2500,12 +2492,13 @@ enroll_fido2()
 
 	echo "Enrolling with FIDO2: $dev"
 
-	unlock_method "$dev" "fido2"
-	if [ -n "$unlock_extra_arg" ]; then
-		extra_args+=("$unlock_extra_arg")
+	local extra_args=()
+	set_unlock_method "$dev"
+	if [ -n "$unlock_method" ]; then
+		extra_args+=("$unlock_method")
 	fi
 
-	systemd-cryptenroll --wipe-slot=fido2 --fido2-device=auto "$dev"
+	systemd-cryptenroll --wipe-slot=fido2 --fido2-device=auto "${extra_args[@]}" "$dev"
 }
 
 enroll_password()
@@ -2515,12 +2508,13 @@ enroll_password()
 
 	echo "Enrolling with password: $dev"
 
-	unlock_method "$dev" "password"
-	if [ -n "$unlock_extra_arg" ]; then
-		extra_args+=("$unlock_extra_arg")
+	local extra_args=()
+	set_unlock_method "$dev"
+	if [ -n "$unlock_method" ]; then
+		extra_args+=("$unlock_method")
 	fi
 
-	NEWPASSWORD="$pw" systemd-cryptenroll --wipe-slot=password --password "$dev"
+	NEWPASSWORD="$pw" systemd-cryptenroll --wipe-slot=password --password "${extra_args[@]}" "$dev"
 }
 
 enroll_recovery_key()
@@ -2529,56 +2523,93 @@ enroll_recovery_key()
 
 	echo "Enrolling with recovery key: $dev"
 
-	local extra_args
-	unlock_method "$dev" "recovery-key"
-	if [ -n "$unlock_extra_arg" ]; then
-		extra_args="$unlock_extra_arg"
+	local extra_args=()
+	set_unlock_method "$dev"
+	if [ -n "$unlock_method" ]; then
+		extra_args+=("$unlock_method")
 	fi
 
-	local recovery_key
-	# This function will be called for every device. Let systemd
-	# generate a secure recovery key only the first time and if
-	# there is no recovery pin selected (%user:pin or
-	# %user:cryptenroll).  Unlock the LUKS2 header by using the
-	# TPM2 slot
-	if [ -z "$recovery_key_id" ]; then
-		if recovery_key=$(systemd-cryptenroll --wipe-slot=recovery --recovery-key "${extra_args[@]}" "$dev"); then
-			echo "Recovery key: $recovery_key"
-			if [ -x /usr/bin/qrencode ]; then
-				echo "You can also scan it with your mobile phone:"
-				qrencode -t utf8i "$recovery_key"
-			fi
+	# If no recovery key is provided, systemd-cryptenroll will
+	# generate one
+	local key keyid keyid_int
+	keyid="$(keyctl id %user:sdbootutil 2> /dev/null)" || true
+	keyid_int="$(keyctl id %user:sdbootutil-pin 2> /dev/null)" || true
+	if [ -n "$arg_ask_key_pin_or_pw" ]; then
+		read -r -s -p "Recovery key: " key
+	elif [ -n "$KEY" ]; then
+		key="$KEY"
+	elif [ -n "$keyid_int" ]; then
+		key="$(keyctl pipe "$keyid_int")"
+	elif [ -n "$keyid" ]; then
+		key="$(keyctl pipe "$keyid")"
+	fi
 
-			# Add the generated recovery key to the kernel
-			# keyring, so that it is available to
-			# systemd-cryptenroll
-			read -r recovery_key_id < <(echo -n "$recovery_key" | keyctl padd user cryptenroll @u)
-			keyctl timeout %user:cryptenroll 120
-			# And to --method=tpm2
-			read -r recovery_key_id < <(echo -n "$recovery_key" | keyctl padd user recoverypin @u)
-			keyctl timeout %user:recoverypin 120
-		else
-			echo "Unable to generate a recovery key for $dev"
-		fi
+	local generated_key=
+	# This function will be called for every device.  Let systemd
+	# generate a secure recovery key only the first time if there
+	# is no recovery pin selected (%user:sdbootutil[-pin])
+	if [ -z "$key" ]; then
+		# systemd-cryptenroll will put in stdout the recovery
+		# key, and the rest of the information in stderr
+		key="$(systemd-cryptenroll --wipe-slot=recovery --recovery-key "${extra_args[@]}" "$dev" 2> /dev/null)"
+		generated_key=1
 	else
 		# A recovery key has already been generated, use it
-		# for all the devices
-		recovery_key="$(keyctl pipe "$recovery_key_id")"
-		if ! tmp_rk=$(systemd-cryptenroll --wipe-slot=recovery --recovery-key "${extra_args[@]}" "$dev"); then
-			echo "Unable to access device $dev"
-			return 1
-		fi
-		# systemd-cryptenroll always generates a random
-		# recovery key, but we want $recovery_key Replace it
-		# by using cryptsetup
-		read -r -a split < <(systemd-cryptenroll /dev/vda3 | grep recovery)
+		# for all the devices.  systemd-cryptenroll always
+		# generates a random recovery key, but we want $key.
+		# Replace it by using cryptsetup, so we can still use
+		# %u:cryptenroll in systemd-cryptenroll, and the
+		# temporary recovery key in cryptsetup, to avoid
+		# requesting a password
+		local tmp_key
+		tmp_key="$(systemd-cryptenroll --wipe-slot=recovery --recovery-key "${extra_args[@]}" "$dev" 2> /dev/null)"
+		local split
+		read -r -a split < <(systemd-cryptenroll "$dev" | grep recovery)
 		keyslot="${split[0]}"
 		# cryptsetup can only read the new passphrase from a
 		# keyfile
-		echo -n "$recovery_key" > recovery_key
-		cryptsetup luksChangeKey --key-slot "$keyslot" "$dev" recovery_key <<<"$tmp_rk"
-		rm recovery_key
+		local tmp_key_file
+		tmp_key_file="$(mktemp -t key_file.XXXXXX)"
+		echo -n "$key" > "$tmp_key_file"
+		cryptsetup luksChangeKey --key-slot "$keyslot" --force-password "$dev" "$tmp_key_file" <<<"$tmp_key"
+		shred "$tmp_key_file"
 	fi
+
+	# If we enroll a recovery key first, we can use the generated
+	# key as a recovery PIN later when we enroll a TPM2[+PIN]
+	# (note that the recovery PIN is not the same PIN for the
+	# tpm2+pin method).
+	#
+	# If we enroll the recovery key after the TPM2 enrollment and
+	# we send the recovery PIN via the keyring, then we can make
+	# the recovery key the same as the recovery PIN.  But if the
+	# PIN is missing from the keyring, then we missed the
+	# synchronization and the key and the PIN are different.
+	local slots
+	slots=$(systemd-cryptenroll "$dev")
+	if [ -z "$keyid_int" ] && echo "$slots" | grep -q tpm2; then
+		warn "There is already a recovery PIN for the TPM2"
+		warn "The recovery key and the recovery PIN are now different"
+	fi
+
+	if [ -n "$generated_key" ]; then
+		echo "Recovery key: $key"
+		if [ -x /usr/bin/qrencode ]; then
+			echo "You can also scan it with your mobile phone:"
+			qrencode -t utf8i "$key"
+		fi
+	fi
+
+	# Make sure that the registered recovery key is in the kernel
+	# keyring, so that it is available to systemd-cryptenroll
+	keyid="$(keyctl id %user:cryptenroll 2> /dev/null)" || true
+	if [ -z "$keyid" ] && [ -z "$unlock_method" ]; then
+		echo -n "$key" | keyctl padd user cryptenroll @u > /dev/null
+		keyctl timeout %user:cryptenroll 120
+	fi
+	# ... and to --method=tpm2[+pin] via a private keyring
+	echo -n "$key" | keyctl padd user sdbootutil-pin @u > /dev/null
+	keyctl timeout %user:sdbootutil-pin 120
 }
 
 enroll_device()
@@ -2631,7 +2662,7 @@ enroll()
 	[ -e /usr/bin/systemd-cryptenroll ] || { log_info "systemd-cryptenroll not found"; return 0; }
 	detect_luks2 || { log_info "No LUKS2 devices found"; return 0; }
 
-	have_pcrlock || have_pcr_oracle || err "Nor systemd-pcrlock not pcr-oracle found"
+	have_pcrlock || have_pcr_oracle || err "Not systemd-pcrlock nor pcr-oracle found"
 
 	# Prepare /etc/crypttab and update initrd if required
 	case "$arg_method" in
@@ -2676,44 +2707,37 @@ enroll()
 
 		# During the initial enrollment it is expected that
 		# for systemd-pcrlock the recovery PIN will be
-		# extracted from the %u keyring "cryptenroll" entry
+		# extracted from the %u keyring "sdbootutil[-pin]"
+		# entry
 		generate_tpm2_predictions
 	fi
 
 	# For the PIN (tpm2+pin) or password (password), we can get it
-	# from the %u keyring "pin" or "pw" entry, the PIN or PW
+	# from the %u keyring "sdbootutil" entry, the PIN or PW
 	# environment variable, or introduced by the user
 	local pin_or_pw keyid
 	if [ "$arg_method" = "tpm2+pin" ]; then
-		keyid="$(keyctl id %user:pin 2> /dev/null)" || true
-		if [ -n "$arg_ask_pin_or_pw" ]; then
+		keyid="$(keyctl id %user:sdbootutil 2> /dev/null)" || true
+		if [ -n "$arg_ask_key_pin_or_pw" ]; then
 			read -r -s -p "TPM2 PIN: " pin_or_pw
 		elif [ -n "$PIN" ]; then
 			pin_or_pw="$PIN"
 		elif [ -n "$keyid" ]; then
 			pin_or_pw="$(keyctl pipe "$keyid")"
 		else
-			err "Use %u:pin, PIN or --ask-pin to provide the TPM2 PIN"
+			err "Use %u:sdbootutil, PIN or --ask-pin to provide the TPM2 PIN"
 		fi
 	elif [ "$arg_method" = "password" ]; then
-		local keyid
-		keyid="$(keyctl id %user:pw 2> /dev/null)" || true
-		if [ -n "$arg_ask_pin_or_pw" ]; then
+		keyid="$(keyctl id %user:sdbootutil 2> /dev/null)" || true
+		if [ -n "$arg_ask_key_pin_or_pw" ]; then
 			read -r -s -p "Password: " pin_or_pw
 		elif [ -n "$PW" ]; then
 			pin_or_pw="$PW"
 		elif [ -n "$keyid" ]; then
 			pin_or_pw="$(keyctl pipe "$keyid")"
 		else
-			err "Use %u:pw, PW or --ask-pw to provide the password"
+			err "Use %u:sdbootutil, PW or --ask-pw to provide the password"
 		fi
-	fi
-
-	# When calling --method=tpm2 and a recovery PIN is generated,
-	# it is also set in %user:recoverykey to be used as recovery
-	# key by --method=recovery-key
-	if [ "$arg_method" == "recovery-key" ] && tmp_key_id=$(keyctl id %user:recoverykey); then
-		recovery_key_id="$tmp_key_id"
 	fi
 
 	for dev in "${luks2_devices[@]}"; do
@@ -2844,7 +2868,7 @@ main_menu()
 
 ####### main #######
 
-getopttmp=$(getopt -o hc:v --long help,flicker,verbose,esp-path:,entry-token:,arch:,image:,entry-keys:,no-variables,no-reuse-initrd,no-random-seed,all,sync,portable,only-default,default-snapshot,ask-pin,ask-pw,method:,signed-policy,unlock: -n "${0##*/}" -- "$@")
+getopttmp=$(getopt -o hc:v --long help,flicker,verbose,esp-path:,entry-token:,arch:,image:,entry-keys:,no-variables,no-reuse-initrd,no-random-seed,all,sync,portable,only-default,default-snapshot,ask-key,ask-pin,ask-pw,method:,signed-policy -n "${0##*/}" -- "$@")
 eval set -- "$getopttmp"
 
 while true ; do
@@ -2865,10 +2889,9 @@ while true ; do
 		--portable) arg_portable=1; shift ;;
 		--only-default) arg_only_default=1; shift ;;
 		--default-snapshot) arg_default_snapshot=1; shift ;;
-		--ask-pin|--ask-pw) arg_ask_pin_or_pw=1; shift ;;
+		--ask-key|--ask-pin|--ask-pw) arg_ask_key_pin_or_pw=1; shift ;;
 		--method) arg_method="$2"; shift 2 ;;
 		--signed-policy) arg_signed_policy=1; shift ;;
-		--unlock) arg_unlock="$2"; shift 2 ;;
 		--) shift ; break ;;
 		*) echo "Internal error!" ; exit 1 ;;
 	esac
@@ -2908,7 +2931,7 @@ root_snapshot=""
 if [ -n "$have_snapshots" ]; then
 	if [ -n "$arg_default_snapshot" ]; then
 		[ -s "$snapperfile" ] || update_snapper
-		read -r root_snapshot <<< "$(jq -r '.root[]|select(.default==true)|.number' < "$snapperfile")"
+		read -r root_snapshot <<<"$(jq -r '.root[]|select(.default==true)|.number' < "$snapperfile")"
 	else
 		root_snapshot="${root_subvol#"${subvol_prefix}"/.snapshots/}"
 		root_snapshot="${root_snapshot%/snapshot}"
