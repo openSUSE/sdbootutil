@@ -731,6 +731,8 @@ make_free_space()
 {
 	local snapshot="$1"
 
+	bootctl cleanup
+
 	# Calculate the free space and the required size.  All sizes
 	# are in Kb to avoid big numbers
 	local free_space total_size
