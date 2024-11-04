@@ -2006,6 +2006,15 @@ pcrlock_sdboot()
 
 pcrlock_grub2_bls()
 {
+	# 641-grub2-bls-grubenv.pcrlock is not part of the pcrlock
+	# standards
+	if [ -e "${boot_root}${boot_dst}/grubenv" ]; then
+		pcrlock \
+			lock-raw "${boot_root}${boot_dst}/grubenv" \
+			--pcr=9 \
+			--pcrlock=/var/lib/pcrlock.d/641-grub2-bls-grubenv.pcrlock
+	fi
+
 	# 643-grub2-bls-entry-files.pcrlock is not part of the pcrlock
 	# standards
 	mkdir -p /var/lib/pcrlock.d/643-grub2-bls-entry-files.pcrlock.d
