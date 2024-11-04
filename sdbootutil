@@ -165,6 +165,12 @@ helpandquit()
 		force-update
 			    Update the bootloader in any case
 
+		set-default ID
+			    Set default boot loader entry
+
+		set-timeout SECONDS
+			    Set the menu timeout
+
 		enroll
 			    Enroll a TPM2 (+PIN), a FIDO2 key or a password for
 			    all devices
@@ -1615,20 +1621,105 @@ install_bootloader_interactive()
 	d --aspect 60 --msgbox "Installed into $boot_root" 0 0
 }
 
-set_default_entry()
+loader_conf_set()
+{
+	local key="${1:?}"
+	local value="${2:?}"
+
+	if grep -q "^$key " "${boot_root}/loader/loader.conf"; then
+		sed -i -e "s/^$key .*/$key $value/" "${boot_root}/loader/loader.conf"
+	else
+		echo "$key $value" >> "${boot_root}/loader/loader.conf"
+	fi
+}
+
+grubenv_set()
+{
+	local key="${1:?}"
+	local value="${2:?}"
+
+	[ -f "${boot_root}${boot_dst}/grubenv" ] || touch "${boot_root}${boot_dst}/grubenv"
+
+	grubenv="$(mktemp -t grubenv.XXXXXX)"
+	echo "# GRUB Environment Block" > "$grubenv"
+	while read -r line; do
+		[[ "$line" == '#'* ]] && continue
+		[[ "$line" == "$key"=* ]] && continue
+		echo "$line" >> "$grubenv"
+	done < "${boot_root}${boot_dst}/grubenv"
+	echo "$key=$value" >> "$grubenv"
+
+	local filler
+	filler=$((1024 - $(stat -c %s "$grubenv")))
+	printf '#%.0s' $(seq 1 $filler) >> "$grubenv"
+
+	mv "$grubenv" "${boot_root}${boot_dst}/grubenv"
+}
+
+set_default_sdboot()
 {
 	local id="${1:?}"
-	log_info "setting default entry ${id}"
 	if ! bootctl set-default "$id" > "$tmpfile" 2>&1; then
-		if grep -q "Failed to update EFI variable .*LoaderEntryDefault.* Read-only file system" "$tmpfile"; then
-			if grep -q "^default " "$boot_root/loader/loader.conf"; then
-				sed -i -e "s/^default .*/default $id/" "$boot_root/loader/loader.conf"
-			else
-				echo "default $id" >> "$boot_root/loader/loader.conf"
-			fi
+		if grep -q "Failed to update EFI variable" "$tmpfile"; then
+			loader_conf_set "default" "$id"
 		else
 			err "$(cat "$tmpfile")"
 		fi
+	fi
+}
+
+set_default_grub2_bls()
+{
+	local id="${1:?}"
+	bootctl set-default "$id" 2>&1
+	grubenv_set "default" "$id"
+}
+
+set_default_entry()
+{
+	local id="${1:?}"
+	log_info "setting default entry $id"
+	if is_sdboot; then
+		set_default_sdboot "$id"
+	elif is_grub2_bls; then
+		set_default_grub2_bls "$id"
+	else
+		err "Bootloader not detected"
+	fi
+
+	# This action will require to update the PCR predictions
+	update_predictions=1
+}
+
+set_timeout_sdboot()
+{
+	local timeout="${1:?}"
+	if ! bootctl set-timeout "$timeout" > "$tmpfile" 2>&1; then
+		if grep -q "Failed to update EFI variable" "$tmpfile"; then
+			loader_conf_set "timeout" "$timeout"
+		else
+			err "$(cat "$tmpfile")"
+		fi
+	fi
+}
+
+set_timeout_grub2_bls()
+{
+	local timeout="${1:?}"
+	bootctl set-timeout 2>&1
+	grubenv_set "timeout" "$timeout"
+}
+
+set_timeout()
+{
+	local timeout="${1:?}"
+	log_info "setting timeout $timeout"
+	if is_sdboot; then
+		set_timeout_sdboot "$timeout"
+	elif is_grub2_bls; then
+		set_timeout_grub2_bls "$timeout"
+	else
+		err "Bootloader not detected"
 	fi
 }
 
@@ -2770,7 +2861,7 @@ if [ -z "$SYSTEMD_LOG_LEVEL" ] && [ -n "$verbose" ]; then
 fi
 
 case "$1" in
-	install|needs-update|update|force-update|add-kernel|remove-kernel|set-default-snapshot|add-all-kernels|mkinitrd|remove-all-kernels|is-installed|list-snapshots|list-entries|list-kernels|show-entry|update-entry|update-all-entries|is-bootable|enroll|unenroll|update-predictions|bootloader) ;;
+	install|needs-update|update|force-update|add-kernel|remove-kernel|set-default-snapshot|add-all-kernels|mkinitrd|remove-all-kernels|is-installed|list-snapshots|list-entries|list-kernels|show-entry|update-entry|update-all-entries|is-bootable|set-default|set-timeout|enroll|unenroll|update-predictions|bootloader) ;;
 	kernels|snapshots|entries|"") stty_size; interactive=1 ;;
 	*) err "unknown command $1" ;;
 esac
@@ -2887,6 +2978,10 @@ elif [ "$1" = "update-all-entries" ]; then
 	update_all_entries "${2:-$root_snapshot}"
 elif [ "$1" = "is-bootable" ]; then
 	is_bootable "${2:-$root_snapshot}"
+elif [ "$1" = "set-default" ]; then
+	set_default_entry "$2"
+elif [ "$1" = "set-timeout" ]; then
+	set_timeout "$2"
 elif [ "$1" = "enroll" ]; then
 	enroll
 elif [ "$1" = "unenroll" ]; then
