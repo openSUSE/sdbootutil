@@ -2364,13 +2364,15 @@ remove_crypttab_option()
 	while read -r name device key opts; do
 		[[ "$name" = \#* ]] && continue
 		if [[ "$opts" == *"$option"* ]]; then
+			opts="${opts#$option,}"
 			opts="${opts//,$option}"
 			opts="${opts//$option}"
 			# crypttab has changed so initrd needs to be
 			# updated
 			arg_no_reuse_initrd=1
 		fi
-		echo "$name $device ${key:-none} $opts" >> "$crypttab"
+		[ -n "$opts" ] && echo "$name $device ${key:-none} $opts" >> "$crypttab"
+		[ -z "$opts" ] && echo "$name $device ${key:-none}" >> "$crypttab"
 	done < /etc/crypttab
 
 	mv -Z "$crypttab" /etc/crypttab
