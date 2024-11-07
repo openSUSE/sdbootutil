@@ -133,6 +133,9 @@ helpandquit()
 		list-snapshots
 			   List all snapshots
 
+		list-devices
+			   List encrypted devices that are tracked
+
 		show-entry VERSION [SNAPSHOT]
 			   Show fields for an entry with an specified kernel
 			   version
@@ -1314,6 +1317,15 @@ list_kernels()
 	done
 }
 
+list_devices()
+{
+	detect_tracked_devices
+
+	for dev in "${tracked_devices[@]}"; do
+		echo "$dev"
+	done	
+}
+
 is_bootable()
 {
 	local snapshot="$1"
@@ -2305,8 +2317,8 @@ detect_tracked_devices()
 	while read -r dev fstype uuid; do
 		[ "$fstype" = 'crypto_LUKS' ] || continue
 		cryptsetup isLuks --type luks2 "$dev" || continue
-		grep -q "$dev .*x-sdbootutil.ignore" && continue
-		grep -q "$uuid .*x-sdbootutil.ignore" && continue
+		[ -e /etc/crypttab ] && grep -q "$dev .*x-sdbootutil.ignore" /etc/crypttab && continue
+		[ -e /etc/crypttab ] && grep -q "$uuid .*x-sdbootutil.ignore" /etc/crypttab && continue
 		tracked_devices+=("$dev")
 	done < <(lsblk --noheadings -o PATH,FSTYPE,UUID)
 	have_tracked_devices
@@ -2917,7 +2929,7 @@ if [ -z "$SYSTEMD_LOG_LEVEL" ] && [ -n "$verbose" ]; then
 fi
 
 case "$1" in
-	install|needs-update|update|force-update|add-kernel|remove-kernel|set-default-snapshot|add-all-kernels|mkinitrd|remove-all-kernels|is-installed|list-snapshots|list-entries|list-kernels|show-entry|update-entry|update-all-entries|is-bootable|set-default|set-timeout|enroll|unenroll|update-predictions|bootloader) ;;
+	install|needs-update|update|force-update|add-kernel|remove-kernel|set-default-snapshot|add-all-kernels|mkinitrd|remove-all-kernels|is-installed|list-snapshots|list-entries|list-kernels|list-devices|show-entry|update-entry|update-all-entries|is-bootable|set-default|set-timeout|enroll|unenroll|update-predictions|bootloader) ;;
 	kernels|snapshots|entries|"") stty_size; interactive=1 ;;
 	*) err "unknown command $1" ;;
 esac
@@ -3026,6 +3038,8 @@ elif [ "$1" = "list-entries" ]; then
 	list_entries "${2:-}"
 elif [ "$1" = "list-snapshots" ]; then
 	list_snapshots
+elif [ "$1" = "list-devices" ]; then
+	list_devices
 elif [ "$1" = "show-entry" ]; then
 	show_entry_fields "${3:-$root_snapshot}" "$2"
 elif [ "$1" = "update-entry" ]; then
