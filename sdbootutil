@@ -53,7 +53,7 @@ state_file="/var/lib/misc/transactional-update.state"
 
 update_predictions=
 
-luks2_devices=()
+tracked_devices=()
 
 rollback=()
 
@@ -2290,21 +2290,26 @@ generate_tpm2_predictions()
 	fi
 }
 
-have_luks2()
+have_tracked_devices()
 {
-	[ "${#luks2_devices[@]}" -gt 0 ]
+	[ "${#tracked_devices[@]}" -gt 0 ]
 }
 
-detect_luks2()
+detect_tracked_devices()
 {
-	local dev fstype
-	[ -z "$luks2_devices" ] || return 0
-	while read -r dev fstype; do
+	# A LUKS2 device can be un-tracked (ignored) by sdbootutil if
+	# is present in /etc/crypttab and has the
+	# "x-sdbootutil.ignore" option
+	local dev fstype uuid
+	[ -z "$tracked_devices" ] || return 0
+	while read -r dev fstype uuid; do
 		[ "$fstype" = 'crypto_LUKS' ] || continue
 		cryptsetup isLuks --type luks2 "$dev" || continue
-		luks2_devices+=("$dev")
-	done < <(lsblk --noheadings -o PATH,FSTYPE)
-	have_luks2
+		grep -q "$dev .*x-sdbootutil.ignore" && continue
+		grep -q "$uuid .*x-sdbootutil.ignore" && continue
+		tracked_devices+=("$dev")
+	done < <(lsblk --noheadings -o PATH,FSTYPE,UUID)
+	have_tracked_devices
 }
 
 have_tpm2()
@@ -2327,6 +2332,7 @@ add_crypttab_option()
 	local crypttab
 	crypttab="$(mktemp -t crypttab.XXXXXX)"
 	echo "# File created by sdbootutil.  Comments will be removed" > "$crypttab"
+	echo "# Add the 'x-sdbootutil.ignore' option to un-track a device" >> "$crypttab"
 
 	local name
 	local device
@@ -2664,7 +2670,7 @@ enroll()
 {
 	[ -e /etc/crypttab ] || { log_info "/etc/crypttab not found. No encrypted devices?"; return 0; }
 	[ -e /usr/bin/systemd-cryptenroll ] || { log_info "systemd-cryptenroll not found"; return 0; }
-	detect_luks2 || { log_info "No LUKS2 devices found"; return 0; }
+	detect_tracked_devices || { log_info "No LUKS2 devices found"; return 0; }
 
 	have_pcrlock || have_pcr_oracle || err "Not systemd-pcrlock nor pcr-oracle found"
 
@@ -2744,7 +2750,7 @@ enroll()
 		fi
 	fi
 
-	for dev in "${luks2_devices[@]}"; do
+	for dev in "${tracked_devices[@]}"; do
 		enroll_device "$dev" "$pin_or_pw"
 	done
 }
@@ -2805,7 +2811,7 @@ unenroll()
 {
 	[ -e /etc/crypttab ] || { log_info "/etc/crypttab not found. No encrypted devices?"; return 0; }
 	[ -e /usr/bin/systemd-cryptenroll ] || { log_info "systemd-cryptenroll not found"; return 0; }
-	detect_luks2 || { log_info "No LUKS2 devices found"; return 0; }
+	detect_tracked_devices || { log_info "No LUKS2 devices found"; return 0; }
 
 	# Prepare /etc/crypttab and update initrd if required
 	case "$arg_method" in
@@ -2838,7 +2844,7 @@ unenroll()
 		unenroll_pcr_oracle
 	fi
 
-	for dev in "${luks2_devices[@]}"; do
+	for dev in "${tracked_devices[@]}"; do
 		unenroll_device "$dev"
 	done
 }
