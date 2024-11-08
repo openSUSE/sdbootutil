@@ -237,6 +237,24 @@ warn()
 	fi
 }
 
+is_config_file()
+{
+	[ -e /usr/etc/default/fde-tools ] ||
+		[ -e /etc/default/fde-tools ] ||
+		[ -e /etc/sysconfig/fde-tools ]
+}
+
+load_config_file()
+{
+	# shellcheck disable=SC1091
+	[ ! -e /usr/etc/default/fde-tools ] || . /usr/etc/default/fde-tools
+	# shellcheck disable=SC1091
+	[ ! -e /etc/default/fde-tools ] || . /etc/default/fde-tools
+	# For compatibility
+	# shellcheck disable=SC1091
+	[ ! -e /etc/sysconfig/fde-tools ] || . /etc/sysconfig/fde-tools
+}
+
 is_sdboot()
 {
 	# LOADER_TYPE has preference, but is is not present and
@@ -2294,9 +2312,8 @@ generate_tpm2_predictions()
 	if is_pcr_oracle; then
 		generate_tpm2_predictions_pcr_oracle
 	elif have_pcrlock; then
-		[ -e /etc/sysconfig/fde-tools ] || { log_info "/etc/sysconfig/fde-tools not found"; return 0; }
-		# shellcheck disable=SC1091
-		. /etc/sysconfig/fde-tools
+		is_config_file || { log_info "/etc/sysconfig/fde-tools not found"; return 0; }
+		load_config_file
 
 		generate_tpm2_predictions_pcrlock "${FDE_SEAL_PCR_LIST}"
 	fi
@@ -2705,6 +2722,8 @@ enroll()
 		update_predictions=
 	fi
 
+	load_config_file
+
 	# If systemd-pcrlock is missing then we need to use
 	# pcr-oracle.  For this we need to generate the RSA keys
 	# early.  Also we need to set the PCRs used to assest the
@@ -2718,10 +2737,8 @@ enroll()
 			else
 				err "Bootloader not detected"
 			fi
+			echo "FDE_SEAL_PCR_LIST=${FDE_SEAL_PCR_LIST}" >> /etc/default/fde-tools
 		fi
-		[ -e /etc/sysconfig/fde-tools ] || echo "FDE_SEAL_PCR_LIST=${FDE_SEAL_PCR_LIST}" > /etc/sysconfig/fde-tools
-		# shellcheck disable=SC1091
-		. /etc/sysconfig/fde-tools
 
 		if ! have_pcrlock && have_pcr_oracle; then
 			generate_rsa_key
@@ -2844,14 +2861,7 @@ unenroll()
 		update_predictions=
 	fi
 
-	# If systemd-pcrlock is missing then we need to use
-	# pcr-oracle.  For this we need to generate the RSA keys
-	# early.  Also we need to set the PCRs used to assest the
-	# system status
 	if [ "$arg_method" = "tpm2" ] || [ "$arg_method" = "tpm2+pin" ]; then
-		# Maybe we can remove fde-tools, but it is OK to keep
-		# it, as is a user configuration file
-		# [ ! -e /etc/sysconfig/fde-tools ] || rm /etc/sysconfig/fde-tools
 		unenroll_pcrlock
 		unenroll_pcr_oracle
 	fi
@@ -2976,6 +2986,7 @@ case "$firmware_arch" in
 	*) err "Unsupported architecture $firmware_arch" ;;
 esac
 
+# shellcheck disable=SC1091
 [ -e /etc/sysconfig/bootloader ] && . /etc/sysconfig/bootloader
 
 # XXX: Unify both in /EFI/opensuse?
