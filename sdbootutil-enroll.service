@@ -1,0 +1,16 @@
+[Unit]
+Description=Enroll encrypted root disk 
+DefaultDependencies=false
+
+After=jeos-firstboot.service
+#ConditionPathExists=/var/lib/YaST2/enroll_system
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+KeyringMode=shared
+ExecStart=/usr/bin/sdbootutil-enroll
+ImportCredential=sdbootutil-enroll.*
+
+[Install]
+WantedBy=default.target

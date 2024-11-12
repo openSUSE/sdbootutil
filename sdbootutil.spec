@@ -16,47 +16,43 @@
 #
 
 
-%define nvr %{name}-%{version}-%{release}
-%if 0%{?_build_in_place}
-%define git_version %(git log '-n1' '--date=format:%Y%m%d' '--no-show-signature' "--pretty=format:+git%cd.%h")
-BuildRequires:  git-core
-%else
-# this is required for obs' source validator. It's
-# 20-files-present-and-referenced ignores all conditionals. So the
-# definition of git_version actually happens always.
-%define git_version %{nil}
-%endif
 Name:           sdbootutil
-Version:        1%{git_version}
+Version:        0
 Release:        0
-Summary:        script to install shim with sd-boot
+Summary:        bootctl wrapper for BLS boot loaders
 License:        MIT
-URL:            https://en.opensuse.org/openSUSE:Usr_merge
+URL:            https://github.com/openSUSE/sdbootutil
 Source:         %{name}-%{version}.tar
-Requires:       dracut-pcr-signature
+BuildRequires:  systemd-rpm-macros
+Requires:       (%{name}-snapper if (snapper and btrfsprogs))
+Requires:       (%{name}-tukit if read-only-root-fs)
 Requires:       dialog
+Requires:       dracut-pcr-signature
 Requires:       efibootmgr
 Requires:       jq
 Requires:       pcr-oracle
+Requires:       qrencode
 Requires:       sed
 # While systemd-pcrlock is in experimental
 Requires:       systemd-experimental
+# something needs to require it. Can be us.
+Requires:       tpm2.0-tools
 # While bootctl is in udev
 Requires:       udev
-Requires:       (%{name}-snapper if (snapper and btrfsprogs))
-Requires:       (%{name}-tukit if read-only-root-fs)
-Supplements:    (systemd-boot and shim)
 Supplements:    (grub2-x86_64-efi-bls and shim)
+Supplements:    (systemd-boot and shim)
 ExclusiveArch:  aarch64 ppc64le riscv64 x86_64
+%{?systemd_requires}
 
 %description
-Hook scripts to install shim along with systemd-boot
+bootctl wrapper for BLS boot loaders, like systemd-boot and grub2-bls.
+Implements also the life cycle of a full disk encryption installation,
+based on systemd.
 
 %package snapper
 Summary:        plugin script for snapper
 Requires:       %{name} = %{version}
 Requires:       btrfsprogs
-Requires:       sdbootutil >= %{version}-%{release}
 Requires:       snapper
 
 %description snapper
@@ -65,7 +61,6 @@ Plugin scripts for snapper to handle BLS config files
 %package tukit
 Summary:        plugin script for tukit
 Requires:       %{name} = %{version}
-Requires:       sdbootutil >= %{version}-%{release}
 Requires:       tukit
 
 %description tukit
@@ -73,12 +68,31 @@ Plugin scripts for tukit to handle BLS config files
 
 %package kernel-install
 Summary:        Hook script for kernel-install
-Requires:       sdbootutil >= %{version}-%{release}
-Requires:       /usr/bin/kernel-install
+Requires:       %{name} = %{version}
+# While kernel-install is in udev
+Requires:       udev
 
 %description kernel-install
 Plugin script for kernel-install. Note: installation of this
 package may disable other plugin scripts that are incompatible.
+
+%package enroll
+Summary:        Full disk encryption enrollment
+Requires:       %{name} = %{version}
+
+%description enroll
+Systemd service and script for full disk encryption enrollment.
+
+%package jeos-firstboot-enroll
+Summary:        JEOS module for full disk encryption enrollment
+Requires:       %{name} = %{version}
+Requires:       %{name}-enroll = %{version}
+Requires:       jeos-firstboot
+
+%description jeos-firstboot-enroll
+JEOS module for full disk encryption enrollment. The module
+present the different options and delegate into sdbootutil-enroll
+service the effective enrollment.
 
 %prep
 %setup -q
@@ -86,38 +100,35 @@ package may disable other plugin scripts that are incompatible.
 %build
 
 %install
-install -D -m 755 sdbootutil %{buildroot}%{_bindir}/sdbootutil
+install -D -m 755 %{name} %{buildroot}%{_bindir}/%{name}
 
-# services
-for i in sdbootutil-update-predictions.service; do
-	install -D -m 644 "$i" %{buildroot}%{_unitdir}/"$i"
-done
+# Update prediction service
+install -D -m 644 %{name}-update-predictions.service \
+	%{buildroot}%{_unitdir}/%{name}-update-predictions.service
 
-# snapper
-install -d -m755 %{buildroot}%{_prefix}/lib/snapper/plugins
-for i in 10-sdbootutil.snapper; do
-  install -m 755 $i %{buildroot}%{_prefix}/lib/snapper/plugins/$i
-done
+# Enrollment service
+install -m 755 %{name}-enroll %{buildroot}%{_bindir}/%{name}-enroll
+install -D -m 644 %{name}-enroll.service %{buildroot}/%{_unitdir}/%{name}-enroll.service
 
-# tukit
-install -d -m755 %{buildroot}%{_prefix}/lib/tukit/plugins
-for i in 10-sdbootutil.tukit; do
-  install -m 755 $i %{buildroot}%{_prefix}/lib/tukit/plugins/$i
-done
+# Jeos module
+install -D -m 644 jeos-firstboot-enroll-override.conf \
+	%{buildroot}%{_prefix}/lib/systemd/system/jeos-firstboot.service.d/jeos-firstboot-enroll-override.conf
+install -D -m 644 jeos-firstboot-enroll %{buildroot}%{_datadir}/jeos-firstboot/modules/enroll
+
+# Snapper
+install -D -m 755 10-%{name}.snapper %{buildroot}%{_prefix}/lib/snapper/plugins/10-%{name}.snapper
+
+# Tukit
+install -D -m 755 10-%{name}.tukit %{buildroot}%{_prefix}/lib/tukit/plugins/10-%{name}.tukit
 
 # kernel-install
-install -d -m755 %{buildroot}%{_prefix}/lib/kernel/install.d
-for i in 50-sdbootutil.install; do
-  install -m 755 $i %{buildroot}%{_prefix}/lib/kernel/install.d/$i
-done
+install -D -m 755 50-%{name}.install %{buildroot}%{_prefix}/lib/kernel/install.d/50-%{name}.install
 
 # tmpfiles
-install -d -m755 %{buildroot}%{_prefix}/lib/tmpfiles.d
-for i in kernel-install-sdbootutil.conf; do
-  install -m 755 $i %{buildroot}%{_prefix}/lib/tmpfiles.d/$i
-done
+install -D -m 755 kernel-install-%{name}.conf \
+	%{buildroot}%{_prefix}/lib/tmpfiles.d/kernel-install-%{name}.conf
 
-%transfiletriggerin -- /usr/lib/systemd/boot/efi /usr/share/efi/%_build_arch
+%transfiletriggerin -- %{_prefix}/lib/systemd/boot/efi %{_datadir}/efi/%{_build_arch}
 cat > /dev/null || :
 [ "$YAST_IS_RUNNING" != 'instsys' ] || exit 0
 [ -e /sys/firmware/efi/efivars ] || exit 0
@@ -125,13 +136,37 @@ cat > /dev/null || :
 [ -z "$VERBOSE_FILETRIGGERS" ] || echo "%{name}-%{version}-%{release}: updating bootloader"
 sdbootutil update
 
+%preun
+%service_del_preun %{name}-update-predictions.service
+
+%postun
+%service_del_postun %{name}-update-predictions.service
+
+%pre
+%service_add_pre %{name}-update-predictions.service
+
+%post
+%service_add_post %{name}-update-predictions.service
+
+%preun enroll
+%service_del_preun %{name}-enroll.service
+
+%postun enroll
+%service_del_postun %{name}-enroll.service
+
+%pre enroll
+%service_add_pre %{name}-enroll.service
+
+%post enroll
+%service_add_post %{name}-enroll.service
+
 %posttrans kernel-install
-%tmpfiles_create kernel-install-sdbootutil.conf
+%tmpfiles_create kernel-install-%{name}.conf
 
 %files
 %license LICENSE
-%{_bindir}/sdbootutil
-%{_unitdir}/sdbootutil-update-predictions.service
+%{_bindir}/%{name}
+%{_unitdir}/%{name}-update-predictions.service
 
 %files snapper
 %dir %{_prefix}/lib/snapper
@@ -147,6 +182,17 @@ sdbootutil update
 %dir %{_prefix}/lib/kernel
 %dir %{_prefix}/lib/kernel/install.d
 %{_prefix}/lib/kernel/install.d/*
-%{_prefix}/lib/tmpfiles.d/kernel-install-sdbootutil.conf
+%{_prefix}/lib/tmpfiles.d/kernel-install-%{name}.conf
+
+%files enroll
+%{_bindir}/%{name}-enroll
+%{_unitdir}/%{name}-enroll.service
+
+%files jeos-firstboot-enroll
+%dir %{_datadir}/jeos-firstboot
+%dir %{_datadir}/jeos-firstboot/modules
+%{_datadir}/jeos-firstboot/modules/enroll
+%dir %{_unitdir}/jeos-firstboot.service.d
+%{_unitdir}/jeos-firstboot.service.d/jeos-firstboot-enroll-override.conf
 
 %changelog

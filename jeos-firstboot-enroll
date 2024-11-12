@@ -1,0 +1,182 @@
+#!/bin/bash
+
+crypt_keyid=""
+crypt_pw=""
+crypt_tpm_pin=""
+# for pin
+cryptenroll_tpm_extra_args=()
+
+with_fido2=
+with_tpm2=
+with_recovery_key=
+
+luks2_devices=()
+
+
+have_luks2() {
+	lsblk --noheadings -o PATH,FSTYPE | grep -q crypto_LUKS
+}
+
+# exit early without defining any helper functions if there are no luks devices
+have_luks2 || return 0
+
+enroll_systemd_firstboot() {
+	[ -e /usr/bin/systemd-cryptenroll ] || return 0
+	crypt_keyid="$(keyctl id %user:cryptenroll 2> /dev/null)" || return 0
+	[ -n "$crypt_keyid" ] || return 0
+
+	welcome_screen_with_console_switch
+
+	local has_fido2=${JEOS_HAS_FIDO2:-}
+	local has_tpm2=
+
+	[ -z "$(systemd-cryptenroll --fido2-device=list 2>/dev/null)" ] || has_fido2=1
+	[ ! -e '/sys/class/tpm/tpm0' ] || has_tpm2=lock
+
+	while true; do
+		local list=()
+
+		if [ -z "$with_recovery_key" ]; then
+			list+=('recovery-key' $'Enroll recovery key')
+		fi
+		if [ -z "$with_fido2" ] && [ -z "$with_tpm2" ] && [ -n "$has_fido2" ]; then
+			list+=('FIDO2' $'Enroll FIDO2 token')
+		fi
+		if [ -z "$with_tpm2" ] && [ -z "$with_fido2" ] && [ -n "$has_tpm2" ]; then
+			list+=('TPM2' $'Enroll TPM2 based token' 'TPM2_interactive' 'Enroll TPM2 based token with PIN')
+		fi
+		if [ -z "$crypt_pw" ]; then
+			if [ -n "$password" ]; then
+				list+=('root' $'Enroll root password')
+			fi
+			list+=('password' $'Enroll extra password')
+		fi
+		[ -n "$list" ] || break
+
+		list+=('done' $'Done')
+
+		d --no-tags --default-item "${list[0]}" --menu $"Disk Encryption" 0 0 "$(menuheight ${#list[@]})" "${list[@]}"
+		if [ "$result" = 'done' ]; then
+			if [ -z "$crypt_pw" ] && [ -z "$with_fido2" ] && [ -z "$with_tpm2" ] && [ -z "$is_jeos_config" ]; then
+				d_styled --yesno $"Neither password, TPM2 nor FIDO2 entrolled. Unlocking disk will only work with recovery key. Is this intended?" 0 0 || continue
+			fi
+			break;
+		elif [ "$result" = 'FIDO2' ]; then
+			with_fido2=1
+		elif [ "$result" = 'TPM2' ]; then
+			with_tpm2="$has_tpm2"
+		elif [ "$result" = 'TPM2_interactive' ]; then
+			while true; do
+				d --insecure --passwordbox  $"Enter new PIN (actually just passphrase)" 0 0
+				if [ -z "$result" ]; then
+					d_styled --yesno $"Retry?" 0 0 || break
+					continue
+				fi
+				crypt_tpm_pin="$result"
+				d --insecure --passwordbox  $"Confirm PIN" 0 0
+				[ "$crypt_tpm_pin" != "$result" ] || { with_tpm2="$has_tpm2"; break; }
+				d --msgbox $"PINs don't match. Try again" 0 0
+			done
+		elif [ "$result" = 'recovery-key' ]; then
+			with_recovery_key=1
+		elif [ "$result" = 'root' ]; then
+			crypt_pw="$password"
+		elif [ "$result" = 'password' ]; then
+			while true; do
+				d --insecure --passwordbox  $"Enter encryption password" 0 0
+				if [ -z "$result" ]; then
+					d --aspect 29 --msgbox $"No encryption password set. You can add more keys manually using systemd-cryptenroll." 0 0
+					break
+				fi
+				crypt_pw="$result"
+				d --insecure --passwordbox  $"Confirm encryption password" 0 0
+				[ "$crypt_pw" != "$result" ] || break
+				d --msgbox $"Passwords don't match. Try again" 0 0
+			done
+		else
+			d --msgbox "Error: $result" 0 0
+		fi
+	done
+
+	return 0
+}
+
+write_issue_file() {
+	local recovery_key="$1"
+
+	if [ -e '/usr/sbin/issue-generator' ] && [ -z "$dry" ]; then
+		mkdir -p "/run/issue.d/"
+		issuefile="/run/issue.d/90-diskencrypt.conf"
+	else
+		issuefile='/dev/stdout'
+	fi
+
+	echo "$recovery_key" > "$issuefile"
+	run issue-generator
+}
+
+enroll_post() {
+	[ -e /usr/bin/systemd-cryptenroll ] || return 0
+	[ -n "$crypt_keyid" ] || return 0
+
+	do_enroll
+}
+
+do_enroll() {
+	[ -z "$with_recovery_key" ] || {
+		# Note that if --no-reuse-initrd is used, then a new
+		# initrd will be created and will break the
+		# measurement of the initial components if later the
+		# TPM2 enrollment is called
+		extra=
+		if [ -z "$with_tpm2" ] && [ -z "$with_fido2" ]; then
+			extra="--no-reuse-initrd"
+		fi
+		local recovery_key
+		recovery_key="$(run sdbootutil enroll --method=recovery-key "$extra")"
+		write_issue_file "$recovery_key"
+	}
+
+	[ -z "$crypt_pw" ] || {
+		# Note that if --no-reuse-initrd is used, then a new
+		# initrd will be created and will break the
+		# measurement of the initial components if later the
+		# TPM2 enrollment is called
+		extra=
+		if [ -z "$with_tpm2" ] && [ -z "$with_fido2" ]; then
+			extra="--no-reuse-initrd"
+		fi
+		PW="$crypt_pw" run sdbootutil enroll --method=password "$extra"
+	}
+
+	if [ -n "$with_tpm2" ]; then
+		if [ -n "$crypt_tpm_pin" ]; then
+			SDB_ADD_INITIAL_COMPONENT=1 PIN="$crypt_tpm_pin" run sdbootutil enroll --method=tpm2+pin
+		else
+			SDB_ADD_INITIAL_COMPONENT=1 run sdbootutil enroll --method=tpm2
+		fi
+	fi
+
+	[ -z "$with_fido2" ] || run sdbootutil enroll --method=fido2
+
+	# Clean the enrollment key.  disk-encryption-tool creates it
+	# in the keyslot 0 with the name "enrollment-key", that is
+	# showed by systemd-cryptenroll as "other"
+	local slot
+	while read -r dev; do
+		slots=$(systemd-cryptenroll "$dev")
+		if grep -q "other" <<<"$slots"; then
+			systemd-cryptenroll --wipe-slot=0 "$dev"
+		fi
+	done < <(sdbootutil list-devices)
+}
+
+enroll_jeos_config() {
+	is_jeos_config=1
+	d --insecure --passwordbox  $"Enter decryption password" 0 0
+	[ -n "$result" ] || return 0
+	echo -n "$result" | keyctl padd user cryptenroll @u
+
+	enroll_systemd_firstboot
+	do_enroll
+}
