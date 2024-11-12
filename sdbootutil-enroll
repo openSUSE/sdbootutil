@@ -1,0 +1,111 @@
+#!/bin/bash
+
+get_credential() {
+	local var="${1:?}"
+	local name="${2:?}"
+	local keyid
+	keyid="$(keyctl id %user:"$name" 2> /dev/null)" || true
+
+	if [ -e "$CREDENTIALS_DIRECTORY/$name" ]; then
+		read -r "$var" < "$CREDENTIALS_DIRECTORY/$name"
+	elif [ -n "$keyid" ]; then
+		read -r "$var" <<<"$(keyctl pipe "$keyid")"
+	fi
+}
+
+have_luks2() {
+	lsblk --noheadings -o PATH,FSTYPE | grep -q crypto_LUKS
+}
+
+write_issue_file()
+{
+	local recovery_key="$1"
+
+	if [ -e '/usr/sbin/issue-generator' ]; then
+		mkdir -p "/run/issue.d/"
+		issuefile="/run/issue.d/90-diskencrypt.conf"
+	else
+		issuefile='/dev/stdout'
+	fi
+
+	echo "$recovery_key" > "$issuefile"
+	issue-generator
+}
+
+
+[ ! -e "/var/lib/YaST2/reconfig_system" ] || exit 0
+have_luks2 || exit 0
+
+# disk-encryption-tool-dracut uses "cryptenroll" for the keyring
+# parameter, if we use a different one we need to move it back to
+# "cryptenroll", to do the enrollment via sdbootutil without
+# requesting a password
+enroll_keyid="$(keyctl id %user:cryptenroll 2> /dev/null)" || exit 0
+[ -n "$enroll_keyid" ] || {
+	echo "Enrollment key not registered in the keyring. Aborting" > /dev/stderr
+	exit 1
+}
+
+# Proceed with the enrollment
+rk=
+get_credential rk "sdbootutil-enroll.rk"
+
+pw=
+get_credential pw "sdbootutil-enroll.pw"
+
+tpm2_pin=
+get_credential tpm2_pin "sdbootutil-enroll.tpm2+pin"
+
+tpm2=
+get_credential tpm2 "sdbootutil-enroll.tpm2"
+
+fido2=
+get_credential fido2 "sdbootutil-enroll.fido2"
+
+[ -z "$rk" ] || {
+	echo "Enrolling recovery key"
+	# Note that if --no-reuse-initrd is used, then a new initrd
+	# will be created and will break the measurement of the
+	# initial components if later the TPM2 enrollment is called
+	extra=
+	if [ -z "$tpm2_pin" ] && [ -z "$tpm2" ] && [ -z "$fido2" ]; then
+		extra="--no-reuse-initrd"
+	fi
+	recovery_key="$(sdbootutil enroll --method=recovery-key "$extra")"
+	write_issue_file "$recovery_key"
+}
+
+[ -z "$pw" ] || {
+	echo "Enrolling password"
+	# Note that if --no-reuse-initrd is used, then a new initrd
+	# will be created and will break the measurement of the
+	# initial components if later the TPM2 enrollment is called
+	extra=
+	if [ -z "$tpm2_pin" ] && [ -z "$tpm2" ] && [ -z "$fido2" ]; then
+		extra="--no-reuse-initrd"
+	fi
+	PW="$pw" sdbootutil enroll --method=password "$extra"
+}
+
+if [ -n "$tpm2_pin" ]; then
+	echo "Enrolling TPM2 with PIN"
+	SDB_ADD_INITIAL_COMPONENT=1 PIN="$crypt_tpm_pin" sdbootutil enroll --method=tpm2+pin
+elif [ -n "$tpm2" ]; then
+	echo "Enrolling TPM2"
+	SDB_ADD_INITIAL_COMPONENT=1 sdbootutil enroll --method=tpm2
+fi
+
+[ -z "$fido2" ] || {
+	echo "Enrolling a FIDO2 key"
+	sdbootutil enroll --method=fido2
+}
+
+# Clean the enrollment key.  disk-encryption-tool creates it in the
+# keyslot 0 with the name "enrollment-key", that is showed by
+# systemd-cryptenroll as "other"
+while read -r dev; do
+	slots=$(systemd-cryptenroll "$dev")
+	if grep -q "other" <<<"$slots"; then
+		systemd-cryptenroll --wipe-slot=0 "$dev"
+	fi
+done < <(sdbootutil list-devices)
