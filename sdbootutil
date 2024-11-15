@@ -1711,7 +1711,7 @@ set_default_sdboot()
 set_default_grub2_bls()
 {
 	local id="${1:?}"
-	bootctl set-default "$id" 2>&1
+	set_default_sdboot "$id"
 	grubenv_set "default" "$id"
 }
 
@@ -1746,7 +1746,7 @@ set_timeout_sdboot()
 set_timeout_grub2_bls()
 {
 	local timeout="${1:?}"
-	bootctl set-timeout "$timeout" 2>&1
+	set_timeout_sdboot "$timeout"
 	grubenv_set "timeout" "$timeout"
 }
 
