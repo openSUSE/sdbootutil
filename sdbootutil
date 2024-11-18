@@ -1701,7 +1701,7 @@ set_default_sdboot()
 	local id="${1:?}"
 	if ! bootctl set-default "$id" > "$tmpfile" 2>&1; then
 		if grep -q "Failed to update EFI variable" "$tmpfile" ||
-				grep -q "Not booted with a supported boot loader"; then
+				grep -q "Not booted with a supported boot loader" "$tmpfile"; then
 			loader_conf_set "default" "$id"
 		else
 			err "$(cat "$tmpfile")"
@@ -1737,7 +1737,7 @@ set_timeout_sdboot()
 	local timeout="${1:?}"
 	if ! bootctl set-timeout "$timeout" > "$tmpfile" 2>&1; then
 		if grep -q "Failed to update EFI variable" "$tmpfile" ||
-				grep -q "Not booted with a supported boot loader"; then
+				grep -q "Not booted with a supported boot loader" "$tmpfile"; then
 			loader_conf_set "timeout" "$timeout"
 		else
 			err "$(cat "$tmpfile")"
