@@ -169,8 +169,14 @@ helpandquit()
 		set-default ID
 			    Set default boot loader entry
 
+		get-default
+			    Get default boot loader entry
+
 		set-timeout SECONDS
 			    Set the menu timeout
+
+		get-timeout SECONDS
+			    Get the menu timeout in seconds
 
 		enroll
 			    Enroll a TPM2 (+PIN), a FIDO2 key or a password for
@@ -1661,6 +1667,15 @@ install_bootloader_interactive()
 	d --aspect 60 --msgbox "Installed into $boot_root" 0 0
 }
 
+bli_efi_var_get()
+{
+	# BLI uses this vendor UUID
+	local efi_var="/sys/firmware/efi/efivars/${1:?}-4a67b082-0a4c-41cf-b6c7-440b29bb8c4f"
+	if [ -e "$efi_var" ]; then
+		echo "$(dd "if=$efi_var" bs=2 skip=2 conv=lcase status=none | tr -d '\0')"
+	fi
+}
+
 loader_conf_set()
 {
 	local key="${1:?}"
@@ -1670,6 +1685,15 @@ loader_conf_set()
 		sed -i -e "s/^$key .*/$key $value/" "${boot_root}/loader/loader.conf"
 	else
 		echo "$key $value" >> "${boot_root}/loader/loader.conf"
+	fi
+}
+
+loader_conf_get()
+{
+	local key="${1:?}"
+	if [ -e "${boot_root}/loader/loader.conf" ]; then
+		IFS=' ' read -r key value < <(grep "^$key " "${boot_root}/loader/loader.conf")
+		echo -n "$value"
 	fi
 }
 
@@ -1694,6 +1718,16 @@ grubenv_set()
 	printf '#%.0s' $(seq 1 $filler) >> "$grubenv"
 
 	mv "$grubenv" "${boot_root}${boot_dst}/grubenv"
+}
+
+grubenv_get()
+{
+	local key="${1:?}"
+
+	if [ -e "${boot_root}${boot_dst}/grubenv" ]; then
+		IFS='=' read -r key value < <(grep "^$key=" "${boot_root}${boot_dst}/grubenv")
+		echo -n "$value"
+	fi
 }
 
 set_default_sdboot()
@@ -1732,6 +1766,32 @@ set_default_entry()
 	update_predictions=1
 }
 
+get_default_sdboot()
+{
+	local val
+	val="$(bli_efi_var_get "LoaderEntryDefault")"
+	[ -n "$val" ] || val="$(loader_conf_get "default")"
+	echo "$val"
+}
+
+get_default_grub2_bls()
+{
+	local val
+	val="$(grubenv_get "default")"
+	echo "$val"
+}
+
+get_default_entry()
+{
+	if is_sdboot; then
+		get_default_sdboot
+	elif is_grub2_bls; then
+		get_default_grub2_bls
+	else
+		err "Bootloader not detected"
+	fi
+}
+
 set_timeout_sdboot()
 {
 	local timeout="${1:?}"
@@ -1760,6 +1820,35 @@ set_timeout()
 		set_timeout_sdboot "$timeout"
 	elif is_grub2_bls; then
 		set_timeout_grub2_bls "$timeout"
+	else
+		err "Bootloader not detected"
+	fi
+
+	# This action will require to update the PCR predictions
+	update_predictions=1
+}
+
+get_timeout_sdboot()
+{
+	local val
+	val="$(bli_efi_var_get "LoaderConfigTimeout")"
+	[ -n "$val" ] || val="$(loader_conf_get "timeout")"
+	echo "$val"
+}
+
+get_timeout_grub2_bls()
+{
+	local val
+	val="$(grubenv_get "timeout")"
+	echo "$val"
+}
+
+get_timeout()
+{
+	if is_sdboot; then
+		get_timeout_sdboot
+	elif is_grub2_bls; then
+		get_timeout_grub2_bls
 	else
 		err "Bootloader not detected"
 	fi
@@ -2941,7 +3030,7 @@ if [ -z "$SYSTEMD_LOG_LEVEL" ] && [ -n "$verbose" ]; then
 fi
 
 case "$1" in
-	install|needs-update|update|force-update|add-kernel|remove-kernel|set-default-snapshot|add-all-kernels|mkinitrd|remove-all-kernels|is-installed|list-snapshots|list-entries|list-kernels|list-devices|show-entry|update-entry|update-all-entries|is-bootable|set-default|set-timeout|enroll|unenroll|update-predictions|bootloader) ;;
+	install|needs-update|update|force-update|add-kernel|remove-kernel|set-default-snapshot|add-all-kernels|mkinitrd|remove-all-kernels|is-installed|list-snapshots|list-entries|list-kernels|list-devices|show-entry|update-entry|update-all-entries|is-bootable|set-default|get-default|set-timeout|get-timeout|enroll|unenroll|update-predictions|bootloader) ;;
 	kernels|snapshots|entries|"") stty_size; interactive=1 ;;
 	*) err "unknown command $1" ;;
 esac
@@ -3063,8 +3152,12 @@ elif [ "$1" = "is-bootable" ]; then
 	is_bootable "${2:-$root_snapshot}"
 elif [ "$1" = "set-default" ]; then
 	set_default_entry "$2"
+elif [ "$1" = "get-default" ]; then
+	get_default_entry "$2"
 elif [ "$1" = "set-timeout" ]; then
 	set_timeout "$2"
+elif [ "$1" = "get-timeout" ]; then
+	get_timeout "$2"
 elif [ "$1" = "enroll" ]; then
 	enroll
 elif [ "$1" = "unenroll" ]; then
