@@ -6,7 +6,7 @@ get_credential() {
 	local keyid
 	keyid="$(keyctl id %user:"$name" 2> /dev/null)" || true
 
-	if [ -n "$CREDENTIALS_DIRECTORY" -a -e "$CREDENTIALS_DIRECTORY/$name" ]; then
+	if [ -n "$CREDENTIALS_DIRECTORY" ] && [ -e "$CREDENTIALS_DIRECTORY/$name" ]; then
 		read -r "$var" < "$CREDENTIALS_DIRECTORY/$name"
 	elif [ -n "$keyid" ]; then
 		read -r "$var" <<<"$(keyctl pipe "$keyid")"
