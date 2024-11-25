@@ -6,7 +6,7 @@ get_credential() {
 	local keyid
 	keyid="$(keyctl id %user:"$name" 2> /dev/null)" || true
 
-	if [ -e "$CREDENTIALS_DIRECTORY/$name" ]; then
+	if [ -n "$CREDENTIALS_DIRECTORY" -a -e "$CREDENTIALS_DIRECTORY/$name" ]; then
 		read -r "$var" < "$CREDENTIALS_DIRECTORY/$name"
 	elif [ -n "$keyid" ]; then
 		read -r "$var" <<<"$(keyctl pipe "$keyid")"
@@ -14,7 +14,7 @@ get_credential() {
 }
 
 have_luks2() {
-	lsblk --noheadings -o PATH,FSTYPE | grep -q crypto_LUKS
+	lsblk --noheadings -o FSTYPE | grep -q crypto_LUKS
 }
 
 write_issue_file()
