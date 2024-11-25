@@ -14,7 +14,7 @@ luks2_devices=()
 
 
 have_luks2() {
-	lsblk --noheadings -o PATH,FSTYPE | grep -q crypto_LUKS
+	lsblk --noheadings -o FSTYPE | grep -q crypto_LUKS
 }
 
 # exit early without defining any helper functions if there are no luks devices
