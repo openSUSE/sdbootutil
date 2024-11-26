@@ -175,7 +175,7 @@ helpandquit()
 		set-timeout SECONDS
 			    Set the menu timeout
 
-		get-timeout SECONDS
+		get-timeout
 			    Get the menu timeout in seconds
 
 		enroll
