@@ -2127,10 +2127,12 @@ pcrlock_sdboot()
 	# required because disk-encryption-tool generates a new initrd
 	# during the first boot, making the event log impossible to
 	# align for systemd-pcrlock
+	n=0
 	if [ "$SDB_ADD_INITIAL_COMPONENT" = "1" ]; then
 		while read -r cmdline; do
 			read -r initrd
-			pcrlock_sdboot_cmdline_initrd "initrd=$cmdline" "${tmpdir}$initrd" "0"
+			n=$((n+1))
+			pcrlock_sdboot_cmdline_initrd "initrd=$cmdline" "${tmpdir}$initrd" "0-$n"
 		done < <(jq --raw-output '.[] | ([(.initrd[0] | sub("/"; "\\"; "g")), .options] | join(" ")), .initrd[0]' "$initialentryfile")
 	fi
 }
@@ -2179,13 +2181,15 @@ pcrlock_grub2_bls()
 	# because disk-encryption-tool generates a new initrd during
 	# the first boot, making the event log impossible to align for
 	# systemd-pcrlock
+	n=0
 	if [ "$SDB_ADD_INITIAL_COMPONENT" = "1" ]; then
 		while read -r options; do
 			read -r kernel
 			read -r initrd
+			n=$((n+1))
 			pcrlock_grub2_bls_cmdline "linux ${grub2_bls_drive}$kernel $options" \
 						  "${grub2_bls_drive}$kernel $options" \
-						  "initrd ${grub2_bls_drive}$initrd" "0"
+						  "initrd ${grub2_bls_drive}$initrd" "0-$n"
 		done < <(jq --raw-output '.[] | .options, .linux, .initrd[0]' "$initialentryfile")
 	fi
 
@@ -2200,10 +2204,12 @@ pcrlock_grub2_bls()
 
 	# Generate variation for 710-grub2-bls-kernel-initrd-entry for the
 	# same reason than before.
+	n=0
 	if [ "$SDB_ADD_INITIAL_COMPONENT" = "1" ]; then
 		while read -r kernel; do
 			read -r initrd
-			pcrlock_grub2_bls_kernel_initrd "$tmpdir$kernel" "$tmpdir$initrd" "0"
+			n=$((n+1))
+			pcrlock_grub2_bls_kernel_initrd "$tmpdir$kernel" "$tmpdir$initrd" "0-$n"
 		done < <(jq --raw-output '.[] | .linux, .initrd[0]' "$initialentryfile")
 	fi
 }
