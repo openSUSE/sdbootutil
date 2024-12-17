@@ -744,7 +744,7 @@ pending_initrds_size()
 
 boot_free_space()
 {
-	echo $(($(findmnt -n -b -o AVAIL --target "$boot_root") / 1024))
+	echo $(($(findmnt -n -b -o AVAIL --target "$boot_root" | head -n 1) / 1024))
 }
 
 select_entries_for_free_space()
