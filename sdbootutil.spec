@@ -128,7 +128,7 @@ install -D -m 755 50-%{name}.install %{buildroot}%{_prefix}/lib/kernel/install.d
 install -D -m 755 kernel-install-%{name}.conf \
 	%{buildroot}%{_prefix}/lib/tmpfiles.d/kernel-install-%{name}.conf
 
-%transfiletriggerin -- %{_prefix}/lib/systemd/boot/efi %{_datadir}/efi/%{_build_arch}
+%transfiletriggerin -- %{_prefix}/lib/systemd/boot/efi %{_datadir}/grub2/%{_build_arch}-efi %{_datadir}/efi/%{_build_arch}
 cat > /dev/null || :
 [ "$YAST_IS_RUNNING" != 'instsys' ] || exit 0
 [ -e /sys/firmware/efi/efivars ] || exit 0
