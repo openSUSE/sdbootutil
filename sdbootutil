@@ -2805,6 +2805,14 @@ bootloader_name()
 
 ####### main #######
 
+if [ "$1" = "_print_bash_completion_data" ]; then
+	declare -f set_image_name
+	declare -f eval_bootctl
+	declare -f define_commands
+	declare -f define_options
+	exit 0
+fi
+
 define_options
 getopt_tmp=$(getopt -o hc:v --long "$opts_long" -n "${0##*/}" -- "$@")
 eval set -- "$getopt_tmp"
