@@ -2756,6 +2756,42 @@ define_commands() {
 	)
 }
 
+define_options() {
+	declare -gA options_with_arg=(
+		[help]=""
+		[verbose]=""
+		[esp-path]="_path"
+		[entry-token]="_path"
+		[arch]="_arch_name"
+		[image]="_image_name"
+		[entry-keys]="_find_kernels"
+		[no-variables]=""
+		[no-reuse-initrd]=""
+		[no-random-seed]=""
+		[all]=""
+		[sync]=""
+		[portable]=""
+		[removable]=""
+		[only-default]=""
+		[default-snapshot]=""
+		[ask-key]=""
+		[ask-pin]=""
+		[ask-pw]=""
+		[method]="_method"
+		[signed-policy]=""
+		[pcr]="_none"
+	)
+	opts_long=""
+	for opt in "${!options_with_arg[@]}"; do
+		if [ "${options_with_arg[$opt]}" ]; then
+			opts_long+="${opt}:,"
+		else
+			opts_long+="${opt},"
+		fi
+	done
+	opts_long="${opts_long%,}"
+}
+
 bootloader_name()
 {
 	if is_sdboot "${1-$root_snapshot}"; then
@@ -2769,8 +2805,9 @@ bootloader_name()
 
 ####### main #######
 
-getopttmp=$(getopt -o hc:v --long help,verbose,esp-path:,entry-token:,arch:,image:,entry-keys:,no-variables,no-reuse-initrd,no-random-seed,all,sync,portable,removable,only-default,default-snapshot,ask-key,ask-pin,ask-pw,method:,signed-policy,pcr: -n "${0##*/}" -- "$@")
-eval set -- "$getopttmp"
+define_options
+getopt_tmp=$(getopt -o hc:v --long "$opts_long" -n "${0##*/}" -- "$@")
+eval set -- "$getopt_tmp"
 
 while true ; do
 	case "$1" in
