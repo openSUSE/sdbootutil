@@ -92,7 +92,7 @@ helpandquit()
 		  --no-variables	Do not update UEFI variables
 		  --no-reuse-initrd	Always regenerate initrd
 		  --sync		Synchronize (update, downgrade) the bootloader
-		  --portable		Handle bootloader on portable devices
+		  --portable		Handle bootloader on portable devices (also --removable possible)
 		  --only-default	Only list the default entry
 		  --default-snapshot	[SNAPSHOT] refers to the default snapshot
 		  --ask-key		Ask recovery Key when initial enrollment (or randomly generated)
@@ -3002,7 +3002,7 @@ main_menu()
 
 ####### main #######
 
-getopttmp=$(getopt -o hc:v --long help,flicker,verbose,esp-path:,entry-token:,arch:,image:,entry-keys:,no-variables,no-reuse-initrd,no-random-seed,all,sync,portable,only-default,default-snapshot,ask-key,ask-pin,ask-pw,method:,signed-policy,pcr: -n "${0##*/}" -- "$@")
+getopttmp=$(getopt -o hc:v --long help,flicker,verbose,esp-path:,entry-token:,arch:,image:,entry-keys:,no-variables,no-reuse-initrd,no-random-seed,all,sync,portable,removable,only-default,default-snapshot,ask-key,ask-pin,ask-pw,method:,signed-policy,pcr: -n "${0##*/}" -- "$@")
 eval set -- "$getopttmp"
 
 while true ; do
@@ -3021,6 +3021,7 @@ while true ; do
 		--all) arg_all_entries=1; shift ;;
 		--sync) arg_sync=1; shift ;;
 		--portable) arg_portable=1; shift ;;
+		--removable) arg_portable=1; shift ;;
 		--only-default) arg_only_default=1; shift ;;
 		--default-snapshot) arg_default_snapshot=1; shift ;;
 		--ask-key|--ask-pin|--ask-pw) arg_ask_key_pin_or_pw=1; shift ;;
