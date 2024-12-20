@@ -2703,6 +2703,21 @@ unenroll()
 	done
 }
 
+set_image_name() {
+	[ -z "$image" ] || return
+
+	declare -gA arch_image_map=(
+		[x64]="vmlinuz"
+		[aa64]="Image"
+	)
+
+	if [ -n "${arch_image_map[$firmware_arch]}" ]; then
+		image="${arch_image_map[$firmware_arch]}"
+	else
+		err "Unsupported architecture $firmware_arch"
+	fi
+}
+
 bootloader_name()
 {
 	if is_sdboot "${1-$root_snapshot}"; then
@@ -2796,11 +2811,7 @@ fi
 [ -n "$root_subvol" ] || [ -z "$have_snapshots" ] || err "Can't determine root subvolume"
 [ -n "$root_device" ] || err "Can't determine root device"
 [ -n "$firmware_arch" ] || err "Can't determine firmware arch"
-case "$firmware_arch" in
-	x64) image=vmlinuz ;;
-	aa64) image=Image ;;
-	*) err "Unsupported architecture $firmware_arch" ;;
-esac
+set_image_name
 
 # shellcheck disable=SC1091
 [ -e /etc/sysconfig/bootloader ] && . /etc/sysconfig/bootloader
