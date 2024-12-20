@@ -2724,6 +2724,38 @@ eval_bootctl()
 	eval "$(bootctl 2>/dev/null | sed -ne 's/Firmware Arch: *\(\w\+\)/firmware_arch="\1"/p;s/ *token: *\(\w\+\)/entry_token="\1"/p;s, *\$BOOT: *\([^ ]\+\).*,boot_root="\1",p')"
 }
 
+define_commands() {
+	declare -gA commands=(
+		[install]=""
+		[needs-update]=""
+		[update]=""
+		[force-update]=""
+		[add-kernel]="kernel"
+		[remove-kernel]="kernel"
+		[set-default-snapshot]=""
+		[add-all-kernels]=""
+		[mkinitrd]=""
+		[remove-all-kernels]=""
+		[is-installed]=""
+		[list-snapshots]=""
+		[list-entries]=""
+		[list-kernels]=""
+		[list-devices]=""
+		[show-entry]="kernel"
+		[update-entry]="kernel"
+		[update-all-entries]=""
+		[is-bootable]=""
+		[set-default]="id"
+		[get-default]=""
+		[set-timeout]="seconds"
+		[get-timeout]=""
+		[enroll]=""
+		[unenroll]=""
+		[update-predictions]=""
+		[bootloader]=""
+	)
+}
+
 bootloader_name()
 {
 	if is_sdboot "${1-$root_snapshot}"; then
@@ -2776,10 +2808,13 @@ if [ -z "$SYSTEMD_LOG_LEVEL" ] && [ -n "$verbose" ]; then
 	export SYSTEMD_LOG_LEVEL
 fi
 
-case "$1" in
-	install|needs-update|update|force-update|add-kernel|remove-kernel|set-default-snapshot|add-all-kernels|mkinitrd|remove-all-kernels|is-installed|list-snapshots|list-entries|list-kernels|list-devices|show-entry|update-entry|update-all-entries|is-bootable|set-default|get-default|set-timeout|get-timeout|enroll|unenroll|update-predictions|bootloader|"") ;;
-	*) err "unknown command $1" ;;
-esac
+define_commands
+if [ -z "$1" ] || [ "${commands["$1"]}" = "interactive" ]; then
+	stty_size
+	interactive=1
+elif [ -z ${commands["$1"]+yes} ]; then
+	err "unknown command $1"
+fi
 
 [ -n "$arg_esp_path" ] && export SYSTEMD_ESP_PATH="$arg_esp_path"
 
