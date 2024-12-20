@@ -1346,7 +1346,7 @@ list_devices()
 	detect_tracked_devices
 
 	for dev in "${tracked_devices[@]}"; do
-		echo "$dev"
+		echo "Tracking $dev"
 	done	
 }
 
@@ -2426,13 +2426,29 @@ detect_tracked_devices()
 	# A LUKS2 device can be un-tracked (ignored) by sdbootutil if
 	# is present in /etc/crypttab and has the
 	# "x-sdbootutil.ignore" option
+	tracked_devices=()
 	local dev fstype uuid
-	[ -z "$tracked_devices" ] || return 0
+	local crypttab_entry
+
 	while read -r dev fstype uuid; do
+
 		[ "$fstype" = 'crypto_LUKS' ] || continue
 		cryptsetup isLuks --type luks2 "$dev" || continue
-		[ -e /etc/crypttab ] && grep -q "$dev .*x-sdbootutil.ignore" /etc/crypttab && continue
-		[ -e /etc/crypttab ] && grep -q "$uuid .*x-sdbootutil.ignore" /etc/crypttab && continue
+
+		if [ -e /etc/crypttab ]; then
+			crypttab_entry=$(awk -v dev="$dev" -v uuid="$uuid" '
+				BEGIN { FS = "[ \t]+" }
+				$2 == dev || $2 == ("UUID=" uuid) { print $0; exit }
+			' /etc/crypttab)
+
+			if [ -n "$crypttab_entry" ]; then
+				if echo "$crypttab_entry" | grep -q "x-sdbootutil.ignore"; then
+					log_info "Ignoring $dev" >&2
+					continue
+				fi
+			fi
+		fi
+
 		tracked_devices+=("$dev")
 	done < <(lsblk --noheadings -o PATH,FSTYPE,UUID)
 	have_tracked_devices
