@@ -1,0 +1,114 @@
+# shellcheck disable=SC2148
+shopt -s nullglob
+# shellcheck disable=SC2148
+err() {
+	:
+}
+
+_none() {
+	declare -ga result
+	result=()
+}
+
+_find_kernels()
+{
+	local fn kv
+	declare -ga result
+	result=()
+
+	for fn in /usr/lib/modules/*/"$image"; do
+		kv="${fn%/*}"
+		kv="${kv##*/}"
+		result+=("$kv")
+	done
+}
+
+_find_entry_ids()
+{
+	declare -ga result
+	result=()
+
+	mapfile -t result < <(bootctl list --json=short | jq -r '.[].id')
+}
+
+_arch_name() {
+	declare -ga result
+	result=("${!arch_image_map[@]}")
+}
+
+_image_name() {
+	declare -ga result
+	result=()
+	result=("${!arch_image_map[@]}")
+}
+
+_method() {
+	declare -ga result
+	result=()
+    for i in "tpm2" "tpm2+pin" "fido2" "password" "recovery-key"; do
+	    result+=("$i")
+    done
+}
+
+_sdbootutil_completion() {
+	eval "$(sdbootutil _print_bash_completion_data)"
+	local cur prev words cword image
+	COMPREPLY=()
+	_get_comp_words_by_ref -n : cur prev words cword
+
+	local command_found=0
+	eval_bootctl
+	set_image_name
+	define_commands
+
+	define_options
+	# shellcheck disable=SC2154
+	IFS=, read -r -a opts <<< "$opts_long"
+	local opts_with_dashes=()
+	for opt in "${opts[@]}"; do
+		opts_with_dashes+=("--${opt//:/}")
+	done
+
+	local i=0
+
+	for word in "${words[@]:1:$cword-1}"; do
+		if [ -n "${commands["$word"]+yes}" ]; then
+			command_found=1
+		fi
+		if [ " --arch " == " $word " ]; then
+			# shellcheck disable=SC2034
+			firmware_arch="${words[i+2]}"
+			set_image_name
+		fi
+		if [ " --image " == " $word " ]; then
+			image="${words[i+2]}"
+		fi
+		((i++))
+	done
+
+	# shellcheck disable=SC2154
+	local opt_arg_fun="${options_with_arg[${prev#--}]}"
+	if [ "${commands["$prev"]}" == "kernel" ]; then
+		_find_kernels
+		# shellcheck disable=SC2207
+		COMPREPLY=( $(compgen -W "${result[*]}" -- "$cur") )
+	elif [ "${commands["$prev"]}" == "id" ]; then
+		_find_entry_ids
+		# shellcheck disable=SC2207
+		COMPREPLY=( $(compgen -W "${result[*]}" -- "$cur") )
+	elif [ "$opt_arg_fun" == "_path" ]; then
+		# shellcheck disable=SC2207
+		COMPREPLY=($(compgen -d -- "$cur"))
+	elif [ "$opt_arg_fun" ]; then
+		eval "$opt_arg_fun"
+		# shellcheck disable=SC2207
+		COMPREPLY=( $(compgen -W "${result[*]}" -- "$cur") )
+	elif [[ $cur == -* ]] || [ $command_found -eq 1 ]; then
+		# shellcheck disable=SC2207
+		COMPREPLY=( $(compgen -W "${opts_with_dashes[*]}" -- "$cur") )
+	elif [ $command_found -eq 0 ]; then
+		# shellcheck disable=SC2207
+		COMPREPLY=( $(compgen -W "${!commands[*]}" -- "$cur") )
+	fi
+}
+complete -F _sdbootutil_completion sdbootutil
