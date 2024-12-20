@@ -8,7 +8,6 @@ shopt -s nullglob
 # causes flicker
 dialog_altenate_screen=
 dialog_backtitle="sdbootutil"
-interactive=
 verbose=
 nl=$'\n'
 shimdir="/usr/share/efi/$(uname -m)"
@@ -212,36 +211,15 @@ log_info()
 	echo "$@"
 }
 
-d(){
-	local retval=0
-	# Bash makes it a bit annoying to read the output of a
-	# different FD into a variable, it only supports reading
-	# stdout by itself. So redirect 3 to stdout and 1 to the real
-	# stdout.
-	exec {stdoutfd}>&1
-	result="$(dialog $dialog_altenate_screen --backtitle "$dialog_backtitle" --output-fd 3 "$@" 3>&1 1>&${stdoutfd})" || retval=$?
-	# Word splitting makes it necessary to use eval here.
-	eval "exec ${stdoutfd}>&-"
-	return "$retval"
-}
-
 err()
 {
-	if [ "$interactive" = 1 ]; then
-		d --title 'Error' --ok-label "Quit" --colors --aspect 60 --msgbox "\Z1Error:\Zn $*" 0 0
-	else
-		echo "Error: $*" >&2
-	fi
+	echo "Error: $*" >&2
 	exit 1
 }
 
 warn()
 {
-	if [ "$interactive" = 1 ]; then
-		d --title 'Warning' --ok-label "Continue" --colors --aspect 60 --msgbox "\Z1Warning:\Zn $*" 0 0
-	else
-		echo "Warning: $*" >&2
-	fi
+	echo "Warning: $*" >&2
 }
 
 is_config_file()
@@ -295,50 +273,6 @@ reset_rollback()
 		rm -f "$i.bak"
 	done
 	rollback=()
-}
-
-run_command_live_output()
-{
-	if [ "$interactive" = 1 ]; then
-		"$@" 2>&1 | dialog $dialog_altenate_screen --backtitle "$dialog_backtitle" --title "$1" --aspect 60 --progressbox 0 0
-	else
-		"$@"
-	fi
-}
-
-run_command_output()
-{
-	if [ "$interactive" = 1 ]; then
-		"$@" > "$tmpfile" 2>&1
-		[ -s "$tmpfile" ] && d --textbox "$tmpfile" 0 0
-	else
-		"$@"
-	fi
-}
-
-# Given the number of total item pairs, outputs the number of items to
-# display at once
-menuheight()
-{
-	local height=$(($1 / 2))
-	[ "$height" -le "$dh_menu" ] || height="$dh_menu"
-	echo "$height"
-}
-
-stty_size()
-{
-	# shellcheck disable=SC2046
-	set -- $(stty size 2>/dev/null)
-	LINES="$1"
-	COLUMNS="$2"
-	# stty size can return zero when not ready or
-	# its a serial console
-	if [ "$COLUMNS" = "0" ] || [ "$LINES" = "0" ]; then
-		LINES=24
-		COLUMNS=80
-	fi
-
-	dh_menu=$((LINES-15))
 }
 
 # check whether it's a transactional system
@@ -533,7 +467,7 @@ remove_kernel()
 	settle_entry_token "${snapshot}"
 	local id
 	id="$(entry_conf_file "$kernel_version" "$snapshot")"
-	run_command_output bootctl unlink "$id"
+	bootctl unlink "$id"
 
 	# This action will require to update the PCR predictions
 	update_predictions=1
@@ -834,9 +768,9 @@ install_kernel()
 		# in /.snashots is still the unmodified base
 		is_transactional && mount_etc "${snapshot_dir}"
 		if [ "$subvol" != "$root_subvol" ] && [ -n "$have_snapshots" ]; then
-			run_command_live_output chroot "${snapshot_dir}" dracut "${dracut_args[@]}" "$tmpdir/initrd-0" "$kernel_version"
+			chroot "${snapshot_dir}" dracut "${dracut_args[@]}" "$tmpdir/initrd-0" "$kernel_version"
 		else
-			run_command_live_output dracut "${dracut_args[@]}" "$tmpdir/initrd-0" "$kernel_version"
+			dracut "${dracut_args[@]}" "$tmpdir/initrd-0" "$kernel_version"
 		fi
 		is_transactional && umount_etc "${snapshot_dir}"
 		[ "$subvol" != "$root_subvol" ] && [ -n "$have_snapshots" ] && umount_chroot "${snapshot_dir}"
@@ -1024,123 +958,6 @@ show_entry_fields()
 	done < "$conf"
 }
 
-show_entries()
-{
-	local dialogtitle="${1:-Entries}"
-
-	[ -s "$entryfile" ] || update_entries_for_this_system
-
-	while true; do
-		local list=()
-		local n=0
-		local default=
-		while read -r isdefault isreported type title; do
-			color=
-			if [ "$isdefault" = "true" ]; then
-				default="$n"
-				color="\\Zb\Zu"
-			fi
-			if [ "$isreported" = "false" ]; then
-				color="$color\\Z2"
-			fi
-			if [ "$type" = "loader" ]; then
-				color="$color\\Z5"
-			fi
-			list+=("$n" "$color$title\\Zn")
-			n=$((++n))
-		done < <(jq '.[]|[.isDefault, if has("isReported") then .isReported else 0 end, if has("type") then .type else "unknown" end, .showTitle]|join(" ")' -r < "$entryfile")
-		if [ "${#list}" = 0 ]; then
-			d --msgbox "No entries" 0 0
-			return 0
-		fi
-		local d_args=(--no-hot-list --colors --ok-label "Options" --cancel-label "Back")
-		[ -n "$arg_all_entries" ] || d_args+=(--extra-button --extra-label "All")
-		d "${d_args[@]}" --menu "$dialogtitle" 0 0 "$(menuheight ${#list[@]})" "${list[@]}"  || {
-			if [ "$?" = 3 ]; then
-				arg_all_entries=1
-				update_entries cat
-				continue
-			fi
-			return 0
-		}
-		n="$result"
-
-		show_entry ".[$n]"
-	done
-}
-
-show_entry()
-{
-	local filter="$1"
-	local type
-	local isreported
-	local isdefault
-	local new=
-
-	read -r isdefault isreported type title < <(jq "$filter"'|[.isDefault, if has("isReported") then .isReported else 0 end, if has("type") then .type else "unknown" end, .showTitle]|join(" ")' -r < "$entryfile")
-
-	[ "$isdefault" = true ] || isdefault=
-	[ "$isreported" = true ] || new=1
-
-	if [ -n "$isdefault$new" ]; then
-		title="$title ["
-		[ -z "$isdefault" ] || title="${title}default"
-		[ -z "$new" ] || title="${title}${isdefault:+,}new"
-		title="$title]"
-	fi
-
-	while true; do
-		local list=(show json)
-		if [ "$type" = "type1" ]; then
-			list+=(cat Raw edit Edit)
-		fi
-		if [ -z "$isdefault" ]; then
-			list+=(set-default "set as default" oneshot "set as one-shot")
-			if [ "$type" != "loader" ]; then
-				list+=(delete delete)
-			fi
-		fi
-		d --no-tags --menu "Entry #$title" 0 0 "$(menuheight ${#list[@]})" "${list[@]}" || break
-		action="$result"
-
-		case "$action" in
-			show)
-				jq "$filter" < "$entryfile" > "$tmpfile"
-				d --textbox "$tmpfile" 0 0
-				;;
-			cat)
-				read -r fn < <(jq -r "$filter|.path" < "$entryfile")
-				d --textbox "$fn" 0 0
-				;;
-			edit)
-				read -r fn < <(jq -r "$filter|.path" < "$entryfile")
-				${EDITOR:-vim} "$fn"
-				update_entries
-				;;
-			delete)
-				read -r id < <(jq -r "$filter|.id" < "$entryfile")
-				bootctl unlink "$id" > "$tmpfile" 2>&1
-				[ -s "$tmpfile" ] && d --textbox "$tmpfile" 0 0
-				update_entries
-				break
-				;;
-			set-default)
-				read -r id < <(jq -r "$filter|.id" < "$entryfile")
-				set_default_entry "$id"
-				update_entries
-				break
-				;;
-			oneshot)
-				read -r id < <(jq -r "$filter|.id" < "$entryfile")
-				bootctl set-oneshot "$id" > "$tmpfile" 2>&1
-				[ -s "$tmpfile" ] && d --textbox "$tmpfile" 0 0
-				update_entries
-				break
-				;;
-		esac
-	done
-}
-
 update_entry_conf()
 {
 	local conf="$1"
@@ -1209,60 +1026,6 @@ list_snapshots()
 		[ "$is_bootable" = 1 ] || id="!$id"
 		echo -e "$id $title"
 	done < <(jq '.root|.[]|[.number, .default, .description]|join(" ")' -r < "$snapperfile")
-}
-
-show_snapper()
-{
-	[ -n "$have_snapshots" ] || { log_info "System does not support snapshots."; return 0; }
-	if ! update_snapper 2>"$tmpfile"; then
-		d --title "Error" --textbox "$tmpfile" 0 0
-		exit 1
-	fi
-
-	while true; do
-		local list=()
-		local n=0
-		local default=
-		while read -r n isdefault title; do
-			[ "$n" != "0" ] || continue
-			if [ "$isdefault" = "true" ]; then
-				default="$n"
-				title="\\Zb\Zu$title\\Zn"
-			fi
-			update_kernels "$n"
-			[ "$is_bootable" = 1 ] || title="!$title"
-			list+=("$n" "$title")
-		done < <(jq '.root|.[]|[.number, .default, .description]|join(" ")' -r < "$snapperfile")
-		if [ "${#list}" = 0 ]; then
-			d --msgbox "No snapshots" 0 0
-			return 0
-		fi
-		d --no-hot-list --colors --ok-label "Options" --cancel-label "Back" --menu "Snapshots" 0 0 "$(menuheight ${#list[@]})" "${list[@]}" || return 0
-		n="$result"
-
-		while true; do
-			list=(kernels kernels entries entries show json)
-			if [ "$n" != "$default" ]; then
-				list+=(delete delete)
-			fi
-			d --no-tags --menu "Snapshot #$n" 0 0 "$(menuheight ${#list[@]})" "${list[@]}" || break
-			action="$result"
-
-			case "$action" in
-				show)
-					jq ".root|.[]|select(.number==$n)" < "$snapperfile" > "$tmpfile"
-					d --textbox "$tmpfile" 0 0
-					;;
-				entries)
-					update_entries_for_snapshot "$n"
-					show_entries "Entries for Snapshot $n"
-					;;
-				kernels)
-					show_kernels "$n"
-					;;
-			esac
-		done
-	done
 }
 
 calc_chksum()
@@ -1361,77 +1124,6 @@ is_bootable()
 
 	[ "$is_bootable" = 1 ] || return 1
 	return 0
-}
-
-show_kernels()
-{
-	local subvol=""
-	local snapshot="$1"
-	[ -z "$have_snapshots" ] || subvol="${subvol_prefix}/.snapshots/${1:?}/snapshot"
-	while true; do
-		update_kernels "$snapshot"
-		local list=()
-		local n=0
-		local default=
-		local id
-		local kernelfiles=("${!installed_kernels[@]}" "${!stale_kernels[@]}")
-		local ids=()
-		for k in "${kernelfiles[@]}"; do
-			if [  "${installed_kernels[$k]+yup}" = yup ]; then
-				id="${installed_kernels[$k]}"
-				if [ -z "$id" ]; then
-					state="missing"
-				else
-					state="ok"
-				fi
-			else
-				id="${stale_kernels[$k]}"
-				state='stale'
-			fi
-			ids+=("$id")
-			s="${k#/*/}"
-			list+=("$n" "$(printf "%-10s %s" "$state" "$s")")
-			n=$((++n))
-		done
-		if [ "${#list}" = 0 ]; then
-			d --msgbox "No kernels" 0 0
-			return 1
-		fi
-		d --no-tags --no-hot-list --colors --ok-label "Options" --cancel-label "Back" --menu "Kernels associated with $subvol" 0 0 "$(menuheight ${#list[@]})" "${list[@]}" || return 0
-		n="$result"
-
-		list=()
-		id="${ids[$n]}"
-		if [ -z "$id" ]; then
-			list+=(install "Install")
-		else
-			list+=(show "Entry")
-		fi
-		list+=(entries "Other Entries")
-
-		local kv="${kernelfiles[$n]%/*}"
-		kv="${kv##*/}"
-		local title="Kernel $kv"
-		while true; do
-			d --no-tags --no-hot-list --colors --ok-label "Ok" --cancel-label "Back" --menu "$title" 0 0 "$(menuheight ${#list[@]})" "${list[@]}" || break
-			action="$result"
-
-			case "$action" in
-				entries)
-					update_entries jq "[.[]|select(has(\"linux\"))|select(.linux|test(\"${kernelfiles[$n]}\"))]"
-					show_entries "Entries for kernel ${kernelfiles[$n]#/*/}"
-					;;
-				show)
-					show_entry ".[]|select(.id|test(\"$id\"))"
-					break # might have selected delete so refresh
-					;;
-				install)
-					install_kernel "$snapshot" "$kv"
-					break
-					;;
-			esac
-		done
-	done
 }
 
 bootloader_version()
@@ -1649,26 +1341,6 @@ update_random_seed()
 	[ "${#s}" = 64 ] || { warn "Invalid random seed"; return 0; }
 	hex_to_binary "$s" > "$boot_root/loader/random-seed.new"
 	mv "$boot_root/loader/random-seed.new" "$boot_root/loader/random-seed"
-}
-
-install_bootloader_interactive()
-{
-	local v
-	v="$(bootloader_version)"
-	if [ -n "$v" ]; then
-		if bootloader_needs_update; then
-			local nv
-			nv="$(bootloader_version "$(find_bootloader)")"
-			d --aspect 60 --yesno "Update systemd-boot from $v to $nv?" 0 0 || return 0
-		else
-			d --aspect 60 --yesno "systemd-boot already at current version $v. Install again?" 0 0 || return 0
-		fi
-	else
-		d --aspect 60 --yesno "Are you sure you want to install systemd-boot into $boot_root?\n
-			This will overwrite any existing bootloaders" 0 0 || return 0
-	fi
-	install_bootloader
-	d --aspect 60 --msgbox "Installed into $boot_root" 0 0
 }
 
 bli_efi_var_get()
@@ -2984,22 +2656,6 @@ bootloader_name()
 	fi
 }
 
-main_menu()
-{
-	while true; do
-		list=(kernels Kernels snapper Snapshots sd-boot Entries install "Install/Update")
-		d --no-tags --cancel-label "Quit"  --menu "Main Menu" 0 0 "$(menuheight ${#list[@]})" "${list[@]}" || return 0
-		action="$result"
-
-		case "$action" in
-			snapper) show_snapper ;;
-			sd-boot) update_entries cat; show_entries ;;
-			kernels) show_kernels "$root_snapshot";;
-			install) install_bootloader_interactive ;;
-		esac
-	done
-}
-
 ####### main #######
 
 getopttmp=$(getopt -o hc:v --long help,flicker,verbose,esp-path:,entry-token:,arch:,image:,entry-keys:,no-variables,no-reuse-initrd,no-random-seed,all,sync,portable,removable,only-default,default-snapshot,ask-key,ask-pin,ask-pw,method:,signed-policy,pcr: -n "${0##*/}" -- "$@")
@@ -3043,8 +2699,7 @@ if [ -z "$SYSTEMD_LOG_LEVEL" ] && [ -n "$verbose" ]; then
 fi
 
 case "$1" in
-	install|needs-update|update|force-update|add-kernel|remove-kernel|set-default-snapshot|add-all-kernels|mkinitrd|remove-all-kernels|is-installed|list-snapshots|list-entries|list-kernels|list-devices|show-entry|update-entry|update-all-entries|is-bootable|set-default|get-default|set-timeout|get-timeout|enroll|unenroll|update-predictions|bootloader) ;;
-	kernels|snapshots|entries|"") stty_size; interactive=1 ;;
+	install|needs-update|update|force-update|add-kernel|remove-kernel|set-default-snapshot|add-all-kernels|mkinitrd|remove-all-kernels|is-installed|list-snapshots|list-entries|list-kernels|list-devices|show-entry|update-entry|update-all-entries|is-bootable|set-default|get-default|set-timeout|get-timeout|enroll|unenroll|update-predictions|bootloader|"") ;;
 	*) err "unknown command $1" ;;
 esac
 
@@ -3182,14 +2837,8 @@ case "$1" in
 		unenroll ;;
 	update-predictions)
 		update_predictions=1 ;;
-	kernels)
-		show_kernels "${2:-$root_snapshot}" ;;
-	snapshots)
-		show_snapper ;;
-	entries)
-		show_entries ;;
 	*)
-		main_menu ;;
+		helpandquit ;;
 esac
 
 [ -z "$update_predictions" ] || generate_tpm2_predictions
