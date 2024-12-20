@@ -2713,6 +2713,12 @@ set_image_name() {
 	fi
 }
 
+eval_bootctl()
+{
+	# XXX: bootctl should have json output for that too
+	eval "$(bootctl 2>/dev/null | sed -ne 's/Firmware Arch: *\(\w\+\)/firmware_arch="\1"/p;s/ *token: *\(\w\+\)/entry_token="\1"/p;s, *\$BOOT: *\([^ ]\+\).*,boot_root="\1",p')"
+}
+
 bootloader_name()
 {
 	if is_sdboot "${1-$root_snapshot}"; then
@@ -2772,9 +2778,7 @@ esac
 
 [ -n "$arg_esp_path" ] && export SYSTEMD_ESP_PATH="$arg_esp_path"
 
-# XXX: bootctl should have json output for that too
-# shellcheck disable=SC2016
-eval "$(bootctl 2>/dev/null | sed -ne 's/Firmware Arch: *\(\w\+\)/firmware_arch="\1"/p;s/ *token: *\(\w\+\)/entry_token="\1"/p;s, *\$BOOT: *\([^ ]\+\).*,boot_root="\1",p')"
+eval_bootctl
 read -r root_uuid root_device < <(findmnt / -v -r -n -o UUID,SOURCE)
 root_device_is_crypt=
 [ "$(lsblk --noheadings -o TYPE "$root_device")" = "crypt" ] && root_device_is_crypt=1
