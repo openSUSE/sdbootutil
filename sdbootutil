@@ -3109,75 +3109,80 @@ if [ "$SDB_ADD_INITIAL_COMPONENT" = "1" ]; then
 	backup_initial_components
 fi
 
-if [ "$1" = "install" ]; then
-	install_bootloader "${2:-$root_snapshot}"
-elif [ "$1" = "needs-update" ]; then
-	bootloader_needs_update "${2:-$root_snapshot}"
-elif [ "$1" = "update" ]; then
-	bootloader_update "${2:-$root_snapshot}"
-elif [ "$1" = "force-update" ]; then
-	if is_installed; then install_bootloader "${2:-$root_snapshot}"; else :; fi
-elif [ "$1" = "bootloader" ]; then
-	bootloader_name "${2:-$root_snapshot}"
-elif [ "$1" = "add-kernel" ]; then
-	install_kernel "${3:-$root_snapshot}" "$2"
-elif [ "$1" = "add-all-kernels" ]; then
-	install_all_kernels "${2:-$root_snapshot}"
-elif [ "$1" = "mkinitrd" ]; then
-	arg_no_reuse_initrd=1
-	install_all_kernels "${2:-$root_snapshot}"
-elif [ "$1" = "remove-kernel" ]; then
-	remove_kernel "${3:-$root_snapshot}" "$2"
-elif [ "$1" = "remove-all-kernels" ]; then
-	remove_all_kernels "${2:-$root_snapshot}"
-elif [ "$1" = "set-default-snapshot" ]; then
-	set_default_snapshot "${2:-$root_snapshot}"
-elif [ "$1" = "is-installed" ]; then
-	if is_installed; then
-		log_info "systemd-boot was installed using sdbootutil"
-		exit 0
-	else
-		log_info "not installed using this tool"
-		exit 1
-	fi
-elif [ "$1" = "list-kernels" ]; then
-	list_kernels "${2:-$root_snapshot}"
-elif [ "$1" = "list-entries" ]; then
-	list_entries "${2:-}"
-elif [ "$1" = "list-snapshots" ]; then
-	list_snapshots
-elif [ "$1" = "list-devices" ]; then
-	list_devices
-elif [ "$1" = "show-entry" ]; then
-	show_entry_fields "${3:-$root_snapshot}" "$2"
-elif [ "$1" = "update-entry" ]; then
-	update_entry "${3:-$root_snapshot}" "$2"
-elif [ "$1" = "update-all-entries" ]; then
-	update_all_entries "${2:-$root_snapshot}"
-elif [ "$1" = "is-bootable" ]; then
-	is_bootable "${2:-$root_snapshot}"
-elif [ "$1" = "set-default" ]; then
-	set_default_entry "$2"
-elif [ "$1" = "get-default" ]; then
-	get_default_entry "$2"
-elif [ "$1" = "set-timeout" ]; then
-	set_timeout "$2"
-elif [ "$1" = "get-timeout" ]; then
-	get_timeout "$2"
-elif [ "$1" = "enroll" ]; then
-	enroll
-elif [ "$1" = "unenroll" ]; then
-	unenroll
-elif [ "$1" = "update-predictions" ]; then
-	update_predictions=1
-elif [ "$1" = "kernels" ]; then
-	show_kernels "${2:-$root_snapshot}"
-elif [ "$1" = "snapshots" ]; then
-	show_snapper
-elif [ "$1" = "entries" ]; then
-	show_entries
-else
-	main_menu
-fi
+case "$1" in
+	install)
+		install_bootloader "${2:-$root_snapshot}" ;;
+	needs-update)
+		bootloader_needs_update "${2:-$root_snapshot}" ;;
+	update)
+		bootloader_update "${2:-$root_snapshot}" ;;
+	force-update)
+		if is_installed; then
+			install_bootloader "${2:-$root_snapshot}"
+		else
+			:
+		fi ;;
+	bootloader)
+		bootloader_name "${2:-$root_snapshot}" ;;
+	add-kernel)
+		install_kernel "${3:-$root_snapshot}" "$2" ;;
+	add-all-kernels)
+		install_all_kernels "${2:-$root_snapshot}" ;;
+	mkinitrd)
+		arg_no_reuse_initrd=1
+		install_all_kernels "${2:-$root_snapshot}" ;;
+	remove-kernel)
+		remove_kernel "${3:-$root_snapshot}" "$2" ;;
+	remove-all-kernels)
+		remove_all_kernels "${2:-$root_snapshot}" ;;
+	set-default-snapshot)
+		set_default_snapshot "${2:-$root_snapshot}" ;;
+	is-installed)
+		if is_installed; then
+			log_info "systemd-boot was installed using sdbootutil"
+			exit 0
+		else
+			log_info "not installed using this tool"
+			exit 1
+		fi ;;
+	list-kernels)
+		list_kernels "${2:-$root_snapshot}" ;;
+	list-entries)
+		list_entries "${2:-}" ;;
+	list-snapshots)
+		list_snapshots ;;
+	list-devices)
+		list_devices ;;
+	show-entry)
+		show_entry_fields "${3:-$root_snapshot}" "$2" ;;
+	update-entry)
+		update_entry "${3:-$root_snapshot}" "$2" ;;
+	update-all-entries)
+		update_all_entries "${2:-$root_snapshot}" ;;
+	is-bootable)
+		is_bootable "${2:-$root_snapshot}" ;;
+	set-default)
+		set_default_entry "$2" ;;
+	get-default)
+		get_default_entry "$2" ;;
+	set-timeout)
+		set_timeout "$2" ;;
+	get-timeout)
+		get_timeout "$2" ;;
+	enroll)
+		enroll ;;
+	unenroll)
+		unenroll ;;
+	update-predictions)
+		update_predictions=1 ;;
+	kernels)
+		show_kernels "${2:-$root_snapshot}" ;;
+	snapshots)
+		show_snapper ;;
+	entries)
+		show_entries ;;
+	*)
+		main_menu ;;
+esac
 
 [ -z "$update_predictions" ] || generate_tpm2_predictions
