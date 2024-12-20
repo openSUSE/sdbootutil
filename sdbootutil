@@ -101,6 +101,7 @@ helpandquit()
 		  --ask-pw		Ask password when initial enrollment
 		  --method		"tpm2", "tpm2+pin", "fido2", "password", "recovery-key"
 		  --signed-policy	Use signed policy for TPM2 enrollment
+		  --pcr		Comma seperated list of PCRs to enroll
 		  -v, --verbose		More verbose output
 		  -h, --help		This screen
 
@@ -2819,7 +2820,7 @@ enroll()
 		update_predictions=
 	fi
 
-	load_config_file
+	[ -n "$FDE_SEAL_PCR_LIST" ] || load_config_file
 
 	# If systemd-pcrlock is missing then we need to use
 	# pcr-oracle.  For this we need to generate the RSA keys
@@ -2834,8 +2835,9 @@ enroll()
 			else
 				err "Bootloader not detected"
 			fi
-			echo "FDE_SEAL_PCR_LIST=${FDE_SEAL_PCR_LIST}" >> /etc/default/fde-tools
 		fi
+
+		is_config_file || echo "FDE_SEAL_PCR_LIST=${FDE_SEAL_PCR_LIST}" >> /etc/default/fde-tools
 
 		if ! have_pcrlock && have_pcr_oracle; then
 			generate_rsa_key
@@ -2997,7 +2999,7 @@ main_menu()
 
 ####### main #######
 
-getopttmp=$(getopt -o hc:v --long help,flicker,verbose,esp-path:,entry-token:,arch:,image:,entry-keys:,no-variables,no-reuse-initrd,no-random-seed,all,sync,portable,only-default,default-snapshot,ask-key,ask-pin,ask-pw,method:,signed-policy -n "${0##*/}" -- "$@")
+getopttmp=$(getopt -o hc:v --long help,flicker,verbose,esp-path:,entry-token:,arch:,image:,entry-keys:,no-variables,no-reuse-initrd,no-random-seed,all,sync,portable,only-default,default-snapshot,ask-key,ask-pin,ask-pw,method:,signed-policy,pcr: -n "${0##*/}" -- "$@")
 eval set -- "$getopttmp"
 
 while true ; do
@@ -3021,6 +3023,7 @@ while true ; do
 		--ask-key|--ask-pin|--ask-pw) arg_ask_key_pin_or_pw=1; shift ;;
 		--method) arg_method="$2"; shift 2 ;;
 		--signed-policy) arg_signed_policy=1; shift ;;
+		--pcr) FDE_SEAL_PCR_LIST="$2"; shift 2 ;;
 		--) shift ; break ;;
 		*) echo "Internal error!" ; exit 1 ;;
 	esac
