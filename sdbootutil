@@ -816,11 +816,14 @@ install_kernel()
 	elif ! reuse_initrd "$snapshot" "$subvol" "$kernel_version"; then
 		local snapshot_dir="/.snapshots/$snapshot/snapshot"
 		local dracut_args=(
-			'--quiet'
 			'--reproducible'
 			'--force'
 			'--tmpdir' '/var/tmp'
 		)
+		if [ -z "$verbose" ]; then
+			dracut_args+=('--quiet')
+		fi
+		
 		log_info "generating new initrd"
 
 		[ "$subvol" != "$root_subvol" ] && [ -n "$have_snapshots" ] && mount_chroot "${snapshot_dir}"
