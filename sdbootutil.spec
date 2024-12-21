@@ -94,6 +94,17 @@ JEOS module for full disk encryption enrollment. The module
 present the different options and delegate into sdbootutil-enroll
 service the effective enrollment.
 
+%package bash-completion
+Summary:        Bash completions for sdbootutil
+Requires:       sdbootutil >= %{version}-%{release}
+Requires:       bash
+Requires:       bash-completion
+
+%description bash-completion
+Bash completions script for sdbootutil.
+Allows the user to press TAB to see available commands,
+options and parameters.
+
 %prep
 %setup -q
 
@@ -123,6 +134,9 @@ install -D -m 755 10-%{name}.tukit %{buildroot}%{_prefix}/lib/tukit/plugins/10-%
 
 # kernel-install
 install -D -m 755 50-%{name}.install %{buildroot}%{_prefix}/lib/kernel/install.d/50-%{name}.install
+
+#bash completions
+install -D -m 755 completions/bash_sdbootutil %{buildroot}%{_datadir}/bash-completion/completions/sdbootutil
 
 # tmpfiles
 install -D -m 755 kernel-install-%{name}.conf \
@@ -194,5 +208,10 @@ sdbootutil update
 %{_datadir}/jeos-firstboot/modules/enroll
 %dir %{_unitdir}/jeos-firstboot.service.d
 %{_unitdir}/jeos-firstboot.service.d/jeos-firstboot-enroll-override.conf
+
+%files bash-completion
+%dir %{_datadir}/bash-completion
+%dir %{_datadir}/bash-completion/completions
+%{_datadir}/bash-completion/completions/sdbootutil
 
 %changelog

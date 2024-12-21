@@ -2973,6 +2973,99 @@ unenroll()
 	done
 }
 
+set_image_name() {
+	[ -z "$image" ] || return
+
+	declare -gA arch_image_map=(
+		[x64]="vmlinuz"
+		[aa64]="Image"
+	)
+
+	if [ -n "${arch_image_map[$firmware_arch]}" ]; then
+		image="${arch_image_map[$firmware_arch]}"
+	else
+		err "Unsupported architecture $firmware_arch"
+	fi
+}
+
+eval_bootctl()
+{
+	# XXX: bootctl should have json output for that too
+	eval "$(bootctl 2>/dev/null | sed -ne 's/Firmware Arch: *\(\w\+\)/firmware_arch="\1"/p;s/ *token: *\(\w\+\)/entry_token="\1"/p;s, *\$BOOT: *\([^ ]\+\).*,boot_root="\1",p')"
+}
+
+define_commands() {
+	declare -gA commands=(
+		[install]=""
+		[needs-update]=""
+		[update]=""
+		[force-update]=""
+		[add-kernel]=kernel
+		[remove-kernel]=kernel
+		[set-default-snapshot]=""
+		[add-all-kernels]=""
+		[mkinitrd]=""
+		[remove-all-kernels]=""
+		[is-installed]=""
+		[list-snapshots]=""
+		[list-entries]=""
+		[list-kernels]=""
+		[list-devices]=""
+		[show-entry]=kernel
+		[update-entry]=kernel
+		[update-all-entries]=""
+		[is-bootable]=""
+		[set-default]=id
+		[get-default]=""
+		[set-timeout]=seconds
+		[get-timeout]=""
+		[enroll]=""
+		[unenroll]=""
+		[update-predictions]=""
+		[bootloader]=""
+		[kernels]=interactive
+		[snapshots]=interactive
+		[entries]=interactive
+	)
+}
+
+define_options() {
+	declare -gA options_with_arg=(
+		[help]=""
+		[flicker]=""
+		[verbose]=""
+		[esp-path]="_path"
+		[entry-token]="_path"
+		[arch]="_arch_name"
+		[image]="_image_name"
+		[entry-keys]="_find_kernels"
+		[no-variables]=""
+		[no-reuse-initrd]=""
+		[no-random-seed]=""
+		[all]=""
+		[sync]=""
+		[portable]=""
+		[removable]=""
+		[only-default]=""
+		[default-snapshot]=""
+		[ask-key]=""
+		[ask-pin]=""
+		[ask-pw]=""
+		[method]="_method"
+		[signed-policy]=""
+		[pcr]="_none"
+	)
+	opts_long=""
+	for opt in "${!options_with_arg[@]}"; do
+		if [ "${options_with_arg[$opt]}" ]; then
+			opts_long+="${opt}:,"
+		else
+			opts_long+="${opt},"
+		fi
+	done
+	opts_long="${opts_long%,}"
+}
+
 bootloader_name()
 {
 	if is_sdboot "${1-$root_snapshot}"; then
@@ -3002,8 +3095,17 @@ main_menu()
 
 ####### main #######
 
-getopttmp=$(getopt -o hc:v --long help,flicker,verbose,esp-path:,entry-token:,arch:,image:,entry-keys:,no-variables,no-reuse-initrd,no-random-seed,all,sync,portable,removable,only-default,default-snapshot,ask-key,ask-pin,ask-pw,method:,signed-policy,pcr: -n "${0##*/}" -- "$@")
-eval set -- "$getopttmp"
+if [ "$1" = "_print_bash_completion_data" ]; then
+	declare -f set_image_name
+	declare -f eval_bootctl
+	declare -f define_commands
+	declare -f define_options
+	exit 0
+fi
+
+define_options
+getopt_tmp=$(getopt -o hc:v --long "$opts_long" -n "${0##*/}" -- "$@")
+eval set -- "$getopt_tmp"
 
 while true ; do
 	case "$1" in
@@ -3042,17 +3144,17 @@ if [ -z "$SYSTEMD_LOG_LEVEL" ] && [ -n "$verbose" ]; then
 	export SYSTEMD_LOG_LEVEL
 fi
 
-case "$1" in
-	install|needs-update|update|force-update|add-kernel|remove-kernel|set-default-snapshot|add-all-kernels|mkinitrd|remove-all-kernels|is-installed|list-snapshots|list-entries|list-kernels|list-devices|show-entry|update-entry|update-all-entries|is-bootable|set-default|get-default|set-timeout|get-timeout|enroll|unenroll|update-predictions|bootloader) ;;
-	kernels|snapshots|entries|"") stty_size; interactive=1 ;;
-	*) err "unknown command $1" ;;
-esac
+define_commands
+if [ -z "$1" ] || [ "${commands["$1"]}" = "interactive" ]; then
+	stty_size
+	interactive=1
+elif [ -z ${commands["$1"]+yes} ]; then
+	err "unknown command $1"
+fi
 
 [ -n "$arg_esp_path" ] && export SYSTEMD_ESP_PATH="$arg_esp_path"
 
-# XXX: bootctl should have json output for that too
-# shellcheck disable=SC2016
-eval "$(bootctl 2>/dev/null | sed -ne 's/Firmware Arch: *\(\w\+\)/firmware_arch="\1"/p;s/ *token: *\(\w\+\)/entry_token="\1"/p;s, *\$BOOT: *\([^ ]\+\).*,boot_root="\1",p')"
+eval_bootctl
 read -r root_uuid root_device < <(findmnt / -v -r -n -o UUID,SOURCE)
 root_device_is_crypt=
 [ "$(lsblk --noheadings -o TYPE "$root_device")" = "crypt" ] && root_device_is_crypt=1
@@ -3084,11 +3186,7 @@ fi
 [ -n "$root_subvol" ] || [ -z "$have_snapshots" ] || err "Can't determine root subvolume"
 [ -n "$root_device" ] || err "Can't determine root device"
 [ -n "$firmware_arch" ] || err "Can't determine firmware arch"
-case "$firmware_arch" in
-	x64) image=vmlinuz ;;
-	aa64) image=Image ;;
-	*) err "Unsupported architecture $firmware_arch" ;;
-esac
+set_image_name
 
 # shellcheck disable=SC1091
 [ -e /etc/sysconfig/bootloader ] && . /etc/sysconfig/bootloader
