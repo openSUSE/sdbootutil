@@ -1278,11 +1278,11 @@ bootloader_needs_update()
 	local status="$?"
 	bldr_name=$(bootloader_name "$snapshot")
 	if [ "$status" = "11" ]; then
-		log_info "$bldr_name needs to be updated"
-		return 0
-	elif [ "$status" = "12" ]; then
 		log_info "$bldr_name is newer than system bootloader"
 		return 2
+	elif [ "$status" = "12" ]; then
+		log_info "$bldr_name needs to be updated"
+		return 0
 	fi
 	log_info "$bldr_name is already up-to-date"
 	return 1
