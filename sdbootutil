@@ -27,6 +27,8 @@ have_snapshots=
 image=
 unlock_method=
 
+chroot_dir=
+
 color_red=
 color_end=
 # The shell is interactive and the colors haven't been disabled
@@ -66,6 +68,8 @@ cleanup()
 		fi
 	done
 	rm -rf "$tmpdir"
+
+	[ -z "$chroot_dir" ] || umount_chroot "$chroot_dir"
 }
 trap cleanup EXIT
 
@@ -613,26 +617,33 @@ mount_chroot()
 {
 	local snapshot_dir="$1"
 
-	# This is needed so that the rootfs appears in the mounts
-	# under the chroot, allowing dracut to properly detect the fs
-	# type and load the relevant module
+	# We include the rootfs (the first line usually), as is needed
+	# to appear in the mounts under the chroot, allowing dracut to
+	# properly detect the fs type and load the relevant module.
+	findmnt -o TARGET,FSTYPE -Rv --pairs / > "$tmpdir/mounts"
 	mount --bind "$snapshot_dir" "$snapshot_dir"
+	while read -r line; do
+		eval "$line"
+		[ "$FSTYPE" = "btrfs" ] || [ "$FSTYPE" = "vfat" ] || [ "$FSTYPE" = "xfs" ] || [[ "$FSTYPE" == ext* ]] || continue
+		[ "$TARGET" != "/" ] || continue
+		[[ "$TARGET" != /.snapshots* ]] || continue
+		mountpoint --quiet "$snapshot_dir$TARGET" || mount --bind "$TARGET" "$snapshot_dir$TARGET"
+	done < "$tmpdir/mounts"
+	rm "$tmpdir/mounts"
 
 	mount -t tmpfs -o size=10m tmpfs "$snapshot_dir/run"
-	for i in proc dev sys var tmp; do
+	for i in proc dev sys tmp; do
 		mount --bind "/$i" "$snapshot_dir/$i"
 	done
+	chroot_dir="$snapshot_dir"
 }
 
 umount_chroot()
 {
 	local snapshot_dir="$1"
 
-	for i in proc dev sys var tmp run; do
-		umount "$snapshot_dir/$i"
-	done
-
-	umount "$snapshot_dir"
+	umount -R "$snapshot_dir"
+	chroot_dir=
 }
 
 mount_etc()
@@ -895,7 +906,6 @@ remove_all_kernels()
 	for kv in "${!found_kernels[@]}"; do
 		remove_kernel "${snapshot}" "$kv"
 	done
-
 }
 
 list_entries()
