@@ -4,10 +4,6 @@
 set -e
 shopt -s nullglob
 
-# set to --keep-title to use altenate screen. Better for debugging but
-# causes flicker
-dialog_altenate_screen=
-dialog_backtitle="sdbootutil"
 verbose=
 nl=$'\n'
 shimdir="/usr/share/efi/$(uname -m)"
@@ -2658,13 +2654,12 @@ bootloader_name()
 
 ####### main #######
 
-getopttmp=$(getopt -o hc:v --long help,flicker,verbose,esp-path:,entry-token:,arch:,image:,entry-keys:,no-variables,no-reuse-initrd,no-random-seed,all,sync,portable,removable,only-default,default-snapshot,ask-key,ask-pin,ask-pw,method:,signed-policy,pcr: -n "${0##*/}" -- "$@")
+getopttmp=$(getopt -o hc:v --long help,verbose,esp-path:,entry-token:,arch:,image:,entry-keys:,no-variables,no-reuse-initrd,no-random-seed,all,sync,portable,removable,only-default,default-snapshot,ask-key,ask-pin,ask-pw,method:,signed-policy,pcr: -n "${0##*/}" -- "$@")
 eval set -- "$getopttmp"
 
 while true ; do
 	case "$1" in
 		-h|--help) helpandquit ;;
-		--flicker) dialog_altenate_screen=--keep-tite; shift ;;
 		-v|--verbose) verbose=$((++verbose)); shift ;;
 		--esp-path) arg_esp_path="$2"; shift 2 ;;
 		--arch) arg_arch="$2"; shift 2 ;;
