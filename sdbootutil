@@ -2207,7 +2207,7 @@ set_unlock_method()
 	local slots
 	slots=$(systemd-cryptenroll "$dev")
 	# Do not use TPM2 slot for enrolling TPM2
-	if [ "$arg_method" != "tpm2" && "$arg_method" != "tpm2+pin" ] && echo "$slots" | grep -q tpm2; then
+	if [ "$arg_method" != "tpm2" ] && [ "$arg_method" != "tpm2+pin" ] && echo "$slots" | grep -q tpm2; then
 		echo "Unlocking using TPM2"
 		unlock_method="--unlock-tpm2-device=auto"
 		# Same for FIDO2
