@@ -293,10 +293,16 @@ detect_parent()
 {
 	local subvol="$1"
 	[ -n "$have_snapshots" ] || return 0
+
+	local parent_uuid
 	parent_uuid="$(btrfs subvol show "${subvol#"${subvol_prefix}"}" | sed -ne 's/\s*Parent UUID:\s*//p')"
-	[ "$parent_uuid" != '-' ] || parent_uuid=
-	[ -n "$parent_uuid" ] || return 0
-	parent_subvol="$(/sbin/btrfs subvol show -u "$parent_uuid" "${subvol#"${subvol_prefix}"}" | head -1)"
+	[ "$parent_uuid" != '-' ] || return 0
+
+	parent_subvol=($(btrfs subvol show -u "$parent_uuid" "${subvol#"${subvol_prefix}"}" 2> /dev/null))
+	local btrfs_subvol_status=$?
+	[ "$btrfs_subvol_status" = 0 ] || return 0
+	parent_subvol="${parent_subvol[0]}"
+
 	parent_snapshot="${parent_subvol#"${subvol_prefix}"/.snapshots/}"
 	if [ "$parent_subvol" = "$parent_snapshot" ]; then
 		unset parent_subvol parent_snapshot
