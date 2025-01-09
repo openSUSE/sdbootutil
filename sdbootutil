@@ -1344,7 +1344,7 @@ bli_efi_var_get()
 	# BLI uses this vendor UUID
 	local efi_var="/sys/firmware/efi/efivars/${1:?}-4a67b082-0a4c-41cf-b6c7-440b29bb8c4f"
 	if [ -e "$efi_var" ]; then
-		echo "$(dd "if=$efi_var" bs=2 skip=2 conv=lcase status=none | tr -d '\0')"
+		dd "if=$efi_var" bs=2 skip=2 conv=lcase status=none | tr -d '\0'
 	fi
 }
 
