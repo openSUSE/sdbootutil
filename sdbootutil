@@ -314,6 +314,7 @@ detect_parent()
 sedrootflags()
 {
 	local subvol="$1"
+	# - Delete everything before BOOT_IMAGE= and initrd= (see https://github.com/openSUSE/sdbootutil/issues/182)
 	# - Delete BOOT_IMAGE= and initrd=
 	# - Replace or add root= to refers to UUID or mapped device
 	#   (if encrypted)
@@ -335,6 +336,7 @@ sedrootflags()
 	local root_param="UUID=$root_uuid"
 	[ -z "$root_device_is_crypt" ] || root_param="$root_device"
 	local sed_arguments=("-e s/[ \t]\+/ /g"
+		"-e s/^.*\(initrd=[^ ]*\|BOOT_IMAGE=[^ ]*\)\s*/\1 /"
 		"-e s/\<\(BOOT_IMAGE\|initrd\)=[^ ]* \?//"
 		"-e s/\$//;ta;:a"
 		"-e s,\<root=[^ ]*,root=$root_param,;tb;s,\$, root=$root_param,;tc;:c;:b")
@@ -719,6 +721,17 @@ make_free_space()
 	[ "$total_size" -lt "$free_space" ]
 }
 
+create_boot_options() {
+	local subvol="$1"
+	local boot_options=
+	for i in /etc/kernel/cmdline /usr/lib/kernel/cmdline /proc/cmdline; do
+		[ -f "$i" ] || continue
+		boot_options="$(sedrootflags "$subvol" < "$i")"
+		break
+	done
+	echo "$boot_options"
+}
+
 install_kernel()
 {
 	local snapshot="$1"
@@ -780,12 +793,8 @@ install_kernel()
 
 	make_free_space "$snapshot" || err "No free space in $boot_root for new kernel"
 
-	local boot_options=
-	for i in /etc/kernel/cmdline /usr/lib/kernel/cmdline /proc/cmdline; do
-		[ -f "$i" ] || continue
-		boot_options="$(sedrootflags "$subvol" < "$i")"
-		break
-	done
+	local boot_options
+	boot_options="$(create_boot_options "$subvol")"
 
 	if [ -z "$dstinitrd" ] && [ -e "$tmpdir/initrd-0" ]; then
 		i=0
@@ -968,12 +977,8 @@ update_entry_conf()
 	local subvol=""
 	[ -z "$have_snapshots" ] || subvol="${subvol_prefix}/.snapshots/${snapshot}/snapshot"
 
-	local boot_options=
-	for i in /etc/kernel/cmdline /usr/lib/kernel/cmdline /proc/cmdline; do
-		[ -f "$i" ] || continue
-		boot_options="$(sedrootflags "$subvol" < "$i")"
-		break
-	done
+	local boot_options
+	boot_options="$(create_boot_options "$subvol")"
 
 	cp "$conf" "$tmpdir/entry.conf"
 	sed -i "s|^options\s*.*$|options    $boot_options|g" "$tmpdir/entry.conf"
