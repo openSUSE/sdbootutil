@@ -702,7 +702,8 @@ make_free_space()
 {
 	local snapshot="$1"
 
-	bootctl cleanup
+	# "Cleaning /boot/efi" message is presented via stderr
+	bootctl -q cleanup 2> /dev/null
 
 	# Calculate the free space and the required size.  All sizes
 	# are in Kb to avoid big numbers
@@ -867,6 +868,10 @@ install_kernel()
 	fi
 	[ -z "$failed" ] || err "Failed to install $failed"
 	reset_rollback
+
+	# Do a final cleanup, as sometimes we are replacing an old
+	# initrd
+	bootctl -q cleanup 2> /dev/null
 
 	# This action will require to update the PCR predictions
 	update_predictions=1
