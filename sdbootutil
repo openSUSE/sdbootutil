@@ -197,6 +197,11 @@ helpandquit()
 		PIN			Recovery PIN (re-enrollment; %u:sdbootutil)
 		PW			Password / Recovery Key (initial enrollment; %u:sdbootutil)
 					(%u:cryptenroll for changes via systemd-cryptenroll)
+
+		Misc:
+		Ignoring Devices	A LUKS2 device can be un-tracked (ignored) by sdbootutil if
+					is present in /etc/crypttab and has the "x-sdbootutil.ignore" option
+
 	EOF
 	exit 0
 }
