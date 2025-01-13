@@ -1941,7 +1941,7 @@ clean_pcrlock_d()
 	# Sometimes, like in tests, the user will generate new entries
 	# and reboot in a short period of time
 	if [ "$(find /var/lib/pcrlock.d -type f -name '*-7.pcrlock' | wc -l)" -gt 0 ]; then
-		rm -fr /var/lib/pcrlock.d
+		rm -fr /var/lib/pcrlock.d/*
 	fi
 }
 
@@ -2597,7 +2597,7 @@ enroll()
 unenroll_pcrlock()
 {
 	pcrlock remove-policy &> /dev/null || true
-	rm -fr /var/lib/pcrlock.d
+	rm -fr /var/lib/pcrlock.d/*
 	rm -f /var/lib/systemd/pcrlock.json
 	rm -f "${boot_root}${boot_dst}/pcrlock.json"
 }
