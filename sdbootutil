@@ -189,11 +189,6 @@ helpandquit()
 		update-predictions
 			    Update TPM2 predictions
 
-		UI commands:
-		kernels    Open kernel menu
-		snapshots  Open snapshots menu
-		entries    Open entry menu
-
 		Variables:
 		SYSTEMD_COLORS		Set 0 to disable colored output
 		KEY			Recovery key (initial enrollment; %u:sdbootutil)
