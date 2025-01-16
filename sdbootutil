@@ -284,6 +284,22 @@ is_transactional()
 	grep -q "^overlay /etc" /etc/fstab
 }
 
+keyctl_add_with_timeout()
+{
+	local key="$1"
+	local value="$2"
+
+	# When we create a new key with sudo, we do not create a new
+	# login session, so the key is not accessible to the owner
+	# See https://mjg59.dreamwidth.org/37333.html
+	local keyid
+	keyid="$(echo -n "$value" | keyctl padd user "$key" @s)"
+	keyctl setperm "$keyid" 0x3f3f0000
+	keyctl timeout "$keyid" 120
+	keyctl link "$keyid" @u
+	keyctl unlink "$keyid" @s
+}
+
 subvol_is_ro()
 {
 	[ -n "$have_snapshots" ] || return 0
@@ -2039,9 +2055,7 @@ generate_tpm2_predictions_pcrlock()
 		# Add the generated recovery PIN to the kernel
 		# keyring, so that it is available to `sdbootutil
 		# --method=recovery-key`
-		echo -n "$pin" | keyctl padd user sdbootutil-pin @u > /dev/null
-		# Make the key expire after 2 minutes
-		keyctl timeout %user:sdbootutil-pin 120
+		keyctl_add_with_timeout "sdbootutil-pin" "$pin"
 	fi
 
 	# Publish the assets in the ESP, so can be imported by
@@ -2143,8 +2157,8 @@ detect_tracked_devices()
 	while read -r dev fstype uuid; do
 		[ "$fstype" = 'crypto_LUKS' ] || continue
 		cryptsetup isLuks --type luks2 "$dev" || continue
-		[ -e /etc/crypttab ] && grep -E -q "$dev[[:space:]].*x-sdbootutil.ignore" /etc/crypttab && continue
-		[ -e /etc/crypttab ] && grep -E -q "$uuid[[:space:]].*x-sdbootutil.ignore" /etc/crypttab && continue
+		[ -e /etc/crypttab ] && grep -E -q "${dev}[[:space:]].*x-sdbootutil.ignore" /etc/crypttab && continue
+		[ -e /etc/crypttab ] && grep -E -q "${uuid}[[:space:]].*x-sdbootutil.ignore" /etc/crypttab && continue
 		tracked_devices+=("$dev")
 	done < <(lsblk --noheadings -o PATH,FSTYPE,UUID)
 	have_tracked_devices
@@ -2452,12 +2466,10 @@ enroll_recovery_key()
 	# keyring, so that it is available to systemd-cryptenroll
 	keyid="$(keyctl id %user:cryptenroll 2> /dev/null)" || true
 	if [ -z "$keyid" ] && [ -z "$unlock_method" ]; then
-		echo -n "$key" | keyctl padd user cryptenroll @u > /dev/null
-		keyctl timeout %user:cryptenroll 120
+		keyctl_add_with_timeout "cryptenroll" "$key"
 	fi
 	# ... and to --method=tpm2[+pin] via a private keyring
-	echo -n "$key" | keyctl padd user sdbootutil-pin @u > /dev/null
-	keyctl timeout %user:sdbootutil-pin 120
+	keyctl_add_with_timeout "sdbootutil-pin" "$key"
 }
 
 enroll_device()
