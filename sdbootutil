@@ -2854,9 +2854,8 @@ if [ -z "$SYSTEMD_LOG_LEVEL" ] && [ -n "$verbose" ]; then
 fi
 
 define_commands
-if [ -z "$1" ] || [ "${commands["$1"]}" = "interactive" ]; then
-	stty_size
-	interactive=1
+if [ -z "$1" ]; then
+	helpandquit
 elif [ -z ${commands["$1"]+yes} ]; then
 	err "unknown command $1"
 fi
