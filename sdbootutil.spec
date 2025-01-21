@@ -24,6 +24,7 @@ License:        MIT
 URL:            https://github.com/openSUSE/sdbootutil
 Source:         %{name}-%{version}.tar
 BuildRequires:  systemd-rpm-macros
+Requires:       %{name}-dracut-measure-pcr
 Requires:       (%{name}-snapper if (snapper and btrfsprogs))
 Requires:       (%{name}-tukit if read-only-root-fs)
 Requires:       dialog
@@ -97,7 +98,7 @@ service the effective enrollment.
 
 %package bash-completion
 Summary:        Bash completions for sdbootutil
-Requires:       sdbootutil >= %{version}-%{release}
+Requires:       %{name} = %{version}
 Requires:       bash
 Requires:       bash-completion
 
@@ -105,6 +106,16 @@ Requires:       bash-completion
 Bash completions script for sdbootutil.
 Allows the user to press TAB to see available commands,
 options and parameters.
+
+%package dracut-measure-pcr
+Summary:        Dracut module to measure PCR 15
+BuildRequires:  pkgconfig
+BuildRequires:  rpm-config-SUSE
+BuildRequires:  pkgconfig(dracut)
+BuildArch:      noarch
+
+%description dracut-measure-pcr
+Dracut module from sdbootutil to measure PCR 15 in non-UKIs systems
 
 %prep
 %setup -q
@@ -136,8 +147,12 @@ install -D -m 755 10-%{name}.tukit %{buildroot}%{_prefix}/lib/tukit/plugins/10-%
 # kernel-install
 install -D -m 755 50-%{name}.install %{buildroot}%{_prefix}/lib/kernel/install.d/50-%{name}.install
 
-#bash completions
+# Bash completions
 install -D -m 755 completions/bash_sdbootutil %{buildroot}%{_datadir}/bash-completion/completions/sdbootutil
+
+# Dracut module
+install -D -m 755 module-setup.sh %{buildroot}%{_prefix}/lib/dracut/modules.d/50measure-pcr/module-setup.sh
+install -D -m 755 measure-pcr-generator.sh %{buildroot}%{_prefix}/lib/dracut/modules.d/50measure-pcr/measure-pcr-generator.sh
 
 # tmpfiles
 install -D -m 755 kernel-install-%{name}.conf \
@@ -178,6 +193,15 @@ sdbootutil update
 %posttrans kernel-install
 %tmpfiles_create kernel-install-%{name}.conf
 
+%post dracut-measure-pcr
+%{?regenerate_initrd_post}
+
+%posttrans dracut-measure-pcr
+%{?regenerate_initrd_posttrans}
+
+%postun dracut-measure-pcr
+%{?regenerate_initrd_post}
+
 %files
 %license LICENSE
 %{_bindir}/%{name}
@@ -214,5 +238,10 @@ sdbootutil update
 %dir %{_datadir}/bash-completion
 %dir %{_datadir}/bash-completion/completions
 %{_datadir}/bash-completion/completions/sdbootutil
+
+%files dracut-measure-pcr
+%dir %{_prefix}/lib/dracut
+%dir %{_prefix}/lib/dracut/modules.d
+%{_prefix}/lib/dracut/modules.d/50measure-pcr
 
 %changelog
