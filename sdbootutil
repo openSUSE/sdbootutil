@@ -80,6 +80,8 @@ tmpfile="$tmpdir/tmp"
 
 helpandquit()
 {
+	# Tabs are removed from the start of the line.  Use spaces to
+	# indent
 	cat <<-EOF
 		Usage: $0 [OPTIONS] [COMMAND]
 		OPTIONS:
@@ -91,115 +93,121 @@ helpandquit()
 		  --no-variables	Do not update UEFI variables
 		  --no-reuse-initrd	Always regenerate initrd
 		  --sync		Synchronize (update, downgrade) the bootloader
-		  --portable		Handle bootloader on portable devices (also --removable possible)
+		  --portable		Handle bootloader on portable devices
+		                        (also --removable possible)
 		  --only-default	Only list the default entry
 		  --default-snapshot	[SNAPSHOT] refers to the default snapshot
-		  --ask-key		Ask recovery Key when initial enrollment (or randomly generated)
+		  --ask-key		Ask recovery Key when initial enrollment
+		                        (or randomly generated)
 		  --ask-pin		Ask recovery PIN for re-enrollment
-					Ask TPM2 PIN when initial enrollment
+		                        Ask TPM2 PIN when initial enrollment
 		  --ask-pw		Ask password when initial enrollment
 		  --method		"tpm2", "tpm2+pin", "fido2", "password", "recovery-key"
 		  --signed-policy	Use signed policy for TPM2 enrollment
-		  --pcr		Comma seperated list of PCRs to enroll
+		  --pcr			Comma seperated list of PCRs to enroll
 		  -v, --verbose		More verbose output
 		  -h, --help		This screen
 
 		COMMAND:
 		bootloader [SNAPSHOT]
-			   Print the detected bootloader
+		           Print the detected bootloader
 
 		add-kernel VERSION [SNAPSHOT]
-			   Create boot entry for specified kernel
+		           Create boot entry for specified kernel
 
 		add-all-kernels [SNAPSHOT]
-			   Create boot entries for all kernels in SNAPSHOT
+		           Create boot entries for all kernels in SNAPSHOT
 
 		mkinitrd [SNAPSHOT]
-			   Create boot entries for all kernels in SNAPSHOT,
-			   assumes --no-reuse-initrd to regenerate initrds
+		           Create boot entries for all kernels in SNAPSHOT,
+		           assumes --no-reuse-initrd to regenerate initrds
 
 		remove-kernel VERSION [SNAPSHOT]
-			   Remove boot entry for specified kernel
+		           Remove boot entry for specified kernel
 
 		remove-all-kernels [SNAPSHOT]
-			   Remove boot entries for all kernels in SNAPSHOT
+		           Remove boot entries for all kernels in SNAPSHOT
 
 		list-kernels [SNAPSHOT]
-			   List all kernels related to SNAPSHOT
+		           List all kernels related to SNAPSHOT
 
 		list-entries [SNAPSHOT]
-			   List all entries related to SNAPSHOT
+		           List all entries related to SNAPSHOT
 
 		list-snapshots
-			   List all snapshots
+		           List all snapshots
 
 		list-devices
-			   List encrypted devices that are tracked
+		           List encrypted devices that are tracked
 
 		show-entry VERSION [SNAPSHOT]
-			   Show fields for an entry with an specified kernel
-			   version
+		           Show fields for an entry with an specified kernel
+		           version
 
 		update-entry VERSION [SNAPSHOT]
-			   Update "options" field from /etc/kernel/cmdline for an entry
+		           Update "options" field from /etc/kernel/cmdline
+		           for an entry
 
 		update-all-entries [SNAPSHOT]
-			   Update "options" field from /etc/kernel/cmdline for all entries
+		           Update "options" field from /etc/kernel/cmdline
+		           for all entries
 
 		set-default-snapshot [SNAPSHOT]
-			   Make SNAPSHOT the default for next boot.
-			   Also install all kernels if needed
+		           Make SNAPSHOT the default for next boot.
+		           Also install all kernels if needed
 
 		is-bootable [SNAPSHOT]
-			   Check whether SNAPSHOT has any kernels registered, ie
-			   is potentially bootable
+		           Check whether SNAPSHOT has any kernels registered, ie
+		           is potentially bootable
 
-		install    Install systemd-boot and shim into ESP
+		install
+		           Install systemd-boot and shim into ESP
 
 		needs-update
-			   Check whether the bootloader in ESP needs updating
+		           Check whether the bootloader in ESP needs updating
 
 		update
-			    Update the bootloader if it's older than the deployed version.
-			    Use the --sync option to replace the deployed version also when it's newer
+		           Update the bootloader if it's older than the deployed
+		           version.  Use the --sync to allow downgrades
 
 		force-update
-			    Update the bootloader in any case
+		           Update the bootloader in any case
 
 		set-default ID
-			    Set default boot loader entry
+		           Set default boot loader entry
 
 		get-default
-			    Get default boot loader entry
+		           Get default boot loader entry
 
 		set-timeout SECONDS
-			    Set the menu timeout
+		           Set the menu timeout
 
 		get-timeout
-			    Get the menu timeout in seconds
+		           Get the menu timeout in seconds
 
 		enroll
-			    Enroll a TPM2 (+PIN), a FIDO2 key or a password for
-			    all devices
+		           Enroll a TPM2 (+PIN), a FIDO2 key or a password for
+		           all devices
 
 		unenroll
-			    Unenroll a TPM2 (+PIN), a FIDO2 key or a password for
-			    all devices
+		           Unenroll a TPM2 (+PIN), a FIDO2 key or a password for
+		           all devices
 
 		update-predictions
-			    Update TPM2 predictions
+		           Update TPM2 predictions
 
 		Variables:
-		SYSTEMD_COLORS		Set 0 to disable colored output
-		KEY			Recovery key (initial enrollment; %u:sdbootutil)
-		PIN			TPM2 PIN (initial enrollment; %u:sdbootutil)
-		PIN			Recovery PIN (re-enrollment; %u:sdbootutil)
-		PW			Password / Recovery Key (initial enrollment; %u:sdbootutil)
-					(%u:cryptenroll for changes via systemd-cryptenroll)
+		SYSTEMD_COLORS	Set 0 to disable colored output
+		KEY		Recovery key (initial enrollment; %u:sdbootutil)
+		PIN		TPM2 PIN (initial enrollment; %u:sdbootutil)
+		PIN		Recovery PIN (re-enrollment; %u:sdbootutil)
+		PW		Password / Recovery Key (initial enrollment; %u:sdbootutil)
+		                (%u:cryptenroll for changes via systemd-cryptenroll)
 
 		Misc:
-		Ignoring Devices	A LUKS2 device can be un-tracked (ignored) by sdbootutil if
-					is present in /etc/crypttab and has the "x-sdbootutil.ignore" option
+		Ignoring Devices	A LUKS2 device can be un-tracked (ignored)
+		                        by sdbootutil if is present in /etc/crypttab
+		                        and has the "x-sdbootutil.ignore" option
 
 	EOF
 	exit 0
