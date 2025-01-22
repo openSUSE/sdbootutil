@@ -2280,7 +2280,7 @@ set_unlock_method()
 	if [ "$arg_method" != "tpm2" ] && [ "$arg_method" != "tpm2+pin" ] && echo "$slots" | grep -q tpm2; then
 		echo "Unlocking using TPM2"
 		unlock_method="--unlock-tpm2-device=auto"
-		# Same for FIDO2
+	# Same for FIDO2
 	elif [ "$arg_method" != "fido2" ] && echo "$slots" | grep -q fido2; then
 		echo "Unlocking using FIDO2"
 		unlock_method="--unlock-fido2-device=auto"
@@ -2545,6 +2545,7 @@ enroll()
 		"tpm2"|"tpm2+pin")
 			have_tpm2 || err "No TPM2 found found"
 			add_crypttab_option 'tpm2-device=auto'
+			add_crypttab_option 'tpm2-measure-pcr=yes'
 			;;
 
 		"fido2")
@@ -2685,6 +2686,7 @@ unenroll()
 		"tpm2"|"tpm2+pin")
 			have_tpm2 || err "No TPM2 found found"
 			remove_crypttab_option 'tpm2-device=auto'
+			remove_crypttab_option 'tpm2-measure-pcr=yes'
 			;;
 
 		"fido2")
