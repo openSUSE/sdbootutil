@@ -43,6 +43,7 @@ Requires:       tpm2.0-tools
 Requires:       udev
 Supplements:    (grub2-x86_64-efi-bls and shim)
 Supplements:    (systemd-boot and shim)
+BuildArch:      noarch
 ExclusiveArch:  aarch64 ppc64le riscv64 x86_64
 %{?systemd_requires}
 
@@ -56,6 +57,7 @@ Summary:        plugin script for snapper
 Requires:       %{name} = %{version}
 Requires:       btrfsprogs
 Requires:       snapper
+BuildArch:      noarch
 
 %description snapper
 Plugin scripts for snapper to handle BLS config files
@@ -64,6 +66,7 @@ Plugin scripts for snapper to handle BLS config files
 Summary:        plugin script for tukit
 Requires:       %{name} = %{version}
 Requires:       tukit
+BuildArch:      noarch
 
 %description tukit
 Plugin scripts for tukit to handle BLS config files
@@ -73,6 +76,7 @@ Summary:        Hook script for kernel-install
 Requires:       %{name} = %{version}
 # While kernel-install is in udev
 Requires:       udev
+BuildArch:      noarch
 
 %description kernel-install
 Plugin script for kernel-install. Note: installation of this
@@ -81,6 +85,7 @@ package may disable other plugin scripts that are incompatible.
 %package enroll
 Summary:        Full disk encryption enrollment
 Requires:       %{name} = %{version}
+BuildArch:      noarch
 
 %description enroll
 Systemd service and script for full disk encryption enrollment.
@@ -90,6 +95,7 @@ Summary:        JEOS module for full disk encryption enrollment
 Requires:       %{name} = %{version}
 Requires:       %{name}-enroll = %{version}
 Requires:       jeos-firstboot
+BuildArch:      noarch
 
 %description jeos-firstboot-enroll
 JEOS module for full disk encryption enrollment. The module
@@ -101,6 +107,7 @@ Summary:        Bash completions for sdbootutil
 Requires:       %{name} = %{version}
 Requires:       bash
 Requires:       bash-completion
+BuildArch:      noarch
 
 %description bash-completion
 Bash completions script for sdbootutil.
