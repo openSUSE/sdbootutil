@@ -2809,7 +2809,7 @@ if [ "$1" = "_print_bash_completion_data" ]; then
 fi
 
 define_options
-getopt_tmp=$(getopt -o hc:v --long "$opts_long" -n "${0##*/}" -- "$@")
+getopt_tmp=$(getopt -o hv --long "$opts_long" -n "${0##*/}" -- "$@")
 eval set -- "$getopt_tmp"
 
 while true ; do
