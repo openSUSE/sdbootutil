@@ -1510,6 +1510,7 @@ get_default_entry()
 set_timeout_sdboot()
 {
 	local timeout="${1:?}"
+	[ "$timeout" = "-1" ] && timeout="menu-force"
 	if ! bootctl set-timeout "$timeout" > "$tmpfile" 2>&1; then
 		if grep -q "Failed to update EFI variable" "$tmpfile" ||
 				grep -q "Not booted with a supported boot loader" "$tmpfile"; then
@@ -1524,6 +1525,8 @@ set_timeout_grub2_bls()
 {
 	local timeout="${1:?}"
 	set_timeout_sdboot "$timeout"
+	[ "$timeout" = "menu-disabled" ] || [ "$timeout" = "menu-hidden" ] && timeout=0
+	[ "$timeout" = "menu-force" ] && timeout=-1
 	grubenv_set "timeout" "$timeout"
 }
 
