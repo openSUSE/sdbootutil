@@ -32,6 +32,7 @@ Requires:       dracut-pcr-signature
 Requires:       efibootmgr
 Requires:       jq
 Requires:       keyutils
+Requires:       openssl
 Requires:       pcr-oracle
 Requires:       qrencode
 Requires:       sed
@@ -160,6 +161,10 @@ install -D -m 755 completions/bash_sdbootutil %{buildroot}%{_datadir}/bash-compl
 # Dracut module
 install -D -m 755 module-setup.sh %{buildroot}%{_prefix}/lib/dracut/modules.d/50measure-pcr/module-setup.sh
 install -D -m 755 measure-pcr-generator.sh %{buildroot}%{_prefix}/lib/dracut/modules.d/50measure-pcr/measure-pcr-generator.sh
+install -D -m 755 measure-pcr-validator.sh %{buildroot}%{_prefix}/lib/dracut/modules.d/50measure-pcr/measure-pcr-validator.sh
+install -D -m 644 measure-pcr-validator.service %{buildroot}/%{_prefix}/lib/dracut/modules.d/50measure-pcr/measure-pcr-validator.service
+
+install -d -m 700 %{buildroot}%{_sharedstatedir}/%{name}
 
 # tmpfiles
 install -D -m 755 kernel-install-%{name}.conf \
@@ -211,6 +216,7 @@ sdbootutil update
 
 %files
 %license LICENSE
+%dir %{_sharedstatedir}/%{name}
 %{_bindir}/%{name}
 %{_unitdir}/%{name}-update-predictions.service
 

@@ -1,0 +1,18 @@
+[Unit]
+Description=Validate LUKS2 devices
+DefaultDependencies=false
+
+OnFailure=systemd-halt.service
+
+Wants=cryptsetup.target
+After=cryptsetup.target
+Before=local-fs.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/bin/measure-pcr-validator
+
+[Install]
+# If we use RequiredBy we trigger the debug shell
+WantedBy=local-fs.target
