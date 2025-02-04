@@ -1,6 +1,10 @@
 #!/bin/bash
 set -euo pipefail
 
+WHITE="\e[1;37m"
+LIGHT_BLUE="\e[1;34m"
+END="\e[m"
+
 get_measure_pcr_ignore() {
 	(set +eu; . /lib/dracut-lib.sh; getargbool no measure-pcr-validator.ignore)
 }
@@ -46,6 +50,19 @@ if [ -f "/var/lib/sdbootutil/measure-pcr-prediction" ] && ! validate_measure_pcr
 		echo "Warning: the validation of PCR 15 failed. Continuing the boot process"
 	else
 		echo "Error: the validation of PCR 15 failed"
+
+		kill -SIGRTMIN+21 1
+		sleep 1
+		echo -ne '\n\n\a'
+		echo -e "${WHITE}*********************************************************************${END}"
+		echo -e "${WHITE}ERROR: PCR 15 mismatch. Encrypted devices compromised${END}"
+		echo -e "${WHITE}Use${END} '${LIGHT_BLUE}measure-pcr-validator.ignore=yes${END}' ${WHITE}in cmdline to bypass the check${END}"
+		echo -e "${WHITE}*********************************************************************${END}"
+		echo
+		read -n1 -s -r -t 10 -p $'\e[1;37m*** The system will be halted. Press any key ...\e[0m' || true
+		echo
+		kill -SIGRTMIN+20 1
+
 		exit 1
 	fi
 fi
