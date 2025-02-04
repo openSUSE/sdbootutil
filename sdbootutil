@@ -2242,12 +2242,24 @@ generate_tpm2_predictions_pcr_15()
 			/var/lib/sdbootutil/measure-pcr-prediction
 	fi
 
+	# Register the hash of the parsed crypttab
+	local crypttab_sha1
+	read -r crypttab_sha1 _ < <(sha1sum /etc/crypttab)
+	echo "$crypttab_sha1" > /var/lib/sdbootutil/crypttab.sha1
+
 	# Publish the assets in the ESP, so can be imported by
 	# dracut-pcr-signature
 	[ -e /var/lib/sdbootutil/measure-pcr-prediction ] && \
 		cp /var/lib/sdbootutil/measure-pcr-prediction "${boot_root}${boot_dst}"
 	[ -e /var/lib/sdbootutil/measure-pcr-prediction.sha256 ] && \
 		cp /var/lib/sdbootutil/measure-pcr-prediction.sha256 "${boot_root}${boot_dst}"
+}
+
+updated_crypttab()
+{
+	local crypttab_sha1
+	read -r crypttab_sha1 _ < <(sha1sum /etc/crypttab)
+	grep -Fixq "$crypttab_sha1" /var/lib/sdbootutil/crypttab.sha1 2> /dev/null
 }
 
 generate_tpm2_predictions()
@@ -2264,6 +2276,11 @@ generate_tpm2_predictions()
 		generate_tpm2_predictions_pcrlock "${FDE_SEAL_PCR_LIST}"
 	fi
 
+	# Generate a PCR 15 prediction only in certain cases, as for
+	# now this will ask the password (can be resolved by an
+	# external tool that extract the password from the TPM2 if the
+	# policy is still valid)
+	updated_crypttab || { generate_tpm2_predictions_pcr_15; arg_measure_pcr=; }
 	[ -f "/var/lib/sdbootutil/measure-pcr-prediction" ] && [ -z "$arg_measure_pcr" ] || generate_tpm2_predictions_pcr_15
 }
 
