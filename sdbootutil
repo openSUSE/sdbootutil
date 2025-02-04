@@ -22,6 +22,7 @@ arg_default_snapshot=
 arg_ask_key_pin_or_pw=
 arg_method=
 arg_signed_policy=
+arg_measure_pcr=
 have_snapshots=
 # for x in vmlinuz image vmlinux linux bzImage uImage Image zImage; do
 image=
@@ -104,6 +105,8 @@ helpandquit()
 		  --ask-pw		Ask password when initial enrollment
 		  --method		"tpm2", "tpm2+pin", "fido2", "password", "recovery-key"
 		  --signed-policy	Use signed policy for TPM2 enrollment
+		  --measure-pcr		Force update of PCR 15 prediction for LUKS2 volume key
+		                        Requires LUKS2 password to accessing the volume key
 		  --pcr			Comma seperated list of PCRs to enroll
 		  -v, --verbose		More verbose output
 		  -h, --help		This screen
@@ -1377,7 +1380,7 @@ hex_to_binary()
 {
 	local s="$1"
 	local i
-	for ((i=0;i<${#s};i+=2)); do eval echo -n "\$'\x${s:$i:2}'"; done
+	for ((i=0;i<${#s};i+=2)); do echo -ne "\x${s:$i:2}"; done
 }
 
 update_random_seed()
@@ -1690,12 +1693,12 @@ pcrlock_manual_raw()
 	echo -n '{"records":[{"pcr":'"$pcr"',"digests":[' > "$pcrlock"
 	local separator=0
 	local digest
-	for a in sha1 sha256 sha384 sha512; do
+	for dgst in sha1 sha256 sha384 sha512; do
 		[ "$separator" = "0" ] || echo -n "," >> "$pcrlock"
 		separator=1
-		hash "${a}sum" || continue
-		read -r digest _ < <("${a}sum" "$element")
-		echo -n '{"hashAlg":"'"$a"'","digest":"'"$digest"'"}' >> "$pcrlock"
+		hash "${dgst}sum" || continue
+		read -r digest _ < <("${dgst}sum" "$element")
+		echo -n '{"hashAlg":"'"$dgst"'","digest":"'"$digest"'"}' >> "$pcrlock"
 	done
 	echo ']}]}' >> "$pcrlock"
 }
@@ -2143,6 +2146,110 @@ generate_tpm2_predictions_pcr_oracle()
 		}
 }
 
+get_volume_password()
+{
+	local pw keyid keyid_int
+	keyid="$(keyctl id %user:sdbootutil 2> /dev/null)" || true
+	keyid_int="$(keyctl id %user:sdbootutil-pin 2> /dev/null)" || true
+	if [ -n "$keyid_int" ]; then
+		pw="$(keyctl pipe "$keyid_int")"
+	elif [ -n "$keyid" ]; then
+		pw="$(keyctl pipe "$keyid")"
+	else
+		read -r -s -p "Password: " pw
+		keyctl_add_with_timeout "sdbootutil-pin" "$pw"
+	fi
+	echo "$pw"
+}
+
+get_volume_key()
+{
+	local dev="$1"
+	local pw out cryptsetup_status
+	pw="$(get_volume_password)"
+	out="$(cryptsetup luksDump --batch-mode --dump-master-key "$dev" <<<"$pw")"
+	cryptsetup_status="$?"
+	echo "$out" | sed -n '/MK dump:/,$p' | sed -E 's/MK dump:|[[:blank:]]+//g' | sed -z 's/\n//g'
+	return "$cryptsetup_status"
+}
+
+extend_pcr()
+{
+	local dgst="$1"
+	local pcr="$2"
+	local val="$3"
+	local digest
+
+	hash "${dgst}sum" || return
+	hex_to_binary "$pcr$val" > "$tmpdir/pcr"
+	read -r digest _ < <("${dgst}sum" "$tmpdir/pcr")
+	echo "$digest"
+}
+
+generate_tpm2_predictions_pcr_15()
+{
+	local devs=()
+	local msgs=()
+	local vks=()
+	local name dev opts uuid vk pw
+	# Read /etc/crypttab lines that contains tpm2-device and
+	# tpm2-measure-pcr.  This code is the similar from
+	# measure-pcr-generator.sh, so we guarantee the same ordering
+	# for PCR 15 extension
+	while read -r name dev _ opts; do
+		# Only the entries in /etc/crypttab in the initrd
+		# (marked with x-initrd.attach) should participate
+		# from the extension for now.  The reason is that
+		# extensions after the switch root cannot participate
+		# in abort the boot process from initrd itself
+		[[ "$name" = \#* ]] && continue
+		[[ "$opts" != *"x-initrd.attach"* ]] && continue
+		[[ "$opts" != *"tpm2-device="* ]] && continue
+		[[ "$opts" != *"tpm2-measure-pcr="* ]] && continue
+		devs+=("$dev")
+		uuid="$(blkid "$dev" -o value -s UUID)"
+		msgs+=("cryptsetup:$name:$uuid")
+	done < /etc/crypttab
+	# We need to separate this into a different loop because we
+	# cannot nest two reads (one for crypttab and another for the
+	# password)
+	for dev in "${devs[@]}"; do
+		vk="$(get_volume_key "$dev")" || {
+			keyctl revoke %user:sdbootutil-pin 2> /dev/null || true
+			return 1
+		}
+		vks+=("$vk")
+	done
+
+	rm -f /var/lib/sdbootutil/measure-pcr-prediction
+	rm -f /var/lib/sdbootutil/measure-pcr-prediction.sha256
+	local dgsts=("sha1" "sha256" "sha384" "sha512")
+	local sizes=(40 64 96 128)
+	local pcr15 hmac
+	for i in "${!dgsts[@]}"; do
+		pcr15="$(printf '0%.0s' $(seq 1 "${sizes[i]}"))"
+		for j in "${!msgs[@]}"; do
+			hmac="$(echo -ne "${msgs[j]}" | openssl mac -digest "${dgsts[i]}" -macopt hexkey:"${vks[j]}" HMAC)"
+			pcr15="$(extend_pcr "${dgsts[i]}" "$pcr15" "$hmac")"
+		done
+		echo "$pcr15" >> "/var/lib/sdbootutil/measure-pcr-prediction"
+	done
+
+	if [ -f "/var/lib/sdbootutil/measure-pcr-prediction" ] && [ -f "/var/lib/sdbootutil/measure-pcr-private.pem" ]; then
+		openssl dgst -sha256 \
+			-sign /var/lib/sdbootutil/measure-pcr-private.pem \
+			-out /var/lib/sdbootutil/measure-pcr-prediction.sha256 \
+			/var/lib/sdbootutil/measure-pcr-prediction
+	fi
+
+	# Publish the assets in the ESP, so can be imported by
+	# dracut-pcr-signature
+	[ -e /var/lib/sdbootutil/measure-pcr-prediction ] && \
+		cp /var/lib/sdbootutil/measure-pcr-prediction "${boot_root}${boot_dst}"
+	[ -e /var/lib/sdbootutil/measure-pcr-prediction.sha256 ] && \
+		cp /var/lib/sdbootutil/measure-pcr-prediction.sha256 "${boot_root}${boot_dst}"
+}
+
 generate_tpm2_predictions()
 {
 	[ -e /etc/crypttab ] || return 0
@@ -2156,6 +2263,8 @@ generate_tpm2_predictions()
 
 		generate_tpm2_predictions_pcrlock "${FDE_SEAL_PCR_LIST}"
 	fi
+
+	[ -f "/var/lib/sdbootutil/measure-pcr-prediction" ] && [ -z "$arg_measure_pcr" ] || generate_tpm2_predictions_pcr_15
 }
 
 have_tracked_devices()
@@ -2553,6 +2662,17 @@ enroll()
 			add_crypttab_option 'fido2-device=auto'
 			;;
 	esac
+
+	# For predicting PCR 15 we need to sign a file.  Create the
+	# public and private key if missing.  This (as the
+	# /etc/crypttab change) can require a new initrd
+	if [ "$arg_method" = "tpm2" ] || [ "$arg_method" = "tpm2+pin" ]; then
+		local private="/var/lib/sdbootutil/measure-pcr-private.pem"
+		local public="/var/lib/sdbootutil/measure-pcr-public.pem"
+		[ -f "$private" ] || openssl genrsa -out "$private" 4096
+		[ -f "$public" ] || openssl rsa -in "$private" -pubout -out "$public"
+	fi
+
 	if [ "$arg_no_reuse_initrd" = "1" ]; then
 		install_all_kernels "$root_snapshot"
 		# Avoid the call of generate_tpm2_predictions at the
@@ -2629,6 +2749,10 @@ unenroll_pcrlock()
 	rm -fr /var/lib/pcrlock.d
 	rm -f /var/lib/systemd/pcrlock.json
 	rm -f "${boot_root}${boot_dst}/pcrlock.json"
+	rm -f /var/lib/sdbootutil/measure-pcr-prediction
+	rm -f /var/lib/sdbootutil/measure-pcr-prediction.sha256
+	rm -f "${boot_root}${boot_dst}/measure-pcr-prediction"
+	rm -f "${boot_root}${boot_dst}/measure-pcr-prediction.sha256"
 }
 
 unenroll_pcr_oracle()
@@ -2638,6 +2762,10 @@ unenroll_pcr_oracle()
 	rm -f /etc/systemd/tpm2-pcr-signature.json
 	rm -f "${boot_root}${boot_dst}/tpm2-pcr-public-key.pem"
 	rm -f "${boot_root}${boot_dst}/tpm2-pcr-signature.json"
+	rm -f /var/lib/sdbootutil/measure-pcr-prediction
+	rm -f /var/lib/sdbootutil/measure-pcr-prediction.sha256
+	rm -f "${boot_root}${boot_dst}/measure-pcr-prediction"
+	rm -f "${boot_root}${boot_dst}/measure-pcr-prediction.sha256"
 }
 
 unenroll_device()
@@ -2787,6 +2915,7 @@ define_options() {
 		[ask-pw]=""
 		[method]="_method"
 		[signed-policy]=""
+		[measure-pcr]=""
 		[pcr]="_none"
 	)
 	opts_long=""
@@ -2846,6 +2975,7 @@ while true ; do
 		--ask-key|--ask-pin|--ask-pw) arg_ask_key_pin_or_pw=1; shift ;;
 		--method) arg_method="$2"; shift 2 ;;
 		--signed-policy) arg_signed_policy=1; shift ;;
+		--measure-pcr) arg_measure_pcr=1; shift ;;
 		--pcr) FDE_SEAL_PCR_LIST="$2"; shift 2 ;;
 		--) shift ; break ;;
 		*) echo "Internal error!" ; exit 1 ;;
