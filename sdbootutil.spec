@@ -30,6 +30,7 @@ Requires:       dialog
 Requires:       dracut-pcr-signature
 Requires:       efibootmgr
 Requires:       jq
+Requires:       keyutils
 Requires:       pcr-oracle
 Requires:       qrencode
 Requires:       sed
