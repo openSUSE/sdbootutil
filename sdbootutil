@@ -1473,7 +1473,8 @@ set_default_grub2_bls()
 {
 	local id="${1:?}"
 	set_default_sdboot "$id"
-	grubenv_set "default" "$id"
+	# Remove the ".conf" suffix (bsc#1237198)
+	grubenv_set "default" "${id/%.conf/}"
 }
 
 set_default_entry()
@@ -1504,7 +1505,8 @@ get_default_grub2_bls()
 {
 	local val
 	val="$(grubenv_get "default")"
-	echo "$val"
+	# Add ".conf" suffix if necessary (bsc#1237198)
+	echo "${val/%.conf/}.conf"
 }
 
 get_default_entry()
