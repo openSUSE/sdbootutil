@@ -4,6 +4,8 @@ set -euo pipefail
 # For a generator, the first parameter `normal-dir` is not optional
 [ -n "$1" ] || { echo "Missing normal-dir parameter"; exit 1; }
 
+[ -f "/etc/crypttab" ] || exit 0;
+
 # Read /etc/crypttab lines that contains tpm2-device and
 # tpm2-measure-pcr.  It will order the services as listed in this file
 after=""
