@@ -14,7 +14,7 @@ RemainAfterExit=yes
 ExecStart=/usr/bin/measure-pcr-validator
 Environment=TERM=linux
 ExecStopPost=/bin/sh -c "/usr/bin/plymouth quit 2>/dev/null || :"
-StandardOutput=journal+tty
+StandardOutput=tty
 StandardInput=tty
 
 [Install]
