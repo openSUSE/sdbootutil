@@ -304,10 +304,13 @@ keyctl_add_with_timeout()
 	# See https://mjg59.dreamwidth.org/37333.html
 	local keyid
 	keyid="$(echo -n "$value" | keyctl padd user "$key" @s)"
-	keyctl setperm "$keyid" 0x3f3f0000
+	# Remove permission from the possesor
+	keyctl setperm "$keyid" 0x003f0000
 	keyctl timeout "$keyid" 120
 	keyctl link "$keyid" @u
-	keyctl unlink "$keyid" @s
+	# systemd tools are doing `keyctl request user "$key"`, and
+	# for some reason this means that the key must still be in the
+	# session keyring, so we cannot do `keyctl unlink "$keyid" @s`
 }
 
 subvol_is_ro()
