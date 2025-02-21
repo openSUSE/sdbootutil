@@ -1,7 +1,7 @@
 #
 # spec file for package sdbootutil
 #
-# Copyright (c) 2024 SUSE LLC
+# Copyright (c) 2025 SUSE LLC
 #
 # All modifications and additions to the file contributed by third parties
 # remain the property of their copyright owners, unless otherwise agreed
@@ -25,8 +25,6 @@ URL:            https://github.com/openSUSE/sdbootutil
 Source:         %{name}-%{version}.tar
 BuildRequires:  systemd-rpm-macros
 Requires:       %{name}-dracut-measure-pcr
-Requires:       (%{name}-snapper if (snapper and btrfsprogs))
-Requires:       (%{name}-tukit if read-only-root-fs)
 Requires:       dialog
 Requires:       dracut-pcr-signature
 Requires:       efibootmgr
@@ -36,6 +34,8 @@ Requires:       openssl
 Requires:       pcr-oracle
 Requires:       qrencode
 Requires:       sed
+Requires:       (%{name}-snapper if (snapper and btrfsprogs))
+Requires:       (%{name}-tukit if read-only-root-fs)
 # While systemd-pcrlock is in experimental
 Requires:       systemd-experimental
 # something needs to require it. Can be us.
