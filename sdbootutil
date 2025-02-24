@@ -2254,9 +2254,9 @@ generate_tpm2_predictions_pcr_15()
 
 	# Publish the assets in the ESP, so can be imported by
 	# dracut-pcr-signature
-	[ -e /var/lib/sdbootutil/measure-pcr-prediction ] && \
+	[ ! -e /var/lib/sdbootutil/measure-pcr-prediction ] || \
 		cp /var/lib/sdbootutil/measure-pcr-prediction "${boot_root}${boot_dst}"
-	[ -e /var/lib/sdbootutil/measure-pcr-prediction.sha256 ] && \
+	[ ! -e /var/lib/sdbootutil/measure-pcr-prediction.sha256 ] || \
 		cp /var/lib/sdbootutil/measure-pcr-prediction.sha256 "${boot_root}${boot_dst}"
 }
 
