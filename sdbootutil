@@ -2156,7 +2156,10 @@ get_volume_password()
 	local pw keyid keyid_int
 	keyid="$(keyctl id %user:sdbootutil 2> /dev/null)" || true
 	keyid_int="$(keyctl id %user:sdbootutil-pin 2> /dev/null)" || true
-	if [ -n "$keyid_int" ]; then
+	keyid_ce="$(keyctl id %user:cryptenroll 2> /dev/null)" || true
+	if [ -n "$keyid_ce" ]; then
+		pw="$(keyctl pipe "$keyid_ce")"
+	elif [ -n "$keyid_int" ]; then
 		pw="$(keyctl pipe "$keyid_int")"
 	elif [ -n "$keyid" ]; then
 		pw="$(keyctl pipe "$keyid")"
