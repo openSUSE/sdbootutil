@@ -2699,7 +2699,7 @@ enroll()
 		local private="/var/lib/sdbootutil/measure-pcr-private.pem"
 		local public="/var/lib/sdbootutil/measure-pcr-public.pem"
 		[ -f "$private" ] || openssl genrsa -out "$private" 4096
-		[ -f "$public" ] || openssl rsa -in "$private" -pubout -out "$public"
+		[ -f "$public" ] || openssl rsa -noout -in "$private" -pubout -out "$public"
 	fi
 
 	if [ "$arg_no_reuse_initrd" = "1" ]; then
