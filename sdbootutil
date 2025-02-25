@@ -2212,7 +2212,11 @@ generate_tpm2_predictions_pcr_15()
 		[[ "$opts" != *"tpm2-device="* ]] && continue
 		[[ "$opts" != *"tpm2-measure-pcr="* ]] && continue
 		devs+=("$dev")
-		uuid="$(blkid "$dev" -o value -s UUID)"
+		if [[ "$dev" = "UUID="* ]]; then
+			uuid="${dev#"UUID="}"
+		else
+			uuid="$(blkid "$dev" -o value -s UUID)"
+		fi
 		msgs+=("cryptsetup:$name:$uuid")
 	done < /etc/crypttab
 	# We need to separate this into a different loop because we
