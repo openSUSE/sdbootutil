@@ -1483,6 +1483,9 @@ set_default_grub2_bls()
 set_default_entry()
 {
 	local id="${1:?}"
+	if [ ! -f "${boot_root}/loader/entries/$id" ] && [ ! -f "${boot_root}/loader/entries/$id.conf" ]; then
+		err "Boot loader entry $id not found"
+	fi
 	log_info "setting default entry $id"
 	if is_sdboot; then
 		set_default_sdboot "$id"
