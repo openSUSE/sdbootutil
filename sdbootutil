@@ -1802,10 +1802,10 @@ pcrlock_grub2_bls_entry_files()
 {
 	local entries="${1:-$entryfile}"
 	local suffix="${2:+-$2}"
-	local base="${3}"
+	local base="${3:-$boot_root}"
 	local locks=()
 	local n=0
-	while read -r i; do
+	for i in "$base"/loader/entries/*.conf; do
 		n=$((n+1))
 		if [ -n "$base" ]; then
 			i="${i#/boot/efi}"
@@ -1817,7 +1817,7 @@ pcrlock_grub2_bls_entry_files()
 			--pcrlock="$tmpdir/entry-$n.pcrlock" \
 			"$i"
 		locks+=( "$tmpdir/entry-$n.pcrlock" )
-	done < <(jq --raw-output 'map(.path) | .[]' "$entries")
+	done
 
 	jq --slurp '{"records": [.[].records[0]]}' \
 	   "${locks[@]}" \
