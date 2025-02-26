@@ -935,7 +935,6 @@ remove_all_kernels()
 
 list_entries()
 {
-	# The password is read from "cryptenroll" kernel keyring
 	if [ ! -s "$entryfile" ]; then
 		if [ -n "$1" ]; then
 			update_entries_for_snapshot "$1"
