@@ -164,14 +164,16 @@ helpandquit()
 		           is potentially bootable
 
 		install
-		           Install systemd-boot and shim into ESP
+		           Install the bootloader and shim into ESP
 
 		needs-update
 		           Check whether the bootloader in ESP needs updating
 
 		update
-		           Update the bootloader if it's older than the deployed
-		           version.  Use the --sync to allow downgrades
+		           Update the bootloader in the ESP if a newer version
+		           is available. Passing the --sync option will also
+		           allow downgrades, ensuring that the version in the ESP
+		           matches the one installed in the system.
 
 		force-update
 		           Update the bootloader in any case
