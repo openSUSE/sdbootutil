@@ -257,27 +257,37 @@ load_config_file()
 
 is_sdboot()
 {
-	# LOADER_TYPE has preference, but is is not present and
-	# systemd-boot and grub2-bls are co-installed, we favor
-	# grub2-bls in the detection
-	[ -z "$LOADER_TYPE" ] || { [ "$LOADER_TYPE" = "systemd-boot" ]; return; }
-
 	local sdboot grub2_bls
+
 	sdboot="$(find_sdboot "${1-$root_snapshot}")"
 	grub2_bls="$(find_grub2_bls "${1-$root_snapshot}")"
-	[ -e "$sdboot" ] && [ ! -e "$grub2_bls" ]
+
+	# If boot loader is not found, then we check LOADER_TYPE, but
+	# if is not present and systemd-boot and grub2-bls are
+	# co-installed, we favor grub2-bls in the detection
+	if [ ! -e "$sdboot" ] && [ ! -e "$grub2_bls" ]; then
+		[ -z "$LOADER_TYPE" ] || [ "$LOADER_TYPE" = "systemd-boot" ]
+	else
+		[ -e "$sdboot" ] && [ ! -e "$grub2_bls" ]
+	fi
 }
 
 is_grub2_bls()
 {
-	# LOADER_TYPE has preference, but is is not present and
-	# systemd-boot and grub2-bls are co-installed, we favor
-	# grub2-bls in the detection
-	[ -z "$LOADER_TYPE" ] || { [ "$LOADER_TYPE" = "grub2-bls" ]; return; }
 
-	local grub2_bls
+	local sdboot grub2_bls
+
+	sdboot="$(find_sdboot "${1-$root_snapshot}")"
 	grub2_bls="$(find_grub2_bls "${1-$root_snapshot}")"
-	[ -e "$grub2_bls" ]
+
+	# If boot loader is not found, then we check LOADER_TYPE, but
+	# if is not present and systemd-boot and grub2-bls are
+	# co-installed, we favor grub2-bls in the detection
+	if [ ! -e "$sdboot" ] && [ ! -e "$grub2_bls" ]; then
+		[ -z "$LOADER_TYPE" ] || [ "$LOADER_TYPE" = "grub2-bls" ]
+	else
+		[ -e "$grub2_bls" ]
+	fi
 }
 
 reset_rollback()
@@ -1226,7 +1236,8 @@ find_sdboot()
 
 find_grub2_bls()
 {
-	local grub2_bls
+	local prefix=""
+	[ -z "$have_snapshots" ] || prefix="/.snapshots/${1-$root_snapshot}/snapshot"
 
 	local grub2_arch
 	grub2_arch="$(uname -m)"
@@ -1247,8 +1258,7 @@ find_grub2_bls()
 	# The old grub.efi will contain the BLS patches, but we cannot
 	# use it because we also dropped the process of creating the
 	# configuration file and installing bli.mod
-	grub2_bls="/usr/share/grub2/${grub2_arch}-efi/grubbls.efi"
-	echo "$grub2_bls"
+	echo "$prefix/usr/share/grub2/${grub2_arch}-efi/grubbls.efi"
 }
 
 find_bootloader()
@@ -1467,7 +1477,8 @@ set_default_sdboot()
 	local id="${1:?}"
 	if ! bootctl set-default "$id" > "$tmpfile" 2>&1; then
 		if grep -q "Failed to update EFI variable" "$tmpfile" ||
-				grep -q "Not booted with a supported boot loader" "$tmpfile"; then
+				grep -q "Not booted with a supported boot loader" "$tmpfile" ||
+				grep -q "Not booted with UEFI" "$tmpfile"; then
 			loader_conf_set "default" "$id"
 		else
 			err "$(cat "$tmpfile")"
