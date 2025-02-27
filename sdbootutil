@@ -1274,7 +1274,7 @@ bootloader_needs_update()
 	[ -n "$v" ] || return 1
 	log_info "deployed version $v"
 	nv="$(bootloader_version "$(find_bootloader "$snapshot")")"
-	[ -n "$v" ] || return 1
+	[ -n "$nv" ] || return 1
 	log_info "system version $nv"
 	systemd-analyze compare-versions "$v" "$nv" 2>/dev/null
 	local status="$?"
