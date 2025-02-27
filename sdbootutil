@@ -1496,6 +1496,9 @@ set_default_entry()
 		err "Bootloader not detected"
 	fi
 
+	# Setting a different boot entry invalidates "$entryfile"
+	rm -f "$entryfile"
+
 	# This action will require to update the PCR predictions
 	update_predictions=1
 }
@@ -1610,6 +1613,14 @@ set_default_snapshot()
 			err "snapshot $num has no kernels"
 		fi
 	fi
+
+	# The default snapshot is not the criteria used for the
+	# bootloader to select the default boot entry, but for
+	# coherence we synchronize it here, invalidating any previous
+	# "$snapperfile"
+	snapper modify --default "$num"
+	rm -f "$snapperfile"
+
 	set_default_entry "${configs[0]}"
 }
 
