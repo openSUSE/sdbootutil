@@ -1333,7 +1333,7 @@ install_bootloader()
 		install -p -D "$bootloader" "$boot_root/EFI/BOOT/BOOT${firmware_arch^^}.EFI"
 	fi
 
-	# this is for shim to create the entry if missing
+	# This is for shim to create the entry if missing
 	[ -n "$arg_portable" ] || echo "${entry##*/},openSUSE Boot Manager" | { echo -ne "\xff\xfe"; iconv -f ascii -t ucs-2le; } > "$boot_root$boot_dst/boot.csv"
 
 	mkdir -p "$boot_root/$entry_token"
