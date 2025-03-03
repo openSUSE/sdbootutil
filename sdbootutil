@@ -1306,7 +1306,7 @@ install_bootloader()
 
 	mkdir -p "$boot_root/loader/entries"
 
-	mountpoint -q "$boot_root" || err "$boot_root is not a valid mountpoint"
+	# The ESP presence was checked early
 	blkpart="$(findmnt -nvo SOURCE "$boot_root")"
 	[ -L "/sys/class/block/${blkpart##*/}" ] || err "$blkpart is not a partition"
 	drive="$(readlink -f "/sys/class/block/${blkpart##*/}")"
@@ -3081,6 +3081,8 @@ fi
 [ -n "$root_device" ] || err "Can't determine root device"
 [ -n "$firmware_arch" ] || err "Can't determine firmware arch"
 set_image_name
+
+mountpoint -q "$boot_root" || err "$boot_root is not a valid mountpoint"
 
 # shellcheck disable=SC1091
 [ -e /etc/sysconfig/bootloader ] && . /etc/sysconfig/bootloader
