@@ -2184,7 +2184,10 @@ get_volume_password()
 		pw="$(keyctl pipe "$keyid")"
 	else
 		read -r -s -p "Password: " pw
-		keyctl_add_with_timeout "sdbootutil-pin" "$pw"
+		# If the key was missing for all the keyrings put back
+		# into the cryptenroll keyring, as there is a chance
+		# that this is part or a re-enrollment
+		keyctl_add_with_timeout "cryptenroll" "$pw"
 	fi
 	echo "$pw"
 }
