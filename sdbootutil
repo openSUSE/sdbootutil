@@ -1614,12 +1614,16 @@ set_default_snapshot()
 		fi
 	fi
 
-	# The default snapshot is not the criteria used for the
-	# bootloader to select the default boot entry, but for
-	# coherence we synchronize it here, invalidating any previous
-	# "$snapperfile"
-	snapper modify --default "$num"
-	rm -f "$snapperfile"
+	# If we are calling sdbootutil from a snapper plugin, we do
+	# not set the default snapshot to avoid recursion
+	if [ -z "$SNAPPER_PLUGIN" ]; then
+		# The default snapshot is not the criteria used for
+		# the bootloader to select the default boot entry, but
+		# for coherence we synchronize it here, invalidating
+		# any previous "$snapperfile"
+		snapper --no-dbus modify --default "$num"
+		rm -f "$snapperfile"
+	fi
 
 	set_default_entry "${configs[0]}"
 }
