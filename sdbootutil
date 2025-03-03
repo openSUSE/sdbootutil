@@ -2721,7 +2721,9 @@ enroll()
 		local private="/var/lib/sdbootutil/measure-pcr-private.pem"
 		local public="/var/lib/sdbootutil/measure-pcr-public.pem"
 		[ -f "$private" ] || openssl genrsa -out "$private" 4096
-		[ -f "$public" ] || openssl rsa -noout -in "$private" -pubout -out "$public"
+		# Writes "writing RSA key" in stderr and -noout is not
+		# doing what I was expecting
+		[ -f "$public" ] || openssl rsa -in "$private" -pubout -out "$public" 2> /dev/null
 	fi
 
 	if [ "$arg_no_reuse_initrd" = "1" ]; then
