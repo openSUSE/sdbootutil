@@ -548,7 +548,7 @@ set_snapper_title_and_sortkey()
 	# shellcheck disable=SC2046
 	IFS="|" read -r type date desc important pre_num <<<\
 		$(jq -r --arg snapshot "$snapshot" \
-		'.["root"][]|select(.number==( $snapshot|tonumber))|[.type,.date,(.description|gsub("\\|";"_")),.userdata.important,."pre-number"//""]|join("|")'\
+		'.["root"][]|select(.number==($snapshot|tonumber))|[.type,.date,(.description|gsub("\\|";"_")),.userdata.important,."pre-number"//""]|join("|")'\
 		< "$snapperfile")
 
 	if [ -z "$desc" ] && [ "$type" = "post" ] && [ -n "$pre_num" ]; then
@@ -1770,7 +1770,7 @@ pcrlock_grub2_bls_kernel_initrd()
 	local initrd="$2"
 	local suffix="$3"
 
-	local elements=( "$linux" "$initrd" )
+	local elements=("$linux" "$initrd")
 	local locks=()
 	local n=0
 	for element in "${elements[@]}"; do
@@ -1780,7 +1780,7 @@ pcrlock_grub2_bls_kernel_initrd()
 			--pcr=9 \
 			--pcrlock "$tmpdir/element-$n.pcrlock" \
 			"$element" 2> /dev/null || pcrlock_manual_raw 9 "$tmpdir/element-$n.pcrlock" "$element"
-		locks+=( "$tmpdir/element-$n.pcrlock" )
+		locks+=("$tmpdir/element-$n.pcrlock")
 	done
 	jq --slurp '{"records": [.[].records[0]]}' \
 	   "${locks[@]}" \
@@ -1806,7 +1806,7 @@ pcrlock_grub2_bls_cmdline()
 			--pcr=8 \
 			--pcrlock "$tmpdir/line-$n.pcrlock" \
 			"$tmpdir/line"
-		locks+=( "$tmpdir/line-$n.pcrlock" )
+		locks+=("$tmpdir/line-$n.pcrlock")
 		rm "$tmpdir/line"
 	done
 	jq --slurp '{"records": [.[].records[0]]}' \
@@ -1833,7 +1833,7 @@ pcrlock_grub2_bls_entry_files()
 			--pcr=9 \
 			--pcrlock="$tmpdir/entry-$n.pcrlock" \
 			"$i"
-		locks+=( "$tmpdir/entry-$n.pcrlock" )
+		locks+=("$tmpdir/entry-$n.pcrlock")
 	done
 
 	jq --slurp '{"records": [.[].records[0]]}' \
@@ -1880,8 +1880,8 @@ pcrlock_sdboot()
 		}
 		n=$((n+1))
 		pcrlock_sdboot_cmdline_initrd "initrd=$cmdline" "${boot_root}$initrd" "$n"
-	done < <(jq --raw-output '.[] | ([(.initrd[0] | sub("/"; "\\"; "g")), .options] | join(" ")), .initrd[0]' "$entryfile"
-)
+	done < <(jq --raw-output '.[] | ([(.initrd[0] | sub("/"; "\\"; "g")), .options] | join(" ")), .initrd[0]' "$entryfile")
+
 	# Generate variation for 710-kernel-cmdline-initrd-entry
 	# component that contains the current cmdline and the current
 	# initrd, even if this will never be used again.  This is
