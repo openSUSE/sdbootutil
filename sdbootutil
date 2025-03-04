@@ -2331,7 +2331,7 @@ detect_tracked_devices()
 		cryptsetup isLuks --type luks2 "$dev" || continue
 		[ -e /etc/crypttab ] && grep -E -q "${dev}[[:space:]].*x-sdbootutil.ignore" /etc/crypttab && continue
 		[ -e /etc/crypttab ] && grep -E -q "${uuid}[[:space:]].*x-sdbootutil.ignore" /etc/crypttab && continue
-		tracked_devices+=("$dev")
+		tracked_devices+="$dev"
 	done < <(lsblk --noheadings -o PATH,FSTYPE,UUID)
 	have_tracked_devices
 }
