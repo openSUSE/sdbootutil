@@ -2603,7 +2603,7 @@ enroll_recovery_key()
 		tmp_key="$(systemd-cryptenroll --wipe-slot=recovery --recovery-key "${extra_args[@]}" "$dev" 2> /dev/null)"
 		local split
 		read -r -a split < <(systemd-cryptenroll "$dev" | grep recovery)
-		keyslot="${split[0]}"
+		local keyslot="${split[0]}"
 		# cryptsetup can only read the new passphrase from a
 		# keyfile
 		local tmp_key_file
