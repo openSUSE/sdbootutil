@@ -1824,10 +1824,6 @@ pcrlock_grub2_bls_entry_files()
 	local n=0
 	for i in "$base"/loader/entries/*.conf; do
 		n=$((n+1))
-		if [ -n "$base" ]; then
-			i="${i#/boot/efi}"
-			i="$base$i"
-		fi
 		pcrlock \
 			lock-raw \
 			--pcr=9 \
