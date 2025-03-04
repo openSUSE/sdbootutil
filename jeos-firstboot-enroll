@@ -162,7 +162,7 @@ do_enroll() {
 	# Clean the enrollment key.  disk-encryption-tool creates it
 	# in the keyslot 0 with the name "enrollment-key", that is
 	# showed by systemd-cryptenroll as "other"
-	local slot
+	local slots
 	while read -r dev; do
 		slots=$(systemd-cryptenroll "$dev")
 		if grep -q "other" <<<"$slots"; then
