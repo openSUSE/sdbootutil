@@ -1828,9 +1828,8 @@ pcrlock_grub2_bls_cmdline()
 
 pcrlock_grub2_bls_entry_files()
 {
-	local entries="${1:-$entryfile}"
-	local suffix="${2:+-$2}"
-	local base="${3:-$boot_root}"
+	local suffix="${1:+-$1}"
+	local base="${2:-$boot_root}"
 	local locks=()
 	local n=0
 	# GRUB2 is reading the files in filesystem order, so we cannot
@@ -1924,7 +1923,7 @@ pcrlock_grub2_bls()
 	mkdir -p /var/lib/pcrlock.d/643-grub2-bls-entry-files.pcrlock.d
 	pcrlock_grub2_bls_entry_files
 	if [ "$SDB_ADD_INITIAL_COMPONENT" = "1" ]; then
-		pcrlock_grub2_bls_entry_files "$initialentryfile" "0" "$tmpdir"
+		pcrlock_grub2_bls_entry_files "0" "$tmpdir"
 	fi
 
 	blkpart="$(findmnt -nvo SOURCE "$boot_root")"
