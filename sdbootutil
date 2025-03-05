@@ -590,9 +590,7 @@ set_machine_id()
 	if is_transactional && [ -z "$TRANSACTIONAL_UPDATE" ]; then
 		[ -n "$snapshot" ] && machine_id_files+=("/var/lib/overlay/$snapshot/etc/machine-id")
 	fi
-	machine_id_files+=(
-		"${subvol#"${subvol_prefix}"}/etc/machine-id"
-	)
+	machine_id_files+=("${subvol#"${subvol_prefix}"}/etc/machine-id")
 
 	for file in "${machine_id_files[@]}"; do
 		if [ -s "$file" ]; then
