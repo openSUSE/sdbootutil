@@ -2124,10 +2124,7 @@ generate_tpm2_predictions_pcr_oracle()
 	select_entries_for_prediction
 
 	all_pcrs=$(get_pcrs)
-	if [ -z "$all_pcrs" ]; then
-		warn "PCR Oracle configured but not enrolled in any LUKS header"
-		return 0
-	fi
+	[ -n "$all_pcrs" ] || all_pcrs="$FDE_SEAL_PCR_LIST"
 
 	rm -f /etc/systemd/tpm2-pcr-signature.json
 
@@ -2746,7 +2743,7 @@ enroll()
 
 		is_config_file || echo "FDE_SEAL_PCR_LIST=${FDE_SEAL_PCR_LIST}" >> /etc/default/fde-tools
 
-		if ! have_pcrlock && have_pcr_oracle; then
+		if { ! have_pcrlock || [ -n "$arg_signed_policy" ]; } && have_pcr_oracle; then
 			generate_rsa_key
 		fi
 
