@@ -2073,7 +2073,8 @@ generate_tpm2_predictions_pcrlock()
 	local pcrlock_status=$?
 
 	if [ $pcrlock_status -ne 0 ]; then
-		echo "Error creating the policy!"
+		echo "Error creating the systemd-pcrlock policy!"
+		return 1
 	elif echo "$output" | grep -q "recovery PIN"; then
 		local split
 		IFS=":" read -r -a split <<<"$output"
@@ -2290,7 +2291,7 @@ generate_tpm2_predictions()
 	if is_pcr_oracle; then
 		generate_tpm2_predictions_pcr_oracle
 	elif have_pcrlock; then
-		generate_tpm2_predictions_pcrlock
+		generate_tpm2_predictions_pcrlock || return 1
 	fi
 
 	# Generate a PCR 15 prediction only in certain cases, as for
@@ -2638,7 +2639,7 @@ enroll_device()
 
 	case "$arg_method" in
 		"tpm2"|"tpm2+pin")
-			if [ -z "$arg_signed_policy" ] && have_pcrlock; then
+			if ! is_pcr_oracle && have_pcrlock; then
 				enroll_pcrlock "$dev" "$pin_or_pw" || {
 					echo "Enrollment with systemd-pcrlock failed"
 					echo "Re-trying with pcr-oracle"
@@ -2737,6 +2738,8 @@ enroll()
 		load_config_file
 
 		if { ! have_pcrlock || [ -n "$arg_signed_policy" ]; } && have_pcr_oracle; then
+			# Once the RSA key is present, then
+			# is_pcr_oracle is true
 			generate_rsa_key
 		fi
 
@@ -2744,7 +2747,22 @@ enroll()
 		# for systemd-pcrlock the recovery PIN will be
 		# extracted from the %u keyring "sdbootutil[-pin]"
 		# entry
-		generate_tpm2_predictions
+		generate_tpm2_predictions || {
+			# If the generation of prediction fails and we
+			# are trying with systemd-pcrlock, we try
+			# again with pcr-oracle
+			if ! is_pcr_oracle; then
+				echo "Predictions with systemd-pcrlock failed"
+				echo "Re-trying with pcr-oracle"
+				unenroll_pcrlock
+				# This function generates
+				# /etc/systemd/tpm2-pcr-public-key.pem
+				# which is needed by
+				# generate_tpm2_predictions
+				generate_rsa_key
+				generate_tpm2_predictions
+			fi
+		}
 	fi
 
 	# For the PIN (tpm2+pin) or password (password), we can get it
