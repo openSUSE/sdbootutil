@@ -1998,7 +1998,7 @@ clean_pcrlock_d()
 
 generate_tpm2_predictions_pcrlock()
 {
-	local pcrs="$1"
+	local pcrs="$FDE_SEAL_PCR_LIST"
 
 	# Select the affected entries
 	select_entries_for_prediction
@@ -2293,10 +2293,7 @@ generate_tpm2_predictions()
 	if is_pcr_oracle; then
 		generate_tpm2_predictions_pcr_oracle
 	elif have_pcrlock; then
-		is_config_file || { log_info "/etc/sysconfig/fde-tools not found"; return 0; }
-		load_config_file
-
-		generate_tpm2_predictions_pcrlock "${FDE_SEAL_PCR_LIST}"
+		generate_tpm2_predictions_pcrlock
 	fi
 
 	# Generate a PCR 15 prediction only in certain cases, as for
@@ -2740,6 +2737,7 @@ enroll()
 		fi
 
 		is_config_file || echo "FDE_SEAL_PCR_LIST=${FDE_SEAL_PCR_LIST}" >> /etc/default/fde-tools
+		load_config_file
 
 		if { ! have_pcrlock || [ -n "$arg_signed_policy" ]; } && have_pcr_oracle; then
 			generate_rsa_key
