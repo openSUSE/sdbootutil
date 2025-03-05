@@ -2089,7 +2089,7 @@ generate_tpm2_predictions_pcrlock()
 
 		# Add the generated recovery PIN to the kernel
 		# keyring, so that it is available to `sdbootutil
-		# --method=recovery-key`
+		# enroll --method=recovery-key`
 		keyctl_add_with_timeout "sdbootutil-pin" "$pin"
 	fi
 
@@ -2161,14 +2161,15 @@ generate_tpm2_predictions_pcr_oracle()
 
 get_volume_password()
 {
-	local pw keyid keyid_int
+	local pw keyid
+	# If we are enrolling for the first time, sdbootutil-pin can
+	# contain the recovery PIN, that cannot be used to unlock the
+	# device (unless later it is done an enrollment of a new
+	# recovery key)
 	keyid="$(keyctl id %user:sdbootutil 2> /dev/null)" || true
-	keyid_int="$(keyctl id %user:sdbootutil-pin 2> /dev/null)" || true
 	keyid_ce="$(keyctl id %user:cryptenroll 2> /dev/null)" || true
 	if [ -n "$keyid_ce" ]; then
 		pw="$(keyctl pipe "$keyid_ce")"
-	elif [ -n "$keyid_int" ]; then
-		pw="$(keyctl pipe "$keyid_int")"
 	elif [ -n "$keyid" ]; then
 		pw="$(keyctl pipe "$keyid")"
 	else
@@ -2210,7 +2211,7 @@ generate_tpm2_predictions_pcr_15()
 	local devs=()
 	local msgs=()
 	local vks=()
-	local name dev opts uuid vk pw
+	local name dev opts uuid pw
 	# Read /etc/crypttab lines that contains tpm2-device and
 	# tpm2-measure-pcr.  This code is the similar from
 	# measure-pcr-generator.sh, so we guarantee the same ordering
@@ -2237,11 +2238,7 @@ generate_tpm2_predictions_pcr_15()
 	# cannot nest two reads (one for crypttab and another for the
 	# password)
 	for dev in "${devs[@]}"; do
-		vk="$(get_volume_key "$dev")" || {
-			keyctl revoke %user:sdbootutil-pin 2> /dev/null || true
-			return 1
-		}
-		vks+=("$vk")
+		vks+=("$(get_volume_key "$dev")")
 	done
 
 	rm -f /var/lib/sdbootutil/measure-pcr-prediction
