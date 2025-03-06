@@ -2162,6 +2162,7 @@ generate_tpm2_predictions_pcr_oracle()
 
 get_volume_password()
 {
+	local dev="$1"
 	local pw keyid
 	# If we are enrolling for the first time, sdbootutil-pin can
 	# contain the recovery PIN, that cannot be used to unlock the
@@ -2174,7 +2175,7 @@ get_volume_password()
 	elif [ -n "$keyid" ]; then
 		pw="$(keyctl pipe "$keyid")"
 	else
-		read -r -s -p "Password: " pw
+		read -r -s -p "Password for $dev: " pw
 		# If the key was missing for all the keyrings put back
 		# into the cryptenroll keyring, as there is a chance
 		# that this is part or a re-enrollment
@@ -2186,12 +2187,18 @@ get_volume_password()
 get_volume_key()
 {
 	local dev="$1"
-	local pw out cryptsetup_status
-	pw="$(get_volume_password)"
-	out="$(cryptsetup luksDump --batch-mode --dump-master-key "$dev" <<<"$pw")"
-	cryptsetup_status="$?"
+	local pw out
+	pw="$(get_volume_password "$dev")"
+	out="$(cryptsetup luksDump --batch-mode --dump-master-key "$dev" <<<"$pw")" || {
+		# If luksDump fais, remove the password from the
+		# keyring.  Can be that the password was wrong, and
+		# systemd-cryptenroll ask later for the password.
+		# Both passwords can appear in the keyring separated
+		# by NULL
+		keyctl revoke %user:cryptenroll 2> /dev/null || true
+		return 1
+	}
 	echo "$out" | sed -n '/MK dump:/,$p' | sed -E 's/MK dump:|[[:blank:]]+//g' | sed -z 's/\n//g'
-	return "$cryptsetup_status"
 }
 
 extend_pcr()
