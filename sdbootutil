@@ -1507,14 +1507,14 @@ get_default_sdboot()
 	local val
 	val="$(bli_efi_var_get "LoaderEntryDefault")"
 	[ -n "$val" ] || val="$(loader_conf_get "default")"
-	echo "$val"
+	[ -z "$val" ] || echo "$val"
 }
 
 get_default_grub2_bls()
 {
 	local val
 	val="$(grubenv_get "default")"
-	echo "$val"
+	[ -z "$val" ] || echo "$val"
 }
 
 get_default_entry()
@@ -1572,14 +1572,14 @@ get_timeout_sdboot()
 	local val
 	val="$(bli_efi_var_get "LoaderConfigTimeout")"
 	[ -n "$val" ] || val="$(loader_conf_get "timeout")"
-	echo "$val"
+	[ -z "$val" ] || echo "$val"
 }
 
 get_timeout_grub2_bls()
 {
 	local val
 	val="$(grubenv_get "timeout")"
-	echo "$val"
+	[ -z "$val" ] || echo "$val"
 }
 
 get_timeout()
