@@ -306,8 +306,10 @@ keyctl_add_with_timeout()
 	# See https://mjg59.dreamwidth.org/37333.html
 	local keyid
 	keyid="$(echo -n "$value" | keyctl padd user "$key" @s)"
-	# Remove permission from the possesor
-	keyctl setperm "$keyid" 0x003f0000
+	# Remove permission from the possesor.  For some reason that I
+	# do not understand, this can fail in YaST when called via
+	# cheetah
+	keyctl setperm "$keyid" 0x003f0000 2> /dev/null || return 0
 	keyctl timeout "$keyid" 120
 	keyctl link "$keyid" @u
 	# systemd tools are doing `keyctl request user "$key"`, and
