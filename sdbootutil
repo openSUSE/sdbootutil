@@ -2311,6 +2311,15 @@ generate_tpm2_predictions()
 	[ -e /etc/crypttab ] || return 0
 	grep -q "tpm2-device" /etc/crypttab || return 0
 
+	# The PCR list is used by both models (pcr-oracle,
+	# systemd-pcrlock).  The first one will try first to get the
+	# PCRs from the LUKS2 header, that will succeed in the normal
+	# situation but fail during the initial enrollment.  This is
+	# because we generate the prediction first and later we do the
+	# enrollment
+	is_config_file || err "/etc/sysconfig/fde-tools not found"
+	load_config_file
+
 	if is_pcr_oracle; then
 		generate_tpm2_predictions_pcr_oracle
 	elif have_pcrlock; then
