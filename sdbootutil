@@ -2221,7 +2221,7 @@ generate_tpm2_predictions_pcr_15()
 	local devs=()
 	local msgs=()
 	local vks=()
-	local name dev opts uuid pw
+	local name dev opts fstype uuid pw
 	# Read /etc/crypttab lines that contains tpm2-device and
 	# tpm2-measure-pcr.  This code is the similar from
 	# measure-pcr-generator.sh, so we guarantee the same ordering
@@ -2232,16 +2232,30 @@ generate_tpm2_predictions_pcr_15()
 		# from the extension for now.  The reason is that
 		# extensions after the switch root cannot participate
 		# in abort the boot process from initrd itself
+		#
+		# Note that dracut will add the cr_swap partition even
+		# if it is not marked as x-initrd.attach
 		[[ "$name" = \#* ]] && continue
-		[[ "$opts" != *"x-initrd.attach"* ]] && continue
 		[[ "$opts" != *"tpm2-device="* ]] && continue
 		[[ "$opts" != *"tpm2-measure-pcr="* ]] && continue
-		devs+=("$dev")
+
+		# If the device name is UUID= convert as a real device
+		# name, and if not, retrieve the UUID
 		if [[ "$dev" = "UUID="* ]]; then
 			uuid="${dev#"UUID="}"
+			dev="$(blkid --uuid "$uuid")"
 		else
 			uuid="$(blkid "$dev" -o value -s UUID)"
 		fi
+
+		# Get the FSTYPE of the real device (crypto_LUKS) and
+		# the slave / holder one (btrfs, swap, etc)
+		fstype="$(lsblk --noheadings -o FSTYPE "$dev")"
+		if [[ "$fstype" != *"swap"* ]]; then
+			[[ "$opts" != *"x-initrd.attach"* ]] && continue
+		fi
+
+		devs+=("$dev")
 		msgs+=("cryptsetup:$name:$uuid")
 	done < /etc/crypttab
 	# We need to separate this into a different loop because we
