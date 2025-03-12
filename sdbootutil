@@ -1729,7 +1729,18 @@ regex_snapshot_ids_for_prediction()
 
 select_entries_for_prediction()
 {
+	# The regex of ids is ordered by relevance, but the returns
+	# set is not.  We need to add a "priority" field that can be
+	# used to order the set
+	local ids
+	ids="$(snapshot_ids_for_prediction)"
+
 	update_entries_for_snapshot "$(regex_snapshot_ids_for_prediction)"
+
+	# Extend the entry file with a "priotiry" field, based on the
+	# ordered snapshot IDs
+	jq --arg ids "$ids" 'def priority(id): id as $id | $ids | split(" ") | index($id); map(. + {"priority": priority(.options | scan(".*@/.snapshots/(\\d+)/snapshot") | .[])})' < "$entryfile" > "${entryfile}.ext"
+	mv "${entryfile}.ext" "$entryfile"
 }
 
 backup_initial_components()
