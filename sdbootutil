@@ -747,7 +747,7 @@ select_entries_for_free_space()
 {
 	local snapshot="$1"
 
-	update_entries_for_snapshot_invert "$(regex_entries_ids_for_prediction "$snapshot")"
+	update_entries_for_snapshot_invert "$(regex_snapshot_ids_for_prediction "$snapshot")"
 }
 
 make_free_space()
@@ -1666,8 +1666,11 @@ is_pcr_oracle()
 	    have_pcr_oracle
 }
 
-regex_entries_ids_for_prediction()
+snapshot_ids_for_prediction()
 {
+	# Select the ID of the snapshots that participate in the
+	# prediction.  The order is important, so the most relevant
+	# should be presented first
 	local snapshot="$1"
 
 	# Get the numbers for the last three snapshots
@@ -1677,42 +1680,56 @@ regex_entries_ids_for_prediction()
 	# one extra snapshot if it is passed as a parameter, that
 	# refers to the snapshot from where we are installing the
 	# kernel
-	declare -A snapshots
-	[ -z "$snapshot" ] || snapshots["$snapshot"]=1
+	local -A snapshots
+	local -a snapshot_ids
 	local id
 	while read -r id; do
+		[ -n "${snapshots[$id]}" ] || snapshot_ids+=("$id")
 		snapshots[$id]=1
-	done < <(jq -r '.root[]|select(.active==true or .default==true)|.number' "$snapperfile")
+	done < <(jq -r '.root[]|select(.default==true)|.number' "$snapperfile")
+	while read -r id; do
+		[ -n "${snapshots[$id]}" ] || snapshot_ids+=("$id")
+		snapshots[$id]=1
+	done < <(jq -r '.root[]|select(.active==true)|.number' "$snapperfile")
+	if [ -n "$snapshot" ]; then
+		[ -n "${snapshots[$snapshot]}" ] || snapshot_ids+=("$snapshot")
+		snapshots["$snapshot"]=1
+	fi
 
 	if is_transactional && [ -e "${state_file}" ]; then
 		# shellcheck disable=SC1090
 		. "${state_file}"
 		for id in $LAST_WORKING_SNAPSHOTS; do
 			if [ "${#snapshots[@]}" -lt 3 ]; then
+				[ -n "${snapshots[$id]}" ] || snapshot_ids+=("$id")
 				snapshots[$id]=1
 			fi
 		done
 	else
 		while read -r id; do
 			if [ "${#snapshots[@]}" -lt 3 ]; then
+				[ -n "${snapshots[$id]}" ] || snapshot_ids+=("$id")
 				snapshots[$id]=1
 			fi
-		done < <(jq -r '.root|sort_by(.date)[-2:]|.[]|.number' "$snapperfile")
+		done < <(jq -r '.root|sort_by(.date)[-2:]|reverse|.[]|.number' "$snapperfile")
 	fi
+
+	echo "${snapshot_ids[@]}"
+}
+
+regex_snapshot_ids_for_prediction()
+{
+	local snapshot="$1"
 
 	local re
-	if [ "${#snapshots[@]}" = 1 ]; then
-		re="${!snapshots[*]}"
-	else
-		IFS='|' eval re='"(:?${!snapshots[*]})"'
-	fi
-
-	echo "$re"
+	re="$(snapshot_ids_for_prediction "$snapshot")"
+	re="${re// /|}"
+	echo "(:?$re)"
 }
 
 select_entries_for_prediction()
 {
-	update_entries_for_snapshot "$(regex_entries_ids_for_prediction)"
+	update_entries_for_snapshot "$(regex_snapshot_ids_for_prediction)"
 }
 
 backup_initial_components()
