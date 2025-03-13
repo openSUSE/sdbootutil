@@ -3,8 +3,6 @@
 shopt -s extglob nullglob
 set -e
 
-export SNAPPER_PLUGIN=1
-
 # check whether it's a transactional system
 is_transactional()
 {
