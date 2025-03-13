@@ -1625,16 +1625,17 @@ set_default_snapshot()
 		fi
 	fi
 
-	# If we are calling sdbootutil from a snapper plugin, we do
-	# not set the default snapshot to avoid recursion
-	if [ -z "$SNAPPER_PLUGIN" ]; then
-		# The default snapshot is not the criteria used for
-		# the bootloader to select the default boot entry, but
-		# for coherence we synchronize it here, invalidating
-		# any previous "$snapperfile"
-		snapper --no-dbus modify --default "$num"
-		rm -f "$snapperfile"
-	fi
+	# The default snapshot is not the criteria used for the
+	# bootloader to select the default boot entry, but for
+	# coherence we synchronize it here, invalidating any previous
+	# "$snapperfile"
+	#
+	# We do not use snapper, to avoid recursion and do not trigger
+	# any plugin
+	local subvolume_id
+	read -r _ subvolume_id _ < <(btrfs subvolume list -o /.snapshots | grep "${subvol_prefix}/.snapshots/$num/snapshot")
+	btrfs subvolume set-default "${subvolume_id}" /.snapshots
+	rm -f "$snapperfile"
 
 	set_default_entry "${configs[0]}"
 }
