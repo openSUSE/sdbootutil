@@ -2334,7 +2334,7 @@ generate_tpm2_predictions()
 	# because we generate the prediction first and later we do the
 	# enrollment
 	is_config_file || err "/etc/sysconfig/fde-tools not found"
-	load_config_file
+	[ -n "$FDE_SEAL_PCR_LIST" ] || load_config_file
 
 	if is_pcr_oracle; then
 		generate_tpm2_predictions_pcr_oracle
@@ -2765,8 +2765,6 @@ enroll()
 		update_predictions=
 	fi
 
-	[ -n "$FDE_SEAL_PCR_LIST" ] || load_config_file
-
 	# If systemd-pcrlock is missing then we need to use
 	# pcr-oracle.  For this we need to generate the RSA keys
 	# early.  Also we need to set the PCRs used to assest the
@@ -2783,7 +2781,6 @@ enroll()
 		fi
 
 		is_config_file || echo "FDE_SEAL_PCR_LIST=${FDE_SEAL_PCR_LIST}" >> /etc/default/fde-tools
-		load_config_file
 
 		if { ! have_pcrlock || [ -n "$arg_signed_policy" ]; } && have_pcr_oracle; then
 			# Once the RSA key is present, then
