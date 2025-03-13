@@ -1897,17 +1897,24 @@ pcrlock_sdboot()
 	# pcrlock standards
 	# TODO: move to kernel-TYPE-pcrlock.rpm
 	local n=0
+	local -A kernels
 	while read -r linux; do
 		[ -f "${boot_root}$linux" ] || {
 			log_info "Missing ${boot_root}$linux, ignoring entry for prediction"
 			continue
 		}
+		[ -z "${kernels["$linux"]}" ] || continue
+		kernels["$linux"]=1
 		n=$((n+1))
+		[ "$n" -le 8 ] || {
+			log_info "More than 8 variations for 650-kernel-efi-application"
+			continue
+		}
 		pcrlock \
 			lock-pe \
 			--pcrlock=/var/lib/pcrlock.d/650-kernel-efi-application.pcrlock.d/linux-"$n".pcrlock \
 			"${boot_root}/$linux"
-	done < <(jq --raw-output 'map(.linux) | unique | .[]' "$entryfile")
+	done < <(jq --raw-output 'sort_by(.priority) | map(.linux) | .[]' "$entryfile")
 
 	# Join the cmdline and the initrd in a single component
 	mkdir -p /var/lib/pcrlock.d/710-kernel-cmdline-initrd-entry.pcrlock.d
@@ -1919,8 +1926,12 @@ pcrlock_sdboot()
 			continue
 		}
 		n=$((n+1))
+		[ "$n" -le 8 ] || {
+			log_info "More than 8 variations for 710-kernel-cmdline-initrd-entry"
+			continue
+		}
 		pcrlock_sdboot_cmdline_initrd "initrd=$cmdline" "${boot_root}$initrd" "$n"
-	done < <(jq --raw-output '.[] | ([(.initrd[0] | sub("/"; "\\"; "g")), .options] | join(" ")), .initrd[0]' "$entryfile")
+	done < <(jq --raw-output 'sort_by(.priority) | .[] | ([(.initrd[0] | sub("/"; "\\"; "g")), .options] | join(" ")), .initrd[0]' "$entryfile")
 
 	# Generate variation for 710-kernel-cmdline-initrd-entry
 	# component that contains the current cmdline and the current
@@ -1979,10 +1990,14 @@ pcrlock_grub2_bls()
 			continue
 		}
 		n=$((n+1))
+		[ "$n" -le 8 ] || {
+			log_info "More than 8 variations for 650-grub2-bls-entry-cmdline"
+			continue
+		}
 		pcrlock_grub2_bls_cmdline "linux ${grub2_bls_drive}$linux $options" \
 					  "${grub2_bls_drive}$linux $options" \
 					  "initrd ${grub2_bls_drive}$initrd" "$n"
-	done < <(jq --raw-output '.[] | .options, .linux, .initrd[0]' "$entryfile")
+	done < <(jq --raw-output 'sort_by(.priority) | .[] | .options, .linux, .initrd[0]' "$entryfile")
 
 	# Generate variation for 650-grub2-bls-entry-cmdline component
 	# that contains the current cmdline and the current initrd,
@@ -2010,8 +2025,9 @@ pcrlock_grub2_bls()
 		[ -f "${boot_root}$linux" ] || continue
 		[ -f "${boot_root}$initrd" ] || continue
 		n=$((n+1))
+		[ "$n" -le 8 ] || continue
 		pcrlock_grub2_bls_kernel_initrd "${boot_root}$linux" "${boot_root}$initrd" "$n"
-	done < <(jq --raw-output '.[] | .linux, .initrd[0]' "$entryfile")
+	done < <(jq --raw-output 'sort_by(.priority) | .[] | .linux, .initrd[0]' "$entryfile")
 
 	# Generate variation for 710-grub2-bls-kernel-initrd-entry for the
 	# same reason than before.
@@ -2179,7 +2195,7 @@ generate_tpm2_predictions_pcr_oracle()
 	# cover all the combinations.  pcr-oracle is smart to include
 	# the entry only one time, so we will not have duplications.
 	# This is a step for multi device configurations.
-	declare -a entries
+	local -a entries
 	mapfile -t entries < <(jq -r '.[]|.id' "$entryfile")
 	if [ -z "${entries[0]}" ]; then
 		err "No bootloader entries found"
