@@ -255,27 +255,39 @@ load_config_file()
 
 is_sdboot()
 {
-	# LOADER_TYPE has preference, but is is not present and
-	# systemd-boot and grub2-bls are co-installed, we favor
-	# grub2-bls in the detection
-	[ -z "$LOADER_TYPE" ] || { [ "$LOADER_TYPE" = "systemd-boot" ]; return; }
-
 	local sdboot grub2_bls
+
 	sdboot="$(find_sdboot "${1-$root_snapshot}")"
 	grub2_bls="$(find_grub2_bls "${1-$root_snapshot}")"
-	[ -e "$sdboot" ] && [ ! -e "$grub2_bls" ]
+
+	if [ ! -e "$sdboot" ] && [ ! -e "$grub2_bls" ]; then
+		# If boot loader is not found, then we check
+		# LOADER_TYPE, but if is not present and systemd-boot
+		# and grub2-bls are co-installed, we favor grub2-bls
+		# in the detection
+		[ -z "$LOADER_TYPE" ] || [ "$LOADER_TYPE" = "systemd-boot" ]
+	else
+		[ -e "$sdboot" ] && [ ! -e "$grub2_bls" ]
+	fi
 }
 
 is_grub2_bls()
 {
-	# LOADER_TYPE has preference, but is is not present and
-	# systemd-boot and grub2-bls are co-installed, we favor
-	# grub2-bls in the detection
-	[ -z "$LOADER_TYPE" ] || { [ "$LOADER_TYPE" = "grub2-bls" ]; return; }
 
-	local grub2_bls
+	local sdboot grub2_bls
+
+	sdboot="$(find_sdboot "${1-$root_snapshot}")"
 	grub2_bls="$(find_grub2_bls "${1-$root_snapshot}")"
-	[ -e "$grub2_bls" ]
+
+	if [ ! -e "$sdboot" ] && [ ! -e "$grub2_bls" ]; then
+		# If boot loader is not found, then we check
+		# LOADER_TYPE, but if is not present and systemd-boot
+		# and grub2-bls are co-installed, we favor grub2-bls
+		# in the detection
+		[ -z "$LOADER_TYPE" ] || [ "$LOADER_TYPE" = "systemd-boot" ]
+	else
+		[ -e "$grub2_bls" ]
+	fi
 }
 
 reset_rollback()
@@ -734,7 +746,7 @@ select_entries_for_free_space()
 {
 	local snapshot="$1"
 
-	update_entries_for_snapshot_invert "$(regex_entries_ids_for_prediction "$snapshot")"
+	update_entries_for_snapshot_invert "$(regex_snapshot_ids_for_prediction "$snapshot")"
 }
 
 make_free_space()
@@ -1224,7 +1236,8 @@ find_sdboot()
 
 find_grub2_bls()
 {
-	local grub2_bls
+	local prefix=""
+	[ -z "$have_snapshots" ] || prefix="/.snapshots/${1-$root_snapshot}/snapshot"
 
 	local grub2_arch
 	grub2_arch="$(uname -m)"
@@ -1245,8 +1258,7 @@ find_grub2_bls()
 	# The old grub.efi will contain the BLS patches, but we cannot
 	# use it because we also dropped the process of creating the
 	# configuration file and installing bli.mod
-	grub2_bls="/usr/share/grub2/${grub2_arch}-efi/grubbls.efi"
-	echo "$grub2_bls"
+	echo "$prefix/usr/share/grub2/${grub2_arch}-efi/grubbls.efi"
 }
 
 find_bootloader()
@@ -1465,7 +1477,8 @@ set_default_sdboot()
 	local id="${1:?}"
 	if ! bootctl set-default "$id" > "$tmpfile" 2>&1; then
 		if grep -q "Failed to update EFI variable" "$tmpfile" ||
-				grep -q "Not booted with a supported boot loader" "$tmpfile"; then
+				grep -q "Not booted with a supported boot loader" "$tmpfile" ||
+				grep -q "Not booted with UEFI" "$tmpfile"; then
 			loader_conf_set "default" "$id"
 		else
 			err "$(cat "$tmpfile")"
@@ -1612,16 +1625,17 @@ set_default_snapshot()
 		fi
 	fi
 
-	# If we are calling sdbootutil from a snapper plugin, we do
-	# not set the default snapshot to avoid recursion
-	if [ -z "$SNAPPER_PLUGIN" ]; then
-		# The default snapshot is not the criteria used for
-		# the bootloader to select the default boot entry, but
-		# for coherence we synchronize it here, invalidating
-		# any previous "$snapperfile"
-		snapper --no-dbus modify --default "$num"
-		rm -f "$snapperfile"
-	fi
+	# The default snapshot is not the criteria used for the
+	# bootloader to select the default boot entry, but for
+	# coherence we synchronize it here, invalidating any previous
+	# "$snapperfile"
+	#
+	# We do not use snapper, to avoid recursion and do not trigger
+	# any plugin
+	local subvolume_id
+	read -r _ subvolume_id _ < <(btrfs subvolume list -o /.snapshots | grep "${subvol_prefix}/.snapshots/$num/snapshot")
+	btrfs subvolume set-default "${subvolume_id}" /.snapshots
+	rm -f "$snapperfile"
 
 	set_default_entry "${configs[0]}"
 }
@@ -1650,8 +1664,11 @@ is_pcr_oracle()
 	    have_pcr_oracle
 }
 
-regex_entries_ids_for_prediction()
+snapshot_ids_for_prediction()
 {
+	# Select the ID of the snapshots that participate in the
+	# prediction.  The order is important, so the most relevant
+	# should be presented first
 	local snapshot="$1"
 
 	# Get the numbers for the last three snapshots
@@ -1661,42 +1678,67 @@ regex_entries_ids_for_prediction()
 	# one extra snapshot if it is passed as a parameter, that
 	# refers to the snapshot from where we are installing the
 	# kernel
-	declare -A snapshots
-	[ -z "$snapshot" ] || snapshots["$snapshot"]=1
+	local -A snapshots
+	local -a snapshot_ids
 	local id
 	while read -r id; do
+		[ -n "${snapshots[$id]}" ] || snapshot_ids+=("$id")
 		snapshots[$id]=1
-	done < <(jq -r '.root[]|select(.active==true or .default==true)|.number' "$snapperfile")
+	done < <(jq -r '.root[]|select(.default==true)|.number' "$snapperfile")
+	while read -r id; do
+		[ -n "${snapshots[$id]}" ] || snapshot_ids+=("$id")
+		snapshots[$id]=1
+	done < <(jq -r '.root[]|select(.active==true)|.number' "$snapperfile")
+	if [ -n "$snapshot" ]; then
+		[ -n "${snapshots[$snapshot]}" ] || snapshot_ids+=("$snapshot")
+		snapshots["$snapshot"]=1
+	fi
 
 	if is_transactional && [ -e "${state_file}" ]; then
 		# shellcheck disable=SC1090
 		. "${state_file}"
 		for id in $LAST_WORKING_SNAPSHOTS; do
 			if [ "${#snapshots[@]}" -lt 3 ]; then
+				[ -n "${snapshots[$id]}" ] || snapshot_ids+=("$id")
 				snapshots[$id]=1
 			fi
 		done
 	else
 		while read -r id; do
 			if [ "${#snapshots[@]}" -lt 3 ]; then
+				[ -n "${snapshots[$id]}" ] || snapshot_ids+=("$id")
 				snapshots[$id]=1
 			fi
-		done < <(jq -r '.root|sort_by(.date)[-2:]|.[]|.number' "$snapperfile")
+		done < <(jq -r '.root|sort_by(.date)[-2:]|reverse|.[]|.number' "$snapperfile")
 	fi
+
+	echo "${snapshot_ids[@]}"
+}
+
+regex_snapshot_ids_for_prediction()
+{
+	local snapshot="$1"
 
 	local re
-	if [ "${#snapshots[@]}" = 1 ]; then
-		re="${!snapshots[*]}"
-	else
-		IFS='|' eval re='"(:?${!snapshots[*]})"'
-	fi
-
-	echo "$re"
+	re="$(snapshot_ids_for_prediction "$snapshot")"
+	re="${re// /|}"
+	echo "(:?$re)"
 }
 
 select_entries_for_prediction()
 {
-	update_entries_for_snapshot "$(regex_entries_ids_for_prediction)"
+	# The regex of ids is ordered by relevance, but the returns
+	# set is not.  We need to add a "priority" field that can be
+	# used to order the set
+	local ids
+	ids="$(snapshot_ids_for_prediction)"
+
+	update_entries_for_snapshot "$(regex_snapshot_ids_for_prediction)"
+
+	# Extend the entry file with a "priotiry" field, based on the
+	# ordered snapshot IDs
+	jq --arg ids "$ids" 'def priority(id): id as $id | $ids | split(" ") | index($id); map(. + {"priority": priority(.options | scan(".*@/.snapshots/(\\d+)/snapshot") | .[])})' < "$entryfile" > "${entryfile}.ext"
+	mv "${entryfile}.ext" "$entryfile"
 }
 
 backup_initial_components()
@@ -1815,9 +1857,8 @@ pcrlock_grub2_bls_cmdline()
 
 pcrlock_grub2_bls_entry_files()
 {
-	local entries="${1:-$entryfile}"
-	local suffix="${2:+-$2}"
-	local base="${3:-$boot_root}"
+	local suffix="${1:+-$1}"
+	local base="${2:-$boot_root}"
 	local locks=()
 	local n=0
 	for i in "$base"/loader/entries/*.conf; do
@@ -1851,17 +1892,24 @@ pcrlock_sdboot()
 	# pcrlock standards
 	# TODO: move to kernel-TYPE-pcrlock.rpm
 	local n=0
+	local -A kernels
 	while read -r linux; do
 		[ -f "${boot_root}$linux" ] || {
 			log_info "Missing ${boot_root}$linux, ignoring entry for prediction"
 			continue
 		}
+		[ -z "${kernels["$linux"]}" ] || continue
+		kernels["$linux"]=1
 		n=$((n+1))
+		[ "$n" -le 8 ] || {
+			log_info "More than 8 variations for 650-kernel-efi-application"
+			continue
+		}
 		pcrlock \
 			lock-pe \
 			--pcrlock=/var/lib/pcrlock.d/650-kernel-efi-application.pcrlock.d/linux-"$n".pcrlock \
 			"${boot_root}/$linux"
-	done < <(jq --raw-output 'map(.linux) | unique | .[]' "$entryfile")
+	done < <(jq --raw-output 'sort_by(.priority) | map(.linux) | .[]' "$entryfile")
 
 	# Join the cmdline and the initrd in a single component
 	mkdir -p /var/lib/pcrlock.d/710-kernel-cmdline-initrd-entry.pcrlock.d
@@ -1873,8 +1921,12 @@ pcrlock_sdboot()
 			continue
 		}
 		n=$((n+1))
+		[ "$n" -le 8 ] || {
+			log_info "More than 8 variations for 710-kernel-cmdline-initrd-entry"
+			continue
+		}
 		pcrlock_sdboot_cmdline_initrd "initrd=$cmdline" "${boot_root}$initrd" "$n"
-	done < <(jq --raw-output '.[] | ([(.initrd[0] | sub("/"; "\\"; "g")), .options] | join(" ")), .initrd[0]' "$entryfile")
+	done < <(jq --raw-output 'sort_by(.priority) | .[] | ([(.initrd[0] | sub("/"; "\\"; "g")), .options] | join(" ")), .initrd[0]' "$entryfile")
 
 	# Generate variation for 710-kernel-cmdline-initrd-entry
 	# component that contains the current cmdline and the current
@@ -1908,7 +1960,7 @@ pcrlock_grub2_bls()
 	mkdir -p /var/lib/pcrlock.d/643-grub2-bls-entry-files.pcrlock.d
 	pcrlock_grub2_bls_entry_files
 	if [ "$SDB_ADD_INITIAL_COMPONENT" = "1" ]; then
-		pcrlock_grub2_bls_entry_files "$initialentryfile" "0" "$tmpdir"
+		pcrlock_grub2_bls_entry_files "0" "$tmpdir"
 	fi
 
 	blkpart="$(findmnt -nvo SOURCE "$boot_root")"
@@ -1933,10 +1985,14 @@ pcrlock_grub2_bls()
 			continue
 		}
 		n=$((n+1))
+		[ "$n" -le 8 ] || {
+			log_info "More than 8 variations for 650-grub2-bls-entry-cmdline"
+			continue
+		}
 		pcrlock_grub2_bls_cmdline "linux ${grub2_bls_drive}$linux $options" \
 					  "${grub2_bls_drive}$linux $options" \
 					  "initrd ${grub2_bls_drive}$initrd" "$n"
-	done < <(jq --raw-output '.[] | .options, .linux, .initrd[0]' "$entryfile")
+	done < <(jq --raw-output 'sort_by(.priority) | .[] | .options, .linux, .initrd[0]' "$entryfile")
 
 	# Generate variation for 650-grub2-bls-entry-cmdline component
 	# that contains the current cmdline and the current initrd,
@@ -1964,8 +2020,9 @@ pcrlock_grub2_bls()
 		[ -f "${boot_root}$linux" ] || continue
 		[ -f "${boot_root}$initrd" ] || continue
 		n=$((n+1))
+		[ "$n" -le 8 ] || continue
 		pcrlock_grub2_bls_kernel_initrd "${boot_root}$linux" "${boot_root}$initrd" "$n"
-	done < <(jq --raw-output '.[] | .linux, .initrd[0]' "$entryfile")
+	done < <(jq --raw-output 'sort_by(.priority) | .[] | .linux, .initrd[0]' "$entryfile")
 
 	# Generate variation for 710-grub2-bls-kernel-initrd-entry for the
 	# same reason than before.
@@ -2133,7 +2190,7 @@ generate_tpm2_predictions_pcr_oracle()
 	# cover all the combinations.  pcr-oracle is smart to include
 	# the entry only one time, so we will not have duplications.
 	# This is a step for multi device configurations.
-	declare -a entries
+	local -a entries
 	mapfile -t entries < <(jq -r '.[]|.id' "$entryfile")
 	if [ -z "${entries[0]}" ]; then
 		err "No bootloader entries found"
@@ -2318,7 +2375,7 @@ generate_tpm2_predictions()
 	# because we generate the prediction first and later we do the
 	# enrollment
 	is_config_file || err "/etc/sysconfig/fde-tools not found"
-	load_config_file
+	[ -n "$FDE_SEAL_PCR_LIST" ] || load_config_file
 
 	if is_pcr_oracle; then
 		generate_tpm2_predictions_pcr_oracle
@@ -2749,8 +2806,6 @@ enroll()
 		update_predictions=
 	fi
 
-	[ -n "$FDE_SEAL_PCR_LIST" ] || load_config_file
-
 	# If systemd-pcrlock is missing then we need to use
 	# pcr-oracle.  For this we need to generate the RSA keys
 	# early.  Also we need to set the PCRs used to assest the
@@ -2767,7 +2822,6 @@ enroll()
 		fi
 
 		is_config_file || echo "FDE_SEAL_PCR_LIST=${FDE_SEAL_PCR_LIST}" >> /etc/default/fde-tools
-		load_config_file
 
 		if { ! have_pcrlock || [ -n "$arg_signed_policy" ]; } && have_pcr_oracle; then
 			# Once the RSA key is present, then
