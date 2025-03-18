@@ -2297,6 +2297,8 @@ generate_tpm2_predictions_pcr_15()
 		cp /var/lib/sdbootutil/measure-pcr-prediction "${boot_root}${boot_dst}"
 	[ ! -e /var/lib/sdbootutil/measure-pcr-prediction.sha256 ] || \
 		cp /var/lib/sdbootutil/measure-pcr-prediction.sha256 "${boot_root}${boot_dst}"
+	[ ! -e /var/lib/sdbootutil/measure-pcr-public.pem ] || \
+		cp /var/lib/sdbootutil/measure-pcr-public.pem "${boot_root}${boot_dst}"
 }
 
 updated_crypttab()
