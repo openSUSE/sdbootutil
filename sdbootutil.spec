@@ -176,7 +176,14 @@ cat > /dev/null || :
 [ -e /sys/firmware/efi/efivars ] || exit 0
 [ -z "$TRANSACTIONAL_UPDATE" ] || exit 0
 [ -z "$VERBOSE_FILETRIGGERS" ] || echo "%{name}-%{version}-%{release}: updating bootloader"
-sdbootutil update
+if [ -e /etc/sysconfig/bootloader ]; then
+	. /etc/sysconfig/bootloader &> /dev/null
+	if [ "$LOADER_TYPE" = "grub2-bls" ] || [ "$LOADER_TYPE" = "systemd-boot" ]; then
+		sdbootutil update
+	fi
+else
+	sdbootutil update
+fi
 
 %preun
 %service_del_preun %{name}-update-predictions.service
