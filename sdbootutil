@@ -33,12 +33,12 @@ chroot_dir=
 color_red=
 color_end=
 # The shell is interactive and the colors haven't been disabled
-# forcefully or the shell is not interactive but the colors have been
-# forcefully enabled
-if { [[ "$-" == *i* ]] \
+# forcefully or the shell is not connected to a terminal but the
+# colors have been forcefully enabled
+if { [ -t 1 ] \
     && [ "$SYSTEMD_COLORS" != "false" ] && [ "$SYSTEMD_COLORS" != "0" ]; } \
-    || [[ "$-" != *i* ]] \
-    && { [ "$SYSTEMD_COLORS" = "true" ] || [ "$SYSTEMD_COLORS" = "1" ]; }; then
+    || { [ ! -t 1 ] \
+    && [ "$SYSTEMD_COLORS" = "true" ] || [ "$SYSTEMD_COLORS" = "1" ]; }; then
 	color_red="\e[31m"
 	color_green="\e[32m"
 	color_yellow="\e[33m"
@@ -274,7 +274,6 @@ is_sdboot()
 
 is_grub2_bls()
 {
-
 	local sdboot grub2_bls
 
 	sdboot="$(find_sdboot "${1-$root_snapshot}")"
@@ -1162,15 +1161,15 @@ list_kernels()
 		local kv="${k%/*}"
 		kv="${kv##*/}"
 		if [ -z "$id" ]; then
-			echo -e "${color_yellow}missing /lib/modules/$kv/$image$color_end"
+			echo -e "${color_yellow}missing /lib/modules/$kv/$image${color_end}"
 		else
-			echo "ok /lib/modules/$kv/$image -> $id"
+			echo -e "${color_green}ok /lib/modules/$kv/$image -> $id${color_end}"
 		fi
 	done
 	kernelfiles=("${!stale_kernels[@]}")
 	for k in "${kernelfiles[@]}"; do
 		local id="${stale_kernels[$k]}"
-		printf "${color_red}stale %s$color_end\n" "$id"
+		printf "${color_red}stale %s${color_end}\n" "$id"
 	done
 }
 
