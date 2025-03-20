@@ -753,22 +753,17 @@ select_entries_for_free_space()
 make_free_space()
 {
 	local snapshot="$1"
+	local required_size="$2"
 
 	# "Cleaning /boot/efi" message is presented via stderr
 	bootctl -q cleanup 2> /dev/null
-
-	# Calculate the free space and the required size.  All sizes
-	# are in Kb to avoid big numbers
-	local free_space total_size
-	total_size=$(($(pending_kernel_size "$src") + $(pending_initrds_size "$tmpdir")))
 
 	select_entries_for_free_space "$snapshot"
 
 	local id
 	while read -r id; do
 		free_space="$(boot_free_space)"
-		if [ "$total_size" -gt "$free_space" ]; then
-			log_info "Removing boot entry $id"
+		if [ "$required_size" -gt "$free_space" ]; then
 			bootctl unlink "$id"
 		else
 			return 0
@@ -776,7 +771,19 @@ make_free_space()
 	done < <(jq -r 'reverse|.[]|.id' < "$entryfile")
 
 	free_space="$(boot_free_space)"
-	[ "$total_size" -lt "$free_space" ]
+	[ "$required_size" -lt "$free_space" ]
+}
+
+make_free_space_for_kernel()
+{
+	local snapshot="$1"
+
+	# Calculate the free space and the required size.  All sizes
+	# are in Kb to avoid big numbers
+	local free_space total_size
+	total_size=$(($(pending_kernel_size "$src") + $(pending_initrds_size "$tmpdir")))
+
+	make_free_space "$snapshot" "$total_size"
 }
 
 create_boot_options() {
@@ -849,7 +856,7 @@ install_kernel()
 		[ "$subvol" != "$root_subvol" ] && [ -n "$have_snapshots" ] && umount_chroot "${snapshot_dir}"
 	fi
 
-	make_free_space "$snapshot" || err "No free space in $boot_root for new kernel"
+	make_free_space_for_kernel "$snapshot" || err "No free space in $boot_root for new kernel"
 
 	local boot_options
 	boot_options="$(create_boot_options "$subvol")"
@@ -1068,6 +1075,9 @@ update_entry()
 update_all_entries()
 {
 	local snapshot="$1"
+
+	make_free_space "$snapshot" 1024
+
 	update_entries_for_snapshot "$1"
 	while read -r conf; do
 		update_entry_conf "$conf" "$snapshot"
