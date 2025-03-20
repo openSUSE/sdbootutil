@@ -347,10 +347,12 @@ detect_parent()
 	parent_uuid="$(btrfs subvol show "${subvol#"${subvol_prefix}"}" | sed -ne 's/\s*Parent UUID:\s*//p')"
 	[ "$parent_uuid" != '-' ] || return 0
 
-	parent_subvol=($(btrfs subvol show -u "$parent_uuid" "${subvol#"${subvol_prefix}"}" 2> /dev/null))
+	local -a parent_subvol_uuid
+	# shellcheck disable=SC2207
+	parent_subvol_uuid=($(btrfs subvol show -u "$parent_uuid" "${subvol#"${subvol_prefix}"}" 2> /dev/null))
 	local btrfs_subvol_status=$?
 	[ "$btrfs_subvol_status" = 0 ] || return 0
-	parent_subvol="${parent_subvol[0]}"
+	parent_subvol="${parent_subvol_uuid[0]}"
 
 	parent_snapshot="${parent_subvol#"${subvol_prefix}"/.snapshots/}"
 	if [ "$parent_subvol" = "$parent_snapshot" ]; then
