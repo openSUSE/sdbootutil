@@ -688,7 +688,7 @@ reuse_initrd()
 			info "Found existing initrd $v"
 			dstinitrd+=("$v")
 		done < "$conf"
-		[ -z "$dstinitrd" ] || return 0
+		[ "${#dstinitrd[@]}" -eq 0 ] || return 0
 	fi
 
 	return 1
@@ -705,6 +705,7 @@ mount_chroot()
 	mount --bind "$snapshot_dir" "$snapshot_dir"
 	while read -r line; do
 		eval "$line"
+		# shellcheck disable=SC2153
 		[ "$FSTYPE" = "btrfs" ] || [ "$FSTYPE" = "vfat" ] || [ "$FSTYPE" = "xfs" ] || [[ "$FSTYPE" == ext* ]] || continue
 		[ "$TARGET" != "/" ] || continue
 		[[ "$TARGET" != /.snapshots* ]] || continue
@@ -760,6 +761,7 @@ umount_etc()
 add_version_to_title()
 {
 	# TW pretty name does not include the version
+	# shellcheck disable=SC2154
 	[ -n "$os_release_VERSION" ] || title="$title $os_release_VERSION_ID"
 }
 
@@ -912,7 +914,7 @@ install_kernel()
 	local boot_options
 	boot_options="$(create_boot_options "$subvol")"
 
-	if [ -z "$dstinitrd" ] && [ -e "$tmpdir/initrd-0" ]; then
+	if [ "${#dstinitrd[@]}" -eq 0 ] && [ -e "$tmpdir/initrd-0" ]; then
 		i=0
 		while [ -e "$tmpdir/initrd-$i" ]; do
 			calc_chksum "$tmpdir/initrd-$i"
@@ -1058,6 +1060,7 @@ list_entries()
 				[ -n "$have_snapshots" ] || break
 				if [ "$k" = 'options' ]; then
 					local snapshot
+					# shellcheck disable=SC2001
 					read -r snapshot <<<"$(echo "$v" | sed -e "s,.*rootflags=subvol=${subvol_prefix}/.snapshots/\([0-9]\+\)/snapshot.*,\1,")"
 					if [ ! -d "/.snapshots/$snapshot/snapshot" ]; then
 						errors+=("/.snapshot/$snapshot/snapshot does not exist")
@@ -1065,7 +1068,7 @@ list_entries()
 				fi
 			done < "$conf"
 		fi
-		if [ -n "$errors" ]; then
+		if [ "${#errors[@]}" -gt 0 ]; then
 			echo -e "  ${color_red}${errors[*]}${color_end}" >&2
 		fi
 		echo -e "$color$id${verbose:+: $title}${color_end}"
@@ -1093,7 +1096,7 @@ show_entry_fields()
 			*) continue ;;
 		esac
 
-		if [ -z "$arg_entry_keys" ] || [[ ${arg_entry_keys[*]} == *"all"* ]] || [[ ${arg_entry_keys[*]} == *"$k"* ]]; then
+		if [ "${#arg_entry_keys[@]}" -eq 0 ] || [[ ${arg_entry_keys[*]} == *"all"* ]] || [[ ${arg_entry_keys[*]} == *"$k"* ]]; then
 			echo -e "$k\t$v"
 		fi
 	done < "$conf"
@@ -2513,6 +2516,7 @@ generate_tpm2_predictions()
 	# external tool that extract the password from the TPM2 if the
 	# policy is still valid)
 	updated_crypttab || { generate_tpm2_predictions_pcr_15; arg_measure_pcr=; }
+	# shellcheck disable=SC2015
 	[ -f "/var/lib/sdbootutil/measure-pcr-prediction" ] && [ -z "$arg_measure_pcr" ] || generate_tpm2_predictions_pcr_15
 }
 
@@ -2527,7 +2531,7 @@ detect_tracked_devices()
 	# is present in /etc/crypttab and has the
 	# "x-sdbootutil.ignore" option
 	local dev fstype uuid
-	[ -z "$tracked_devices" ] || return 0
+	! have_tracked_devices || return 0
 
 	dbg_cat "/etc/crypttab"
 
@@ -3134,6 +3138,7 @@ unenroll()
 eval_bootctl()
 {
 	# XXX: bootctl should have json output for that too
+	# shellcheck disable=SC2016
 	eval "$(bootctl 2>/dev/null | sed -ne 's/Firmware Arch: *\(\w\+\)/firmware_arch="\1"/p;s/ *token: *\(\w\+\)/entry_token="\1"/p;s, *\$BOOT: *\([^ ]\+\).*,boot_root="\1",p')"
 }
 
