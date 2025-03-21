@@ -1,11 +1,14 @@
 # shellcheck disable=SC2148
 shopt -s nullglob
+
 # shellcheck disable=SC2148
-err() {
+err()
+{
 	:
 }
 
-_none() {
+_none()
+{
 	declare -ga result
 	result=()
 }
@@ -31,26 +34,37 @@ _find_entry_ids()
 	mapfile -t result < <(bootctl list --json=short | jq -r '.[].id')
 }
 
-_arch_name() {
+_arch_name()
+{
 	declare -ga result
 	result=("${!arch_image_map[@]}")
 }
 
-_image_name() {
+_image_name()
+{
 	declare -ga result
 	result=()
 	result=("${!arch_image_map[@]}")
 }
 
-_method() {
+_method()
+{
 	declare -ga result
 	result=()
-    for i in "tpm2" "tpm2+pin" "fido2" "password" "recovery-key"; do
-	    result+=("$i")
-    done
+	for i in "tpm2" "tpm2+pin" "fido2" "password" "recovery-key"; do
+		result+=("$i")
+	done
 }
 
-_sdbootutil_completion() {
+_devices()
+{
+	declare -ga result
+	result=()
+	mapfile -t result < <(sdbootutil list-devices)
+}
+
+_sdbootutil_completion()
+{
 	eval "$(sdbootutil _print_bash_completion_data)"
 	local cur prev words cword image
 	COMPREPLY=()
@@ -111,4 +125,5 @@ _sdbootutil_completion() {
 		COMPREPLY=( $(compgen -W "${!commands[*]}" -- "$cur") )
 	fi
 }
+
 complete -F _sdbootutil_completion sdbootutil
