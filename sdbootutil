@@ -108,6 +108,8 @@ helpandquit()
 		  --measure-pcr		Force update of PCR 15 prediction for LUKS2 volume key
 		                        Requires LUKS2 password to accessing the volume key
 		  --pcr			Comma seperated list of PCRs to enroll
+		  --devices		Comma separated list of devices to enroll or unenroll
+		                        By default all (not ignored) devices are [un]enrolled
 		  -v, --verbose		More verbose output
 		  -h, --help		This screen
 
@@ -3007,6 +3009,7 @@ define_options() {
 		[signed-policy]=""
 		[measure-pcr]=""
 		[pcr]="_none"
+		[devices]="_devices"
 	)
 	opts_long=""
 	for opt in "${!options_with_arg[@]}"; do
@@ -3067,6 +3070,7 @@ while true ; do
 		--signed-policy) arg_signed_policy=1; shift ;;
 		--measure-pcr) arg_measure_pcr=1; shift ;;
 		--pcr) FDE_SEAL_PCR_LIST="$2"; shift 2 ;;
+		--devices) IFS=',' read -r -a tracked_devices <<<"$2"; shift 2 ;;
 		--) shift ; break ;;
 		*) echo "Internal error!" ; exit 1 ;;
 	esac
