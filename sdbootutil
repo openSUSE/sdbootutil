@@ -3143,7 +3143,10 @@ if [ -n "$arg_portable" ]; then
 elif is_sdboot; then
 	boot_dst="/EFI/systemd"
 elif is_grub2_bls; then
-	boot_dst="/EFI/opensuse"
+	set_os_release "${root_snapshot}"
+	# shellcheck disable=SC2154
+	read -r -a name <<<"${os_release_NAME,,}"
+	boot_dst="/EFI/${name[0]}"
 else
 	msg="Bootloader not detected"
 	[ -z "$LOADER_TYPE" ] || msg+=". /etc/sysconfig/bootloader has LOADER_TYPE=\"$LOADER_TYPE\", but only \"systemd-boot\" or \"grub2-bls\" are recognized."
