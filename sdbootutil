@@ -1548,7 +1548,8 @@ set_timeout_sdboot()
 	[ "$timeout" = "-1" ] && timeout="menu-force"
 	if ! bootctl set-timeout "$timeout" > "$tmpfile" 2>&1; then
 		if grep -q "Failed to update EFI variable" "$tmpfile" ||
-				grep -q "Not booted with a supported boot loader" "$tmpfile"; then
+				grep -q "Not booted with a supported boot loader" "$tmpfile" ||
+				grep -q "Not booted with UEFI" "$tmpfile"; then
 			loader_conf_set "timeout" "$timeout"
 		else
 			err "$(cat "$tmpfile")"
