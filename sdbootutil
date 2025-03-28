@@ -3009,6 +3009,8 @@ enroll()
 		[ -f "$public" ] || openssl rsa -in "$private" -pubout -out "$public" 2> /dev/null
 	fi
 
+	# If the crypttab file changed (that is expected), we need to
+	# generate a new initrd
 	if [ "$arg_no_reuse_initrd" = "1" ]; then
 		install_all_kernels "$root_snapshot"
 		# Avoid the call of generate_tpm2_predictions at the
