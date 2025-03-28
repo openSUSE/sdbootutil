@@ -1778,18 +1778,18 @@ snapshot_ids_for_prediction()
 	# Select the ID of the snapshots that participate in the
 	# prediction.  The order is important, so the most relevant
 	# should be presented first
-	local snapshot="$1"
 
 	# Get the numbers for the last three snapshots
 	[ -s "$snapperfile" ] || update_snapper
 
-	# Select the default and the active snapshots.  Also include
-	# one extra snapshot if it is passed as a parameter, that
-	# refers to the snapshot from where we are installing the
-	# kernel
+	# Select the default and the active snapshots.
 	local -A snapshots
 	local -a snapshot_ids
 	local id
+	if [ -n "$root_snapshot" ]; then
+		[ -n "${snapshots[$root_snapshot]}" ] || snapshot_ids+=("$root_snapshot")
+		snapshots["$root_snapshot"]=1
+	fi
 	while read -r id; do
 		[ -n "${snapshots[$id]}" ] || snapshot_ids+=("$id")
 		snapshots[$id]=1
@@ -1798,10 +1798,6 @@ snapshot_ids_for_prediction()
 		[ -n "${snapshots[$id]}" ] || snapshot_ids+=("$id")
 		snapshots[$id]=1
 	done < <(jq -r '.root[]|select(.active==true)|.number' "$snapperfile")
-	if [ -n "$snapshot" ]; then
-		[ -n "${snapshots[$snapshot]}" ] || snapshot_ids+=("$snapshot")
-		snapshots["$snapshot"]=1
-	fi
 
 	if is_transactional && [ -e "${state_file}" ]; then
 		# shellcheck disable=SC1090
@@ -1826,10 +1822,8 @@ snapshot_ids_for_prediction()
 
 regex_snapshot_ids_for_prediction()
 {
-	local snapshot="$1"
-
 	local re
-	re="$(snapshot_ids_for_prediction "$snapshot")"
+	re="$(snapshot_ids_for_prediction)"
 	re="${re// /|}"
 	echo "(:?$re)"
 }
@@ -1837,18 +1831,40 @@ regex_snapshot_ids_for_prediction()
 select_entries_for_prediction()
 {
 	# The regex of ids is ordered by relevance, but the returns
-	# set is not.  We need to add a "priority" field that can be
-	# used to order the set
+	# set is not.  We need to add a "priority" and "kernel"
+	# (version) field that can be used to order the set
 	local ids
 	ids="$(snapshot_ids_for_prediction)"
 
 	update_entries_for_snapshot "$(regex_snapshot_ids_for_prediction)"
 
-	# Extend the entry file with a "priotiry" field, based on the
-	# ordered snapshot IDs
-	jq --arg ids "$ids" 'def priority(id): id as $id | $ids | split(" ") | index($id); map(. + {"priority": priority(.options | scan(".*@/.snapshots/(\\d+)/snapshot") | .[])})' < "$entryfile" > "${entryfile}.ext"
+	# Extend the entry file with a "priority" field, based on the
+	# ordered snapshot IDs, and "kernel" field, based on the
+	# kernel version.  Note that the textual suffix (-default,
+	# -slowroll) is removed and does not participate in the
+	# ordering
+	#
+	# Expected order for prediction:
+	#
+	# MicroOS
+	#   - The default snapshot usually has the top priority (0),
+	#     then the active (1).  The order is set by
+	#     `snapshot_ids_for_prediction`
+	#   - Last working snapshots are added after those.  Also set
+	#     by `snapshot_ids_for_prediction`
+	#   - If the snapshot contains multiple kernel, the higher
+	#     version has more priority
+	#
+	# Tumbleweed
+	#   - Same than MicroOS (`snapshot_ids_for_prediction`)
+	#   - Newest working snapshot are added after those.  Also set
+	#     by `snapshot_ids_for_prediction`
+	#   - If the snapshot contains multiple kernel, the higher
+	#     version has more priority
+	#
+	jq --arg ids "$ids" 'def priority(id): id as $id | $ids | split(" ") | index($id); map(. + {"priority": priority(.version | scan("(\\d+)@") | .[]), "kernel": .version | scan(".*@(?:(\\d+).(\\d+).(\\d+)-(\\d+))") | map(. | tonumber)})' < "$entryfile" > "${entryfile}.ext"
 	mv "${entryfile}.ext" "$entryfile"
-	dbg "Added priority to boot entries"
+	dbg "Added priority and kernel version to entry file"
 	dbg_cat "$entryfile"
 }
 
@@ -2055,7 +2071,7 @@ pcrlock_sdboot()
 			lock-pe \
 			--pcrlock=/var/lib/pcrlock.d/650-kernel-efi-application.pcrlock.d/linux-"$n".pcrlock \
 			"${boot_root}/$linux"
-	done < <(jq --raw-output 'sort_by(.priority) | map(.linux) | .[]' "$entryfile")
+	done < <(jq --raw-output 'sort_by(.priority, (.kernel | map(-.))) | map(.linux) | .[]' "$entryfile")
 
 	# Join the cmdline and the initrd in a single component
 	shift_component 710-kernel-cmdline-initrd-entry
@@ -2073,7 +2089,7 @@ pcrlock_sdboot()
 			continue
 		}
 		pcrlock_sdboot_cmdline_initrd "initrd=$cmdline" "${boot_root}$initrd" "$n"
-	done < <(jq --raw-output 'sort_by(.priority) | .[] | ([(.initrd[0] | sub("/"; "\\"; "g")), .options] | join(" ")), .initrd[0]' "$entryfile")
+	done < <(jq --raw-output 'sort_by(.priority, (.kernel | map(-.))) | .[] | ([(.initrd[0] | sub("/"; "\\"; "g")), .options] | join(" ")), .initrd[0]' "$entryfile")
 
 	# Generate variation for 710-kernel-cmdline-initrd-entry
 	# component that contains the current cmdline and the current
@@ -2142,7 +2158,7 @@ pcrlock_grub2_bls()
 		pcrlock_grub2_bls_cmdline "linux ${grub2_bls_drive}$linux $options" \
 					  "${grub2_bls_drive}$linux $options" \
 					  "initrd ${grub2_bls_drive}$initrd" "$n"
-	done < <(jq --raw-output 'sort_by(.priority) | .[] | .options, .linux, .initrd[0]' "$entryfile")
+	done < <(jq --raw-output 'sort_by(.priority, (.kernel | map(-.))) | .[] | .options, .linux, .initrd[0]' "$entryfile")
 
 	# Generate variation for 650-grub2-bls-entry-cmdline component
 	# that contains the current cmdline and the current initrd,
@@ -2172,7 +2188,7 @@ pcrlock_grub2_bls()
 		n=$((n+1))
 		[ "$n" -le 8 ] || continue
 		pcrlock_grub2_bls_kernel_initrd "${boot_root}$linux" "${boot_root}$initrd" "$n"
-	done < <(jq --raw-output 'sort_by(.priority) | .[] | .linux, .initrd[0]' "$entryfile")
+	done < <(jq --raw-output 'sort_by(.priority, (.kernel | map(-.))) | .[] | .linux, .initrd[0]' "$entryfile")
 
 	# Generate variation for 710-grub2-bls-kernel-initrd-entry for the
 	# same reason than before.
