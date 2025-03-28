@@ -786,11 +786,99 @@ boot_free_space()
 	echo $(($(findmnt -n -b -o AVAIL --target "$boot_root" | head -n 1) / 1024))
 }
 
+regex_snapshot_ids_for_free_space()
+{
+	local snapshot="$1"
+
+	[ -s "$snapperfile" ] || update_snapper
+
+	# Select the default and the active snapshots.  Also include
+	# one extra snapshot if it is passed as a parameter, that
+	# refers to the snapshot from where we are installing the
+	# kernel
+	declare -A snapshots
+	[ -z "$snapshot" ] || snapshots["$snapshot"]=1
+	[ -z "$root_snapshot" ] || snapshots["$root_snapshot"]=1
+	local id
+	while read -r id; do
+		snapshots[$id]=1
+	done < <(jq -r '.root[]|select(.active==true or .default==true)|.number' "$snapperfile")
+
+	local re
+	if [ "${#snapshots[@]}" = 1 ]; then
+		re="${!snapshots[*]}"
+	else
+		IFS='|' eval re='"(:?${!snapshots[*]})"'
+	fi
+
+	echo "$re"
+}
+
 select_entries_for_free_space()
 {
 	local snapshot="$1"
 
-	update_entries_for_snapshot_invert "$(regex_snapshot_ids_for_prediction "$snapshot")"
+	# Extend the entry file with a "priority" field, based on the
+	# ordered snapshot IDs, and the "kernel" field, based on the
+	# kernel version.  Note that the textual suffix (-default,
+	# -slowroll) is removed and does not participate in the
+	# ordering
+	#
+	# The final list is a join of two list.  One that contains all
+	# the entries that belong to the safe-to-delete snapshots, and
+	# another one that contain the entries from the default
+	# snapshot, that is not the default entry.  This last sub-list
+	# has the higher priority value, so when sorted get the last
+	# order
+	#
+	# Expected order for removal:
+	#
+	# MicroOS
+	#   - The default / active snapshot is always the last one,
+	#     except when we do a rollback
+	#   - The default boot entry should never be removed
+	#   - The removal order is sort(snapshot_id, kernel), except
+	#     for entries that belong to the default snapshot.  Those
+	#     should be removed as a last resort
+	#   - If there are snapshots after the default and active one,
+	#     they are remainigs from a rollback, and they can be
+	#     removed in the same order (ideally early)
+	#
+	# Tumbleweed
+	#   - The default / active snapshot is always the first one,
+	#     except when we do a rollback
+	#   - The default boot entry should never be removed
+	#   - The removal order is sort(snapshot_id, kernel), the same
+	#     as in MicroOS
+	#   - If there are snapshot before the default and active one,
+	#     they are remainings from a rollback and they can be
+	#     removed in the same order
+
+	# Select the entries that are safe to remove, i.e. the ones
+	# that are not the default, the active nor the one from where
+	# we are extracting the kernel (that usually is the default or
+	# the active one)
+	update_entries_for_snapshot_invert "$(regex_snapshot_ids_for_free_space "$snapshot")"
+	jq 'map(. + {"priority": .version | scan("(\\d+)@") | .[] | tonumber, "kernel": .version | scan(".*@(?:(\\d+).(\\d+).(\\d+)-(\\d+))") | map(. | tonumber)})' < "$entryfile" > "${entryfile}.ext-1"
+
+	# The name is confusing.  The maximum priority is the minimal
+	# one once is sorted by priority
+	local max_priority
+	read -r max_priority <<<"$(jq -r 'max_by(.priority)|.priority' < "${entryfile}.ext-1")"
+	((++max_priority))
+
+	# From the no-safe ones, we can remove some entries from the
+	# default entry (the active is the one under development in
+	# MicroOS)
+	update_entries_for_snapshot "$root_snapshot"
+	jq --arg max_priority "$max_priority" 'map(. + {"priority": $max_priority | tonumber, "kernel": .version | scan(".*@(?:(\\d+).(\\d+).(\\d+)-(\\d+))") | map(. | tonumber)})' < "$entryfile" > "${entryfile}.ext-2"
+
+	# The default boot entry should be in the second list, but
+	# puting the filter here guarantees that it will not appears
+	# in the final list
+	jq --slurp 'add|[.[]|select(.isDefault==false)]' "${entryfile}.ext-1" "${entryfile}.ext-2" > "$entryfile"
+	dbg "Added priority and kernel version to entry file (for free space)"
+	dbg_cat "$entryfile"
 }
 
 make_free_space()
@@ -816,7 +904,7 @@ make_free_space()
 		else
 			return 0
 		fi
-	done < <(jq -r 'reverse|.[]|.id' < "$entryfile")
+	done < <(jq -r 'sort_by(.priority, .kernel) | .[] | .id' < "$entryfile")
 
 	free_space="$(boot_free_space)"
 	dbg "Free space in the ESP after deallocation: $free_space KB"
@@ -1864,7 +1952,7 @@ select_entries_for_prediction()
 	#
 	jq --arg ids "$ids" 'def priority(id): id as $id | $ids | split(" ") | index($id); map(. + {"priority": priority(.version | scan("(\\d+)@") | .[]), "kernel": .version | scan(".*@(?:(\\d+).(\\d+).(\\d+)-(\\d+))") | map(. | tonumber)})' < "$entryfile" > "${entryfile}.ext"
 	mv "${entryfile}.ext" "$entryfile"
-	dbg "Added priority and kernel version to entry file"
+	dbg "Added priority and kernel version to entry file (for prediction)"
 	dbg_cat "$entryfile"
 }
 
