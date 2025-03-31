@@ -2774,7 +2774,7 @@ enroll()
 	if [ "$arg_method" = "tpm2" ] || [ "$arg_method" = "tpm2+pin" ]; then
 		if [ -z "${FDE_SEAL_PCR_LIST}" ]; then
 			if systemd-detect-virt -q; then
-				echo "Virtualized systemd detected ($(systemd-detect-virt)). Dropping PCR0"
+				info "Virtualized systemd detected ($(systemd-detect-virt)). Dropping PCR0"
 				FDE_SEAL_PCR_LIST=""
 			else
 				FDE_SEAL_PCR_LIST="0,"
