@@ -55,6 +55,8 @@ tracked_devices=()
 
 rollback=()
 
+declare -g -A eventlog
+
 tmpdir=$(mktemp -d -t sdbootutil.XXXXXX)
 cleanup()
 {
@@ -1963,9 +1965,35 @@ backup_initial_components()
 	cp -a "$boot_root/." "$tmpdir"
 }
 
+parse_eventlog()
+{
+	[ "${#eventlog[@]}" -eq 0 ] || return 0
+
+	while read -r line; do
+		eventlog["$line"]=1
+	done < <(pcrlock log --json=short | jq -r '.log | .[] | .sha256' | sort -u)
+}
+
+find_matching_variation()
+{
+	local component="$1"
+
+	local hashes=()
+	for variation in /var/lib/pcrlock.d/"$component".pcrlock.d/*.pcrlock; do
+		mapfile -t hashes < <(jq -r '.records | .[] | .digests | .[] | select(.hashAlg == "sha256") | .digest' < "$variation")
+		for h in "${hashes[@]}"; do
+			[ "${eventlog["$h"]+_}" ] || continue 2
+		done
+		echo "$variation"
+		break
+	done
+}
+
 shift_component()
 {
 	local component="$1"
+
+	parse_eventlog
 
 	dbg "Shifting component $component"
 	[ -d "/var/lib/pcrlock.d/$component.pcrlock.d" ] || {
@@ -1973,19 +2001,24 @@ shift_component()
 		return 0
 	}
 
-	# Move the current variations of a component with
-	# `shift-N-*.pcrlock` prefix.  The systemd-pcrlock tool will
-	# manage duplicates, so with several .pcrlock files share the
-	# same hashes, only one will be used to build the policy,
-	# without increasing the combiations (PolicyOR limitation)
-	local cname
-	for element in /var/lib/pcrlock.d/"$component".pcrlock.d/*.pcrlock; do
-		cname="$(basename "$element")"
-		[[ "$cname" != shift-* ]] || continue
-		[ ! -e "/var/lib/pcrlock.d/$component.pcrlock.d/shift-$cname" ] || continue
-		dbg "$element -> /var/lib/pcrlock.d/$component.pcrlock.d/shift-$cname"
-		mv "$element" "/var/lib/pcrlock.d/$component.pcrlock.d/shift-$cname"
-	done
+	# Instead of moving all the variations of a component (as this
+	# will increase the amount of combinations, reaching early the
+	# PolicyOR limitation), we keep the one that matches the
+	# current eventlog.  If the variation is also duplicated, it
+	# will be dropped by `systemd-pcrlock`
+	local variation vname
+	variation="$(find_matching_variation "$component")"
+	if [ -n "$variation" ]; then
+		vname="$(basename "$variation")"
+		dbg "$variation found in the eventlog"
+		[[ "$vname" == shift-* ]] || mv "$variation" "/var/lib/pcrlock.d/$component.pcrlock.d/shift-$vname"
+	else
+		dbg "No matching variation found for $component"
+		return 0
+	fi
+
+	# Remove the rest of the variations
+	find /var/lib/pcrlock.d/"$component".pcrlock.d -name '*.pcrlock' ! -name 'shift-*.pcrlock' -delete
 }
 
 pcrlock_manual_raw()
@@ -2333,13 +2366,23 @@ generate_tpm2_predictions_pcrlock()
 
 	clean_pcrlock_d
 
+	shift_component 250-firmware-code-early
+	shift_component 550-firmware-code-late
 	pcrlock lock-firmware-code
+
+	shift_component 250-firmware-config-early
+	shift_component 550-firmware-config-late
 	pcrlock lock-firmware-config
+
 	# If secure boot is disabled, this can fail.  There is patch
 	# for the policy generation, and for the authority is planned
+	shift_component 240-secureboot-policy
 	pcrlock lock-secureboot-policy &> /dev/null || true
+	shift_component 620-secureboot-authority
 	pcrlock lock-secureboot-authority &> /dev/null || true
-	# uses / by default
+
+	# Uses / by default
+	shift_component 600-gpt
 	pcrlock lock-gpt
 
 	# 630-shim-efi-application is not part of the pcrlock standards
