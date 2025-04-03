@@ -2013,7 +2013,13 @@ shift_component()
 	if [ -n "$variation" ]; then
 		vname="$(basename "$variation")"
 		dbg "$variation found in the eventlog"
-		[[ "$vname" == shift-* ]] || mv "$variation" "/var/lib/pcrlock.d/$component.pcrlock.d/shift-$vname"
+		[[ "$vname" == shift-* ]] || {
+			# Drop any previous shifted variation, as
+			# there is no guarantee that the new one will
+			# share the name
+			find /var/lib/pcrlock.d/"$component".pcrlock.d -name 'shift-*.pcrlock' -delete
+			mv "$variation" "/var/lib/pcrlock.d/$component.pcrlock.d/shift-$vname"
+		}
 	else
 		dbg "No matching variation found for $component"
 		return 0
