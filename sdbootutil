@@ -1615,6 +1615,8 @@ loader_conf_set()
 	local key="${1:?}"
 	local value="${2:?}"
 
+	[ -e "${boot_root}/loader/loader.conf" ] || touch "${boot_root}/loader/loader.conf"
+
 	if grep -q "^$key " "${boot_root}/loader/loader.conf"; then
 		sed -i -e "s/^$key .*/$key $value/" "${boot_root}/loader/loader.conf"
 	else
@@ -1636,7 +1638,7 @@ grubenv_set()
 	local key="${1:?}"
 	local value="${2:?}"
 
-	[ -f "${boot_root}${boot_dst}/grubenv" ] || touch "${boot_root}${boot_dst}/grubenv"
+	[ -e "${boot_root}${boot_dst}/grubenv" ] || touch "${boot_root}${boot_dst}/grubenv"
 
 	grubenv="$(mktemp -t grubenv.XXXXXX)"
 	echo "# GRUB Environment Block" > "$grubenv"
