@@ -2197,8 +2197,9 @@ pcrlock_sdboot()
 		[ -z "${kernels["$linux"]}" ] || continue
 		kernels["$linux"]=1
 		n=$((n+1))
-		[ "$n" -le 8 ] || {
-			info "More than 8 variations for 650-kernel-efi-application"
+		# Limit to 4 because of the separator
+		[ "$n" -le 4 ] || {
+			info "More than 4 variations for 650-kernel-efi-application"
 			continue
 		}
 		pcrlock \
