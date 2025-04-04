@@ -896,6 +896,10 @@ make_free_space()
 
 	info "Required free space in ESP: $required_size KB"
 
+	# If there is already free space, shortcut the code
+	free_space="$(boot_free_space)"
+	[ "$required_size" -gt "$free_space" ] || return 0
+
 	# "Cleaning /boot/efi" message is presented via stderr
 	dbg "Calling bootctl cleanup"
 	bootctl -q cleanup 2> /dev/null
