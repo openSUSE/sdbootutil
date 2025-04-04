@@ -1716,6 +1716,10 @@ get_default_sdboot()
 	local val
 	val="$(bli_efi_var_get "LoaderEntryDefault")"
 	[ -n "$val" ] || val="$(loader_conf_get "default")"
+	[ -n "$val" ] || {
+		update_entries_for_this_system
+		jq -r '.[] | select(.isDefault == true) | .id' < "$entryfile"
+	}
 	[ -z "$val" ] || echo "$val"
 }
 
@@ -1723,6 +1727,7 @@ get_default_grub2_bls()
 {
 	local val
 	val="$(grubenv_get "default")"
+	[ -n "$val" ] || val="$(get_default_sdboot "default")"
 	[ -z "$val" ] || echo "$val"
 }
 
