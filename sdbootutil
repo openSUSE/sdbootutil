@@ -990,7 +990,7 @@ install_kernel()
 		if [ "${verbose:-0}" -le 1 ]; then
 			dracut_args+=('--quiet')
 		fi
-		
+
 		info "Generating new initrd"
 
 		[ "$subvol" != "$root_subvol" ] && [ -n "$have_snapshots" ] && mount_chroot "${snapshot_dir}"
@@ -1364,7 +1364,7 @@ list_devices()
 
 	for dev in "${tracked_devices[@]}"; do
 		echo "$dev"
-	done	
+	done
 }
 
 is_bootable()
@@ -1442,7 +1442,7 @@ find_grub2_bls()
 		riscv32*) grub2_arch=riscv32 ;;
 		riscv64*) grub2_arch=riscv64 ;;
 	esac
-	
+
 	# The old grub.efi will contain the BLS patches, but we cannot
 	# use it because we also dropped the process of creating the
 	# configuration file and installing bli.mod
@@ -2436,7 +2436,7 @@ generate_tpm2_predictions_pcrlock()
 
 	# If the prediction fails, the system will ask for a password,
 	# but we can do a re-enrollment using the recovery PIN.  To
-	# register a recovery PIN the installer (disk-encryption-tool,
+	# register a recovery PIN the installer (sdbootutil-enroll,
 	# YaST) will call this script deploying in the %u keyring
 	# "sdbootutil[-pin]" entry.  For re-enrollments we can use the
 	# same entry, the PIN environment variable, or the
@@ -2773,6 +2773,13 @@ have_fido2()
 	[ -n "$(systemd-cryptenroll --fido2-device=list 2>/dev/null)" ]
 }
 
+have_slot()
+{
+	local dev="${1:?}"
+	local kind="${2:?}"
+	grep -q "$kind" < <(systemd-cryptenroll "$dev")
+}
+
 add_crypttab_option()
 {
 	# This version will share the same options for all crypto_LUKS
@@ -2869,14 +2876,12 @@ set_unlock_method()
 	keyid="$(keyctl id %user:cryptenroll 2> /dev/null)" || true
 	[ -z "$keyid" ] || return 0
 
-	local slots
-	slots=$(systemd-cryptenroll "$dev")
 	# Do not use TPM2 slot for enrolling TPM2
-	if [ "$arg_method" != "tpm2" ] && [ "$arg_method" != "tpm2+pin" ] && echo "$slots" | grep -q tpm2; then
+	if [ "$arg_method" != "tpm2" ] && [ "$arg_method" != "tpm2+pin" ] && have_slot "$dev" "tpm2"; then
 		info "Unlocking using TPM2"
 		unlock_method="--unlock-tpm2-device=auto"
 	# Same for FIDO2
-	elif [ "$arg_method" != "fido2" ] && echo "$slots" | grep -q fido2; then
+	elif [ "$arg_method" != "fido2" ] && have_slot "$dev" "fido2"; then
 		info "Unlocking using FIDO2"
 		unlock_method="--unlock-fido2-device=auto"
 	fi
@@ -3058,9 +3063,7 @@ enroll_recovery_key()
 	# the recovery key the same as the recovery PIN.  But if the
 	# PIN is missing from the keyring, then we missed the
 	# synchronization and the key and the PIN are different.
-	local slots
-	slots=$(systemd-cryptenroll "$dev")
-	if [ -z "$keyid_int" ] && echo "$slots" | grep -q tpm2; then
+	if [ -z "$keyid_int" ] && have_slot "$dev" "tpm2"; then
 		warn "There is already a recovery PIN for the TPM2"
 		warn "The recovery key and the recovery PIN are now different"
 	fi
