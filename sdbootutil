@@ -2357,10 +2357,9 @@ clean_pcrlock_d()
 	# file gets replaced (loader.conf) the new measurement cannot
 	# be found in the event log, as contains the old hash, making
 	# the aligment fail.
-	local last_reboot
-	last_reboot="$(systemctl show --property ActiveEnterTimestamp init.scope)"
-	last_reboot="${last_reboot#ActiveEnterTimestamp=}"
-	local minutes=$((1 + ($(date +%s) - $(date -d"$last_reboot" +%s)) / 60))
+	local btime
+	read -r _ btime < <(grep btime /proc/stat)
+	local minutes=$((1 + ($(date +%s) - btime) / 60))
 	dbg "Cleaning shifted measurements older than $minutes minutes"
 	find /var/lib/pcrlock.d -name 'shift-*.pcrlock' -type f -cmin +"$minutes" -delete
 
