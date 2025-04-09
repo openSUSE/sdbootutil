@@ -93,6 +93,7 @@ helpandquit()
 		  --arch		Manually set architecture
 		  --entry-token		Override entry token
 		  --image		Specify Linux kernel file name
+		  --all			List all entries (inc. from other systems)
 		  --entry-keys		Comma separated list of keys
 		  --no-variables	Do not update UEFI variables
 		  --no-reuse-initrd	Always regenerate initrd
