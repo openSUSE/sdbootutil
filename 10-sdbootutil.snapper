@@ -19,6 +19,8 @@ create_snapshot()
 
 	[ "$fs" = btrfs ] || return 1
 
+	/usr/bin/sdbootutil update --sync "$num" || :
+
 	is_transactional && return 0
 
 	/usr/bin/sdbootutil add-all-kernels "$num" || :
