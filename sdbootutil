@@ -755,15 +755,6 @@ mount_etc()
 	mount overlay -t overlay -o ro,"lowerdir=${upper}:${lower}" "${snapshot_dir}/etc"
 }
 
-umount_etc()
-{
-	local snapshot_dir="$1"
-
-	# Don't umount if we are within a transactional-update shell
-	[ -z "$TRANSACTIONAL_UPDATE" ] || return 0
-	umount "${snapshot_dir}/etc"
-}
-
 add_version_to_title()
 {
 	# TW pretty name does not include the version
@@ -1009,7 +1000,6 @@ install_kernel()
 		else
 			dracut "${dracut_args[@]}" "$tmpdir/initrd-0" "$kernel_version"
 		fi
-		is_transactional && umount_etc "${snapshot_dir}"
 		[ "$subvol" != "$root_subvol" ] && [ -n "$have_snapshots" ] && umount_chroot "${snapshot_dir}"
 	fi
 
