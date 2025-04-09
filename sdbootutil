@@ -326,9 +326,7 @@ reset_rollback()
 
 is_transactional()
 {
-	# For running systems we can have this tests instead:
-	#   [ "$(stat -f -c %T /etc)" = "overlayfs" ]
-	grep -q "^overlay /etc" /etc/fstab
+	findmnt --fstab / -O ro >/dev/null
 }
 
 keyctl_add_with_timeout()
@@ -736,6 +734,9 @@ mount_etc()
 
 	# Don't mount if we are within a transactional-update shell
 	[ -z "$TRANSACTIONAL_UPDATE" ] || return 0
+
+	# Only overlayfs needs special treatment
+	[ "$(findmnt --tab-file "${snapshot_dir}/etc/fstab" --noheadings --nofsroot --output FSTYPE /etc)" = "overlay" ] || return 0
 
 	IFS=',' read -ra fields <<<\
 	   "$(findmnt --tab-file "${snapshot_dir}/etc/fstab" --noheadings --nofsroot --output OPTIONS /etc | sed 's#/sysroot##g' | sed 's#:/etc,#:'"${snapshot_dir}"'/etc,#g')"
