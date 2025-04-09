@@ -137,6 +137,9 @@ helpandquit()
 		remove-all-kernels [SNAPSHOT]
 		           Remove boot entries for all kernels in SNAPSHOT
 
+		cleanup [SNAPSHOT]
+		           Remove boot entries with missing kernels from SNAPSHOT
+
 		list-kernels [SNAPSHOT]
 		           List all kernels related to SNAPSHOT
 
@@ -1117,6 +1120,34 @@ remove_all_kernels()
 	for kv in "${!found_kernels[@]}"; do
 		remove_kernel "${snapshot}" "$kv"
 	done
+}
+
+cleanup_entries()
+{
+	info "Cleaning up boot entries"
+
+	if [ ! -s "$entryfile" ]; then
+		if [ -n "$1" ]; then
+			update_entries_for_snapshot "$1"
+		else
+			update_entries_for_this_system
+		fi
+	fi
+
+	local id snapshot kernel_version subvol src
+	while read -r id; do
+		read -r snapshot
+		read -r kernel_version
+		subvol="${subvol_prefix}/.snapshots/${snapshot}/snapshot"
+		src="${subvol#"${subvol_prefix}"}/lib/modules/$kernel_version/$image"
+		[ -e "$src" ] || {
+			info "Cleaning boot entry $id"
+			rm "${boot_root}/loader/entries/$id"
+		}
+	done < <(jq -r '.[] | .id, (.version | scan("(.*)@(.*)") | .[])' "$entryfile")
+
+	dbg "Calling bootctl cleanup"
+	bootctl -q cleanup 2> /dev/null
 }
 
 list_entries()
@@ -3401,6 +3432,7 @@ define_commands() {
 		[force-update]=""
 		[add-kernel]="kernel"
 		[remove-kernel]="kernel"
+		[cleanup]=""
 		[set-default-snapshot]=""
 		[add-all-kernels]=""
 		[mkinitrd]=""
@@ -3620,6 +3652,8 @@ case "$1" in
 		remove_kernel "${3:-$root_snapshot}" "$2" ;;
 	remove-all-kernels)
 		remove_all_kernels "${2:-$root_snapshot}" ;;
+	cleanup)
+		cleanup_entries "${2:-}" ;;
 	set-default-snapshot)
 		set_default_snapshot "${2:-$root_snapshot}" ;;
 	is-installed)
