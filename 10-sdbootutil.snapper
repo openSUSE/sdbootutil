@@ -24,7 +24,7 @@ create_snapshot()
 	is_transactional && return 0
 
 	/usr/bin/sdbootutil add-all-kernels "$num" || :
-	/usr/bin/sdbootutil update --sync "$num" || :
+	/usr/bin/sdbootutil cleanup "$num" || :
 }
 
 delete_snapshot()
@@ -36,6 +36,7 @@ delete_snapshot()
 	[ "$fs" = btrfs ] || return 1
 
 	/usr/bin/sdbootutil remove-all-kernels "$num" || :
+	/usr/bin/sdbootutil cleanup "$num" || :
 }
 
 set_default_snapshot()
