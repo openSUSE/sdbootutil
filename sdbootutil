@@ -985,19 +985,19 @@ install_kernel()
 
 		info "Generating new initrd"
 
-		[ "$subvol" != "$root_subvol" ] && [ -n "$have_snapshots" ] && mount_chroot "${snapshot_dir}"
-		# In MicroOS we need to be sure to have the same /etc
-		# inside the snapshot.  For example, /etc/crypttab can
-		# have modifications in the overlay that will be
-		# visible once the snapshot is active, but the version
-		# in /.snashots is still the unmodified base
-		is_transactional && mount_etc "${snapshot_dir}"
 		if [ "$subvol" != "$root_subvol" ] && [ -n "$have_snapshots" ]; then
+			mount_chroot "${snapshot_dir}"
+			# In MicroOS we need to be sure to have the same /etc
+			# inside the snapshot.  For example, /etc/crypttab can
+			# have modifications in the overlay that will be
+			# visible once the snapshot is active, but the version
+			# in /.snapshots is still the unmodified base
+			is_transactional && mount_etc "${snapshot_dir}"
 			chroot "${snapshot_dir}" dracut "${dracut_args[@]}" "$tmpdir/initrd-0" "$kernel_version"
+			umount_chroot "${snapshot_dir}"
 		else
 			dracut "${dracut_args[@]}" "$tmpdir/initrd-0" "$kernel_version"
 		fi
-		[ "$subvol" != "$root_subvol" ] && [ -n "$have_snapshots" ] && umount_chroot "${snapshot_dir}"
 	fi
 
 	make_free_space_for_kernel "$snapshot" || err "No free space in $boot_root for new kernel"
