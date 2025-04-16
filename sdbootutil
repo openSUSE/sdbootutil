@@ -358,6 +358,29 @@ keyctl_add_with_timeout()
 	# session keyring, so we cannot do `keyctl unlink "$keyid" @s`
 }
 
+ask_password()
+{
+	local msg="$1"
+	local -n nameref_pw="$2"
+	read -r -s -p "$msg: " nameref_pw
+	echo >&2
+}
+
+ask_new_password()
+{
+	local msg="$1"
+	local -n nameref_pw="$2"
+	local pw1 pw2
+	ask_password "New $msg" pw1
+	ask_password "Re-type $msg" pw2
+	if [ "$pw1" = "$pw2" ]; then
+		# shellcheck disable=SC2034
+		nameref_pw="$pw1"
+	else
+		error "Inputs did't match!"
+	fi
+}
+
 subvol_is_ro()
 {
 	[ -n "$have_snapshots" ] || return 0
@@ -2470,7 +2493,7 @@ generate_tpm2_predictions_pcrlock()
 	keyid="$(keyctl id %user:sdbootutil 2> /dev/null)" || true
 	keyid_int="$(keyctl id %user:sdbootutil-pin 2> /dev/null)" || true
 	if [ -n "$arg_ask_key_pin_or_pw" ]; then
-		read -r -s -p "Recovery PIN: " pin
+		ask_password "Recovery PIN" pin
 		extra=("--recovery-pin=yes")
 	elif [ -n "$PIN" ]; then
 		pin="$PIN"
@@ -2596,7 +2619,7 @@ get_volume_password()
 	elif [ -n "$keyid" ]; then
 		pw="$(keyctl pipe "$keyid")"
 	else
-		read -r -s -p "Password for $dev: " pw
+		ask_password "Password for $dev" pw
 		# If the key was missing for all the keyrings put back
 		# into the cryptenroll keyring, as there is a chance
 		# that this is part or a re-enrollment
@@ -3036,7 +3059,7 @@ enroll_recovery_key()
 	keyid="$(keyctl id %user:sdbootutil 2> /dev/null)" || true
 	keyid_int="$(keyctl id %user:sdbootutil-pin 2> /dev/null)" || true
 	if [ -n "$arg_ask_key_pin_or_pw" ]; then
-		read -r -s -p "Recovery key: " key
+		ask_new_password "recovery key" key
 	elif [ -n "$KEY" ]; then
 		key="$KEY"
 	elif [ -n "$keyid_int" ]; then
@@ -3256,7 +3279,7 @@ enroll()
 	if [ "$arg_method" = "tpm2+pin" ]; then
 		keyid="$(keyctl id %user:sdbootutil 2> /dev/null)" || true
 		if [ -n "$arg_ask_key_pin_or_pw" ]; then
-			read -r -s -p "TPM2 PIN: " pin_or_pw
+			ask_new_password "TPM2 PIN" pin_or_pw
 		elif [ -n "$PIN" ]; then
 			pin_or_pw="$PIN"
 		elif [ -n "$keyid" ]; then
@@ -3267,7 +3290,7 @@ enroll()
 	elif [ "$arg_method" = "password" ]; then
 		keyid="$(keyctl id %user:sdbootutil 2> /dev/null)" || true
 		if [ -n "$arg_ask_key_pin_or_pw" ]; then
-			read -r -s -p "Password: " pin_or_pw
+			ask_new_password "password" pin_or_pw
 		elif [ -n "$PW" ]; then
 			pin_or_pw="$PW"
 		elif [ -n "$keyid" ]; then
