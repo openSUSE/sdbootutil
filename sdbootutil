@@ -2634,12 +2634,13 @@ get_volume_key()
 	local pw out
 	pw="$(get_volume_password "$dev")"
 	out="$(cryptsetup luksDump --batch-mode --dump-master-key "$dev" <<<"$pw")" || {
-		# If luksDump fais, remove the password from the
+		# If luksDump fails, remove the password from the
 		# keyring.  Can be that the password was wrong, and
 		# systemd-cryptenroll ask later for the password.
 		# Both passwords can appear in the keyring separated
 		# by NULL
 		keyctl revoke %user:cryptenroll 2> /dev/null || true
+		keyctl reap 2> /dev/null || true
 		return 1
 	}
 	echo "$out" | sed -n '/MK dump:/,$p' | sed -E 's/MK dump:|[[:blank:]]+//g' | sed -z 's/\n//g'
