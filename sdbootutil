@@ -2710,7 +2710,9 @@ generate_tpm2_predictions_pcr_15()
 	# cannot nest two reads (one for crypttab and another for the
 	# password)
 	for dev in "${devs[@]}"; do
-		vks+=("$(get_volume_key "$dev")")
+		local vk="$(get_volume_key "$dev")"
+		[ -n "$vk" ] || { warn "Volume key cannot be extracted. Dropping PCR 15"; return 0; }
+		vks+=("$vk")
 	done
 
 	rm -f /var/lib/sdbootutil/measure-pcr-prediction
