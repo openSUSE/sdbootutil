@@ -373,12 +373,13 @@ ask_new_password()
 	local pw1 pw2
 	ask_password "New $msg" pw1
 	ask_password "Re-type $msg" pw2
-	if [ "$pw1" = "$pw2" ]; then
-		# shellcheck disable=SC2034
-		nameref_pw="$pw1"
-	else
-		error "Inputs did't match!"
-	fi
+	while [ "$pw1" != "$pw2" ]; do
+		warn "Inputs did't match!"
+		ask_password "New $msg" pw1
+		ask_password "Re-type $msg" pw2
+	done
+	# shellcheck disable=SC2034
+	nameref_pw="$pw1"
 }
 
 subvol_is_ro()
