@@ -2207,18 +2207,15 @@ pcrlock_grub2_bls_entry_files()
 	local base="${2:-$boot_root}"
 	local locks=()
 	local n=0
-	# GRUB2 is reading the files in filesystem order, so we cannot
-	# iterate naturally the directory
-	while read -r i; do
-		[[ "$i" == *.conf ]] || continue
+	for i in "$base"/loader/entries/*.conf; do
 		n=$((n+1))
 		pcrlock \
 			lock-raw \
 			--pcr=9 \
 			--pcrlock="$tmpdir/entry-$n.pcrlock" \
-			"$base/loader/entries/$i"
+			"$i"
 		locks+=("$tmpdir/entry-$n.pcrlock")
-	done < <(ls -U "$base"/loader/entries)
+	done
 	mkdir -p /var/lib/pcrlock.d/643-grub2-bls-entry-files.pcrlock.d
 	jq --slurp '{"records": [.[].records[0]]}' \
 	   "${locks[@]}" \
