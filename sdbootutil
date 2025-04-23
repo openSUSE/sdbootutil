@@ -2762,6 +2762,7 @@ generate_tpm2_predictions()
 {
 	[ -e /etc/crypttab ] || return 0
 	grep -q "tpm2-device" /etc/crypttab || return 0
+	! in_lockout || err "The TPM2 is in lockout. Use 'tpm2_dictionarylockout -c [ -p passwd ]' to continue"
 
 	# The PCR list is used by both models (pcr-oracle,
 	# systemd-pcrlock).  The first one will try first to get the
@@ -2828,6 +2829,12 @@ have_slot()
 	local dev="${1:?}"
 	local kind="${2:?}"
 	grep -q "$kind" < <(systemd-cryptenroll "$dev")
+}
+
+in_lockout()
+{
+	hash tpm2_getcap &> /dev/null || { warn "tpm2_getcap not found"; return 1; }
+	tpm2_getcap properties-variable | grep -q 'inLockout: *1'
 }
 
 add_crypttab_option()
@@ -3194,6 +3201,7 @@ enroll()
 	case "$arg_method" in
 		"tpm2"|"tpm2+pin")
 			have_tpm2 || err "No TPM2 found found"
+			! in_lockout || err "The TPM2 is in lockout. Use 'tpm2_dictionarylockout -c [ -p passwd ]' to continue"
 			add_crypttab_option 'tpm2-device=auto'
 			add_crypttab_option 'tpm2-measure-pcr=yes'
 			;;
