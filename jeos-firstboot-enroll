@@ -8,8 +8,6 @@ enroll_description=$"Enroll a device using TPM2 or FIDO2 key"
 crypt_keyid=""
 crypt_pw=""
 crypt_tpm_pin=""
-# for pin
-cryptenroll_tpm_extra_args=()
 
 with_fido2=
 with_tpm2=
