@@ -1,5 +1,10 @@
 #!/bin/bash
 
+# shellcheck disable=SC2034
+enroll_title=$"Full Disk Encryption Enrollment"
+# shellcheck disable=SC2034
+enroll_description=$"Enroll a device using TPM2 or FIDO2 key"
+
 crypt_keyid=""
 crypt_pw=""
 crypt_tpm_pin=""
