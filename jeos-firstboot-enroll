@@ -180,7 +180,7 @@ enroll_jeos_config() {
 	is_jeos_config=1
 	d --insecure --passwordbox  $"Enter decryption password" 0 0
 	[ -n "$result" ] || return 0
-	echo -n "$result" | keyctl padd user cryptenroll @u
+	echo -n "$result" | keyctl padd user cryptenroll @u &> /dev/null
 
 	enroll_systemd_firstboot
 	do_enroll
