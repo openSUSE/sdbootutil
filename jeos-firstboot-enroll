@@ -62,8 +62,9 @@ enroll_systemd_firstboot() {
 
 		d --no-tags --default-item "${list[0]}" --menu $"Disk Encryption" 0 0 "$(menuheight ${#list[@]})" "${list[@]}"
 		if [ "$result" = 'done' ]; then
-			if [ -z "$crypt_pw" ] && [ -z "$with_fido2" ] && [ -z "$with_tpm2" ] && [ -z "$is_jeos_config" ]; then
-				d_styled --yesno $"Neither password, TPM2 nor FIDO2 entrolled. Unlocking disk will only work with recovery key. Is this intended?" 0 0 || continue
+			if [ -z "$with_recovery_key" ] && [ -z "$crypt_pw" ] && [ -z "$with_fido2" ] && [ -z "$with_tpm2" ] && [ -z "$is_jeos_config" ]; then
+				d_styled --msgbox $"Can not continue without selecting an enrollment" 5 52
+				continue
 			fi
 			break;
 		elif [ "$result" = 'FIDO2' ]; then
