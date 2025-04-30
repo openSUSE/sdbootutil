@@ -127,6 +127,7 @@ enroll_post() {
 }
 
 do_enroll() {
+	local out r
 	[ -z "$with_recovery_key" ] || {
 		# Note that if --no-reuse-initrd is used, then a new
 		# initrd will be created and will break the
@@ -136,9 +137,14 @@ do_enroll() {
 		if [ -z "$with_tpm2" ] && [ -z "$with_fido2" ]; then
 			extra="--no-reuse-initrd"
 		fi
-		local recovery_key
-		recovery_key="$(run sdbootutil enroll --method=recovery-key "$extra")"
-		write_issue_file "$recovery_key"
+		d --infobox "Enrolling recovery-key ..." 3 40
+		out="$(run sdbootutil enroll --method=recovery-key "$extra" 2>&1)"
+		r="$?"
+		if [ $r -ne 0 ]; then
+			d --msgbox "Error (recovery-key): $out" 0 0
+		else
+			write_issue_file "$out"
+		fi
 	}
 
 	[ -z "$crypt_pw" ] || {
@@ -150,18 +156,32 @@ do_enroll() {
 		if [ -z "$with_tpm2" ] && [ -z "$with_fido2" ]; then
 			extra="--no-reuse-initrd"
 		fi
-		PW="$crypt_pw" run sdbootutil enroll --method=password "$extra"
+		d --infobox "Enrolling password ..." 3 40
+		out="$(PW="$crypt_pw" run sdbootutil enroll --method=password "$extra" 2>&1)"
+		r="$?"
+		[ $r -eq 0 ] || d --msgbox "Error (password): $out" 0 0
 	}
 
 	if [ -n "$with_tpm2" ]; then
 		if [ -n "$crypt_tpm_pin" ]; then
-			SDB_ADD_INITIAL_COMPONENT=1 PIN="$crypt_tpm_pin" run sdbootutil enroll --method=tpm2+pin
+			d --infobox "Enrolling TPM2+PIN ..." 3 40
+			out="$(SDB_ADD_INITIAL_COMPONENT=1 PIN="$crypt_tpm_pin" run sdbootutil enroll --method=tpm2+pin 2>&1)"
+			r="$?"
+			[ $r -eq 0 ] || d --msgbox "Error (TPM2+PIN): $out" 0 0
 		else
-			SDB_ADD_INITIAL_COMPONENT=1 run sdbootutil enroll --method=tpm2
+			d --infobox "Enrolling TPM2 ..." 3 40
+			out="$(SDB_ADD_INITIAL_COMPONENT=1 run sdbootutil enroll --method=tpm2 2>&1)"
+			r="$?"
+			[ $r -eq 0 ] || d --msgbox "Error (TPM2): $out" 0 0
 		fi
 	fi
 
-	[ -z "$with_fido2" ] || run sdbootutil enroll --method=fido2
+	[ -z "$with_fido2" ] || {
+		d --infobox "Enrolling FIDO2 ..." 3 40
+		out="$(run sdbootutil enroll --method=fido2 2>&1)"
+		r="$?"
+		[ $r -eq 0 ] || d --msgbox "Error (FIDO2): $out" 0 0
+	}
 
 	# Clean the enrollment key.  disk-encryption-tool creates it
 	# in the keyslot 0 with the name "enrollment-key", that is
