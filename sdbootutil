@@ -2764,7 +2764,7 @@ generate_tpm2_predictions()
 {
 	[ -e /etc/crypttab ] || return 0
 	grep -q "tpm2-device" /etc/crypttab || return 0
-	! in_lockout || err "The TPM2 is in lockout. Use 'tpm2_dictionarylockout -c [ -p passwd ]' to continue"
+	! in_lockout || err "The TPM2 is in lockout. Use 'tpm2_dictionarylockout -c [ -p passwd ]' to clear the DA lockout and re-try the sdbootutil command"
 
 	# The PCR list is used by both models (pcr-oracle,
 	# systemd-pcrlock).  The first one will try first to get the
