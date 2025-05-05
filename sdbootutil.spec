@@ -45,7 +45,7 @@ Requires:       udev
 Supplements:    (grub2-x86_64-efi-bls and shim)
 Supplements:    (systemd-boot and shim)
 BuildArch:      noarch
-ExclusiveArch:  aarch64 ppc64le riscv64 x86_64
+ExclusiveArch:  aarch64 x86_64
 %{?systemd_requires}
 
 %description
