@@ -127,7 +127,7 @@ enroll_post() {
 }
 
 do_enroll() {
-	local out r
+	local out r error=0
 	[ -z "$with_recovery_key" ] || {
 		# Note that if --no-reuse-initrd is used, then a new
 		# initrd will be created and will break the
@@ -142,6 +142,7 @@ do_enroll() {
 		r="$?"
 		if [ $r -ne 0 ]; then
 			d --msgbox "Error (recovery-key): $out" 0 0
+			error=1
 		else
 			write_issue_file "$out"
 		fi
@@ -159,7 +160,10 @@ do_enroll() {
 		d --infobox "Enrolling password ..." 3 40
 		out="$(PW="$crypt_pw" run sdbootutil enroll --method=password "$extra" 2>&1)"
 		r="$?"
-		[ $r -eq 0 ] || d --msgbox "Error (password): $out" 0 0
+		[ $r -eq 0 ] || {
+			d --msgbox "Error (password): $out" 0 0
+			error=1
+		}
 	}
 
 	if [ -n "$with_tpm2" ]; then
@@ -167,12 +171,19 @@ do_enroll() {
 			d --infobox "Enrolling TPM2+PIN ..." 3 40
 			out="$(SDB_ADD_INITIAL_COMPONENT=1 PIN="$crypt_tpm_pin" run sdbootutil enroll --method=tpm2+pin 2>&1)"
 			r="$?"
-			[ $r -eq 0 ] || d --msgbox "Error (TPM2+PIN): $out" 0 0
+			[ $r -eq 0 ] || {
+				d --msgbox "Error (TPM2+PIN): $out" 0 0
+				error=1
+			}
+
 		else
 			d --infobox "Enrolling TPM2 ..." 3 40
 			out="$(SDB_ADD_INITIAL_COMPONENT=1 run sdbootutil enroll --method=tpm2 2>&1)"
 			r="$?"
-			[ $r -eq 0 ] || d --msgbox "Error (TPM2): $out" 0 0
+			[ $r -eq 0 ] || {
+				d --msgbox "Error (TPM2): $out" 0 0
+				error=1
+			}
 		fi
 	fi
 
@@ -180,19 +191,27 @@ do_enroll() {
 		d --infobox "Enrolling FIDO2 ..." 3 40
 		out="$(run sdbootutil enroll --method=fido2 2>&1)"
 		r="$?"
-		[ $r -eq 0 ] || d --msgbox "Error (FIDO2): $out" 0 0
+		[ $r -eq 0 ] || {
+			d --msgbox "Error (FIDO2): $out" 0 0
+			error=1
+		}
 	}
 
-	# Clean the enrollment key.  disk-encryption-tool creates it
-	# in the keyslot 0 with the name "enrollment-key", that is
-	# showed by systemd-cryptenroll as "other"
-	local slots
-	while read -r dev; do
-		slots=$(systemd-cryptenroll "$dev")
-		if grep -q "other" <<<"$slots"; then
-			systemd-cryptenroll --wipe-slot=0 "$dev"
-		fi
-	done < <(sdbootutil list-devices)
+	if [ "$error" -eq 1 ]; then
+		d --msgbox "One or more enrollment method failed. Resolve the issue and re-try with 'jeos-config enroll'" 0 0
+	else
+		# Clean the enrollment key.  disk-encryption-tool
+		# creates it in the keyslot 0 with the name
+		# "enrollment-key", that is showed by
+		# systemd-cryptenroll as "other"
+		local slots
+		while read -r dev; do
+			slots=$(systemd-cryptenroll "$dev")
+			if grep -q "other" <<<"$slots"; then
+				systemd-cryptenroll --wipe-slot=0 "$dev"
+			fi
+		done < <(sdbootutil list-devices)
+	fi
 }
 
 enroll_jeos_config() {
