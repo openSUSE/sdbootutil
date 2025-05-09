@@ -16,6 +16,7 @@ arg_no_variables=
 arg_no_reuse_initrd=
 arg_no_random_seed=
 arg_portable=
+arg_secure_boot=
 arg_sync=
 arg_only_default=
 arg_default_snapshot=
@@ -100,6 +101,7 @@ helpandquit()
 		  --sync		Synchronize (update, downgrade) the bootloader
 		  --portable		Handle bootloader on portable devices
 		                        (also --removable possible)
+		  --secure-boot		When installing the bootloader, use the shim
 		  --only-default	Only list the default entry
 		  --default-snapshot	[SNAPSHOT] refers to the default snapshot
 		  --ask-key		Ask recovery Key when initial enrollment
@@ -1415,6 +1417,16 @@ list_devices()
 	done
 }
 
+is_shim_installed()
+{
+	# Check if shim is installed in the ESP
+	# In installed systems there should be a shim.efi
+	[ ! -f "${boot_root}${boot_dst}/shim.efi" ] || return 0
+	# In removable media there is only BOOT${arch}.EFI
+	! grep -q "UEFI SHIM" "${boot_root}/EFI/BOOT/BOOT${firmware_arch^^}.EFI" || return 0
+	return 1
+}
+
 is_bootable()
 {
 	local snapshot="$1"
@@ -1571,7 +1583,11 @@ install_bootloader()
 	drive="/dev/${drive##*/}"
 	read -r partno < "/sys/class/block/${blkpart##*/}"/partition
 
-	if [ -e "$prefix$shimdir/shim.efi" ]; then
+	if [ -n "$arg_secure_boot" ] && [ ! -e "$prefix$shimdir/shim.efi" ]; then
+		warn "A secure boot installation cannot be done. The shim package is not installed"
+	fi
+
+	if [ -n "$arg_secure_boot" ] && [ -e "$prefix$shimdir/shim.efi" ]; then
 		info "Installing $bldr_name with shim into $boot_root"
 		entry="$boot_dst/shim.efi"
 		for i in MokManager shim; do
@@ -2452,30 +2468,60 @@ generate_tpm2_predictions_pcrlock()
 	shift_component 620-secureboot-authority
 	pcrlock lock-secureboot-authority &> /dev/null || true
 
-	# Uses / by default, but firmware measures GPT of the disk a boot application
-	# was loaded from, which is effectively the disk where our ESP is located.
+	# Uses / by default, but firmware measures GPT of the disk a
+	# boot application was loaded from, which is effectively the
+	# disk where our ESP is located.
 	shift_component 600-gpt
 	pcrlock lock-gpt "$boot_root"
 
-	# 630-shim-efi-application is not part of the pcrlock standards
-	# TODO: move to shim-pcrlock.rpm
-	shift_component 630-shim-efi-application
-	local entry="shim.efi"
-	[ -f "${boot_root}${boot_dst}/${entry}" ] || entry="BOOT${firmware_arch^^}.EFI"
-	pcrlock \
-		lock-pe \
-		--pcrlock=/var/lib/pcrlock.d/630-shim-efi-application.pcrlock.d/generated.pcrlock \
-		"${boot_root}${boot_dst}/${entry}"
+	# Read the boot entry from the EFI boot menu
+	local entry
+	entry="$(efibootmgr | grep "Boot.*openSUSE Boot Manager")"
+	entry="${entry#*File(}"
+	entry="${entry%)}"
+	entry="${entry//\\/\/}"
+	if [ -n "$entry" ] && is_shim_installed; then
+		# 630-shim-efi-application is not part of the pcrlock
+		# standards TODO: move to shim-pcrlock.rpm
+		shift_component 630-shim-efi-application
+		pcrlock \
+			lock-pe \
+			--pcrlock=/var/lib/pcrlock.d/630-shim-efi-application.pcrlock.d/generated.pcrlock \
+			"${boot_root}${entry}"
 
-	# 640-boot-loader-efi-application is not part of the pcrlock
-	# standards
-	# This is measuring the systemd-boot EFI binary (named grub.efi)
-	# TODO: move to systemd-boot-pcrlock.rpm
-	shift_component 640-boot-loader-efi-application
-	pcrlock \
-		lock-pe \
-		--pcrlock=/var/lib/pcrlock.d/640-boot-loader-efi-application.pcrlock.d/generated.pcrlock \
-		"${boot_root}${boot_dst}/grub.efi"
+		# 640-boot-loader-efi-application is not part of the
+		# pcrlock standards
+		# This is measuring the systemd-boot EFI binary (named
+		# grub.efi)
+		# TODO: move to systemd-boot-pcrlock.rpm
+		shift_component 640-boot-loader-efi-application
+		pcrlock \
+			lock-pe \
+			--pcrlock=/var/lib/pcrlock.d/640-boot-loader-efi-application.pcrlock.d/generated.pcrlock \
+			"${boot_root}${boot_dst}/grub.efi"
+	elif [ -n "$entry" ] && ! is_shim_installed; then
+		# 640-boot-loader-efi-application is not part of the
+		# pcrlock standards
+		# This is measuring the systemd-boot EFI binary in
+		# installed systems
+		# TODO: move to systemd-boot-pcrlock.rpm
+		shift_component 640-boot-loader-efi-application
+		pcrlock \
+			lock-pe \
+			--pcrlock=/var/lib/pcrlock.d/640-boot-loader-efi-application.pcrlock.d/generated.pcrlock \
+			"${boot_root}${entry}"
+	else
+		# 640-boot-loader-efi-application is not part of the
+		# pcrlock standards
+		# This is measuring the systemd-boot EFI binary in
+		# removable media
+		# TODO: move to systemd-boot-pcrlock.rpm
+		shift_component 640-boot-loader-efi-application
+		pcrlock \
+			lock-pe \
+			--pcrlock=/var/lib/pcrlock.d/640-boot-loader-efi-application.pcrlock.d/generated.pcrlock \
+			"${boot_root}/EFI/BOOT/BOOT${firmware_arch^^}.EFI"
+	fi
 
 	if is_sdboot; then
 		pcrlock_sdboot
@@ -3501,6 +3547,7 @@ define_options() {
 		[all]=""
 		[sync]=""
 		[portable]=""
+		[secure-boot]=""
 		[removable]=""
 		[only-default]=""
 		[default-snapshot]=""
@@ -3554,6 +3601,7 @@ while true ; do
 		--sync) arg_sync=1; shift ;;
 		--portable) arg_portable=1; shift ;;
 		--removable) arg_portable=1; shift ;;
+		--secure-boot) arg_secure_boot=1; shift ;;
 		--only-default) arg_only_default=1; shift ;;
 		--default-snapshot) arg_default_snapshot=1; shift ;;
 		--ask-key|--ask-pin|--ask-pw) arg_ask_key_pin_or_pw=1; shift ;;
@@ -3658,6 +3706,10 @@ if [ "$1" != "install" ] && [ ! -d "${boot_root}${boot_dst}" ]; then
 fi
 
 dbg_var "boot_dst"
+
+if [ "$SECURE_BOOT" = "yes" ] || is_shim_installed; then
+	arg_secure_boot=1
+fi
 
 # Keep initial components before they are replaced by some actions
 # (new initrd, new entry, etc)
