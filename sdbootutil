@@ -2452,9 +2452,10 @@ generate_tpm2_predictions_pcrlock()
 	shift_component 620-secureboot-authority
 	pcrlock lock-secureboot-authority &> /dev/null || true
 
-	# Uses / by default
+	# Uses / by default, but firmware measures GPT of the disk a boot application
+	# was loaded from, which is effectively the disk where our ESP is located.
 	shift_component 600-gpt
-	pcrlock lock-gpt
+	pcrlock lock-gpt "$boot_root"
 
 	# 630-shim-efi-application is not part of the pcrlock standards
 	# TODO: move to shim-pcrlock.rpm
