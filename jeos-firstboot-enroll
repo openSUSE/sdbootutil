@@ -198,7 +198,7 @@ do_enroll() {
 	}
 
 	if [ "$error" -eq 1 ]; then
-		d --msgbox "One or more enrollment method failed. Resolve the issue and re-try with 'jeos-config enroll'" 0 0
+		d --msgbox "One or more enrollment methods failed. Resolve the issue and re-try with 'jeos-config enroll'" 0 0
 	else
 		# Clean the enrollment key.  disk-encryption-tool
 		# creates it in the keyslot 0 with the name
