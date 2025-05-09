@@ -3627,14 +3627,7 @@ dbg_var "boot_root"
 # shellcheck disable=SC1091
 [ -e /etc/sysconfig/bootloader ] && . /etc/sysconfig/bootloader
 
-# XXX: Unify both in /EFI/opensuse?
-if [ -n "$arg_portable" ]; then
-	if [ ! -d "$boot_root/EFI/systemd" ] && [ ! -d "$boot_root/EFI/opensuse" ]; then
-		boot_dst="/EFI/BOOT"
-	else
-		err "Bootloader is already installed permanently"
-	fi
-elif is_sdboot; then
+if is_sdboot; then
 	boot_dst="/EFI/systemd"
 elif is_grub2_bls; then
 	set_os_release "${root_snapshot}"
@@ -3645,6 +3638,23 @@ else
 	msg="Bootloader not detected"
 	[ -z "$LOADER_TYPE" ] || msg+=". /etc/sysconfig/bootloader has LOADER_TYPE=\"$LOADER_TYPE\", but only \"systemd-boot\" or \"grub2-bls\" are recognized."
 	err "$msg"
+fi
+
+# Removable media layout is described in
+# https://github.com/rhboot/shim/blob/main/README.fallback
+if [ -n "$arg_portable" ]; then
+	if [ -d "${boot_root}${boot_dst}" ]; then
+		err "Bootloader is already installed permanently"
+	fi
+	boot_dst="/EFI/BOOT"
+fi
+
+# When we are doing an operation different from installation, the
+# boot_dst should be already present.  We can use it to identify a
+# removable installation
+if [ "$1" != "install" ] && [ ! -d "${boot_root}${boot_dst}" ]; then
+	info "Removable installation detected"
+	boot_dst="/EFI/BOOT"
 fi
 
 dbg_var "boot_dst"
