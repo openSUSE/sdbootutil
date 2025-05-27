@@ -2770,10 +2770,11 @@ generate_tpm2_predictions_pcr_15()
 	local dgsts=("sha1" "sha256" "sha384" "sha512")
 	local sizes=(40 64 96 128)
 	local pcr15 hmac
+
 	for i in "${!dgsts[@]}"; do
 		pcr15="$(printf '0%.0s' $(seq 1 "${sizes[i]}"))"
 		for j in "${!msgs[@]}"; do
-			hmac="$(echo -ne "${msgs[j]}" | openssl mac -digest "${dgsts[i]}" -macopt hexkey:"${vks[j]}" HMAC)"
+			hmac="$(echo -ne "${msgs[j]}" | /usr/libexec/sdbootutil/uhmac "${dgsts[i]}" <(echo "${vks[j]}"))"
 			pcr15="$(extend_pcr "${dgsts[i]}" "$pcr15" "$hmac")"
 			dbg "${msgs[j]} (${dgsts[i]}): $hmac"
 		done
