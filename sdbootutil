@@ -2836,6 +2836,14 @@ generate_tpm2_predictions()
 	updated_crypttab || { generate_tpm2_predictions_pcr_15; arg_measure_pcr=; }
 	# shellcheck disable=SC2015
 	[ -f "/var/lib/sdbootutil/measure-pcr-prediction" ] && [ -z "$arg_measure_pcr" ] || generate_tpm2_predictions_pcr_15
+	# The user can remove measure-pcr-prediction file from the
+	# ESP, but generate_tpm2_predictions_pcr_15 will not be called
+	[ -f "${boot_root}${boot_dst}/measure-prediction" ] || {
+		[ ! -e /var/lib/sdbootutil/measure-pcr-prediction ] || \
+			cp /var/lib/sdbootutil/measure-pcr-prediction "${boot_root}${boot_dst}"
+		[ ! -e /var/lib/sdbootutil/measure-pcr-prediction.sha256 ] || \
+			cp /var/lib/sdbootutil/measure-pcr-prediction.sha256 "${boot_root}${boot_dst}"
+	}
 }
 
 have_tracked_devices()
