@@ -145,7 +145,13 @@ cd uhmac
 
 %install
 install -D -m 755 %{name} %{buildroot}%{_bindir}/%{name}
-install -D -m 755 uhmac/target/release/uhmac %{buildroot}%{_libexecdir}/%{name}/uhmac
+
+# Install uhmac binary
+pushd uhmac
+%{cargo_install}
+install -D -m 755 %{buildroot}%{_bindir}/uhmac %{buildroot}%{_libexecdir}/%{name}/uhmac
+rm %{buildroot}%{_bindir}/uhmac
+popd
 
 # Update prediction service
 install -D -m 644 %{name}-update-predictions.service \
