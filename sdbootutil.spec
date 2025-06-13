@@ -141,7 +141,6 @@ install -D -m 644 %{SOURCE2} .cargo/config.toml
 
 %build
 cd uhmac
-sed -i 's/edition = "2024"/edition = "2018"/' Cargo.toml
 %{cargo_build}
 
 %install
