@@ -2689,7 +2689,7 @@ get_volume_key()
 		# Both passwords can appear in the keyring separated
 		# by NULL
 		keyctl revoke %user:cryptenroll 2> /dev/null || true
-		keyctl reap 2> /dev/null || true
+		keyctl reap &> /dev/null || true
 		return 1
 	}
 	echo "$out" | sed -n '/MK dump:/,$p' | sed -E 's/MK dump:|[[:blank:]]+//g' | sed -z 's/\n//g'
@@ -2716,6 +2716,15 @@ generate_tpm2_predictions_pcr_15()
 	local name dev opts fstype uuid pw
 
 	info "Generating predictions for PCR15"
+
+	# If we are not in interactive mode we cannot ask the LUKS2
+	# password and we cannot update the PCR 15 predictions.  This
+	# will halt the system in the next boot.
+	if [ -n "$TRANSACTIONAL_UPDATE" ] || [ -n "$SNAPPER_PLUGIN" ]; then
+		warn "PCR 15 predictions cannot be updated"
+		warn "Run 'sdbootutil update-predictions' manually"
+		return 0
+	fi
 
 	# Read /etc/crypttab lines that contains tpm2-device and
 	# tpm2-measure-pcr.  This code is the similar from
