@@ -3,6 +3,7 @@
 # SPDX-FileCopyrightText: Copyright 2023 SUSE LLC
 set -e
 shopt -s nullglob
+source "/etc/sdbootutil"
 
 DEBUG_LOG="/var/log/sdbootutil.log"
 
@@ -16,6 +17,7 @@ fi
 verbose=
 nl=$'\n'
 shimdir="/usr/share/efi/$(uname -m)"
+ukidir="/var/lib/sdbootutil/uki"
 arg_esp_path="$SYSTEMD_ESP_PATH"
 arg_entry_token=
 arg_arch=
@@ -23,6 +25,7 @@ arg_all_entries=
 arg_entry_keys=()
 arg_no_variables=
 arg_no_reuse_initrd=
+arg_no_reuse_profile=
 arg_no_random_seed=
 arg_portable=
 arg_secure_boot=
@@ -109,6 +112,7 @@ helpandquit()
 		  --entry-keys		Comma separated list of keys
 		  --no-variables	Do not update UEFI variables
 		  --no-reuse-initrd	Always regenerate initrd
+		  --no-reuse-profile	Always regenerate UKI profile
 		  --sync		Synchronize (update, downgrade) the bootloader
 		  --portable		Handle bootloader on portable devices
 		                        (also --removable possible)
@@ -597,25 +601,6 @@ settle_entry_token()
 	return 0
 }
 
-remove_kernel()
-{
-	local snapshot="$1"
-	local kernel_version="$2"
-	[ -n "$kernel_version" ] || err "Missing kernel version"
-
-	info "Removing kernel $kernel_version"
-	dbg_var "snapshot"
-
-	settle_entry_token "${snapshot}"
-	local id
-	id="$(entry_conf_file "$kernel_version" "$snapshot")"
-	info "Removing boot entry $id"
-	bootctl unlink "$id"
-
-	# This action will require to update the PCR predictions
-	update_predictions=1
-}
-
 install_with_rollback()
 {
 	local src="${1:?}"
@@ -632,6 +617,89 @@ install_with_rollback()
 	install -p -m 0644 "$src" "$dst" || return "$?"
 	chown root:root "$dst" 2>/dev/null || :
 	info "Installed $dst"
+}
+
+remove_uki()
+{
+	local snapshot="$1"
+	local kernel_version="$2"
+	
+	# Remove this snapshot's profile
+	local dir="$ukidir/${kernel_version}"
+	local prof="$dir/profile-${snapshot}.efi"
+	if [ -f "$prof" ]; then
+		info "Deleting profile for snapshot $snapshot"
+		rm -f "$prof"
+	else
+		warn "Profile for snapshot $snapshot not found; skipping delete"
+	fi
+
+	# Rebuild or purge UKI
+	shopt -s nullglob
+	# gather remaining profiles
+	local remaining_profiles=( "$dir"/profile-*.efi )
+	shopt -u nullglob
+
+	if [ "${#remaining_profiles[@]}" -gt 0 ]; then
+		# still have other profiles --> rebuild UKI
+		info "Rebuilding UKI for kernel $kernel_version for remaining snapshots"
+		local tmp_uki="$tmpdir/uki-${kernel_version}.efi"
+		local ukify_args=(
+			--linux="${subvol#"$subvol_prefix"}"/lib/modules/"$kernel_version"/"$image"
+			--output="$tmp_uki"
+		)
+		# add all initrds
+		for initrd in "$dir"/initrd-*; do
+			[ -f "$initrd" ] || continue
+			ukify_args+=(--initrd="$initrd")
+		done
+		# add all remaining profiles
+		for p in "${remaining_profiles[@]}"; do
+			ukify_args+=(--join-profile="$p")
+		done
+
+		ukify build "${ukify_args[@]}"
+		make_free_space_for_uki "$tmp_uki" || err "No free space in $boot_root for new UKI"
+		install_with_rollback "$tmp_uki" "$linuxdir/openSUSE-$kernel_version-$chksum.efi"  || failed="UKI"
+		rm -f "$tmp_uki"
+
+		[ -z "$failed" ] || err "Failed to install $failed"
+		reset_rollback
+
+	else
+		# no profiles left --> remove entire kernel dir + UKI file
+		info "No snapshots left for $kernel_version; removing all artifacts"
+		rm -rf "$dir"
+		# remove the on-disk UKI(s)
+		rm -f "$linuxdir/openSUSE-${kernel_version}-"*.efi
+	fi
+
+	# This action will require to update the PCR predictions
+	update_predictions=1
+}
+
+remove_kernel()
+{
+	local snapshot="$1"
+	local kernel_version="$2"
+	[ -n "$kernel_version" ] || err "Missing kernel version"
+
+	info "Removing kernel $kernel_version"
+	dbg_var "snapshot"
+
+	if [ -n "$use_uki" ]; then
+		remove_uki "$snapshot" "$kernel_version"
+		return
+	fi
+
+	settle_entry_token "${snapshot}"
+	local id
+	id="$(entry_conf_file "$kernel_version" "$snapshot")"
+	info "Removing boot entry $id"
+	bootctl unlink "$id"
+
+	# This action will require to update the PCR predictions
+	update_predictions=1
 }
 
 update_snapper()
@@ -712,7 +780,10 @@ reuse_initrd()
 	local conf
 
 	[ -z "$arg_no_reuse_initrd" ] || return 1
-	settle_entry_token "${snapshot}"
+	settle_entry_token "${snapshot}"+
+
+	# Check if in our UKI build dir is our initrd
+	[ -z "$use_uki" ] || [ -f "$ukidir/${kernel_version}/initrd-0" ]
 
 	conf="$(find_conf_file "$kernel_version" "${snapshot}")"
 	local find_conf_status=$?
@@ -740,6 +811,17 @@ reuse_initrd()
 	fi
 
 	return 1
+}
+
+reuse_profile()
+{
+	local snapshot="$1"
+	local kernel_version="${2:?}"
+
+	[ -z "$arg_no_reuse_profile" ] || return 1
+
+	# Check if a profile already exists for the snapshot
+	[ -f "${ukidir}/${kernel_version}/profile-${snapshot}.efi" ]
 }
 
 mount_chroot()
@@ -975,6 +1057,19 @@ make_free_space_for_kernel()
 	make_free_space "$snapshot" "$total_size"
 }
 
+make_free_space_for_uki()
+{
+	local uki="$1"
+
+	# Calculate the free space and the required size.  All sizes
+	# are in Kb to avoid big numbers
+	local free_space total_size
+	total_size=$(($(pending_kernel_size "$uki")))
+
+	# TODO: Needs adoption to work with UKIs
+	make_free_space "$snapshot" "$total_size"
+}
+
 create_boot_options() {
 	local subvol="$1"
 	local boot_options=
@@ -1005,10 +1100,13 @@ install_kernel()
 	calc_chksum "$src"
 	settle_entry_token "${snapshot}"
 	local dst="/$entry_token/$kernel_version/linux-$chksum"
+	local linuxdir="$boot_root/EFI/Linux"
 
 	local initrd="${src%/*}/initrd"
 
 	mkdir -p "$boot_root${dst%/*}"
+	[ -z "$use_uki" ] || mkdir -p "$linuxdir"
+	[ -z "$use_uki" ] || mkdir -p "$ukidir/${kernel_version}"
 
 	if [ -e "$initrd" ]; then
 		ln -s "$initrd" "$tmpdir/initrd-0"
@@ -1048,19 +1146,8 @@ install_kernel()
 		fi
 	fi
 
-	make_free_space_for_kernel "$snapshot" || err "No free space in $boot_root for new kernel"
-
 	local boot_options
 	boot_options="$(create_boot_options "$subvol")"
-
-	if [ "${#dstinitrd[@]}" -eq 0 ] && [ -e "$tmpdir/initrd-0" ]; then
-		i=0
-		while [ -e "$tmpdir/initrd-$i" ]; do
-			calc_chksum "$tmpdir/initrd-$i"
-			dstinitrd+=("${dst%/*}/initrd-$chksum")
-			((++i))
-		done
-	fi
 
 	title="${os_release_PRETTY_NAME:-Linux $kernel_version}"
 	# shellcheck disable=SC2154
@@ -1071,6 +1158,65 @@ install_kernel()
 		set_snapper_title_and_sortkey "$snapshot"
 	elif is_grub2_bls; then
 		add_kernel_version_to_title
+	fi
+
+	if [ -n "$use_uki" ]; then
+		if [ -e "$tmpdir/initrd-0" ]; then
+			i=0
+			while [ -e "$tmpdir/initrd-$i" ]; do
+				install_with_rollback "$tmpdir/initrd-$i" "$ukidir/${kernel_version}/initrd-$i" || { failed=initrd; break; }
+				rm -f "$tmpdir/initrd-$i"
+				((++i))
+			done
+		fi
+		if ! reuse_profile "$snapshot" "$kernel_version"; then
+			info "Building UKI profile for snapshot $snapshot"
+			ukify build \
+			   --profile="TITLE=${title}${sort_key:+${nl}ID=$sort_key}" \
+        	   --cmdline="$boot_options" \
+        	   --output="$ukidir/${kernel_version}/profile-${snapshot}.efi"
+		else
+			info "Found existing UKI profile for snapshot $snapshot"
+		fi
+		info "Building UKI for kernel $kernel_version"
+		local ukify_args=(
+			--linux="${subvol#"$subvol_prefix"}"/lib/modules/"$kernel_version"/"$image"
+			--output="$tmpdir/uki-${kernel_version}.efi"
+		)
+		shopt -s nullglob
+		for initrd in "$ukidir"/"${kernel_version}"/initrd-*; do
+        	[ -f "$initrd" ] || continue
+        	ukify_args+=(--initrd="$initrd")
+    	done
+		for prof in "$ukidir"/"${kernel_version}"/profile-*.efi; do
+        	[ -f "$prof" ] || continue
+        	ukify_args+=(--join-profile="$prof")
+    	done
+		shopt -u nullglob
+		ukify build "${ukify_args[@]}"
+
+		make_free_space_for_uki "$tmpdir/uki-${kernel_version}.efi" || err "No free space in $boot_root for new UKI"
+
+		install_with_rollback "$tmpdir/uki-${kernel_version}.efi" "$linuxdir/openSUSE-$kernel_version-$chksum.efi" || failed="UKI"
+		rm -f "$tmpdir/uki-${kernel_version}.efi"
+
+		[ -z "$failed" ] || err "Failed to install $failed"
+		reset_rollback
+
+		# This action will require to update the PCR predictions
+		update_predictions=1
+		return
+	fi
+
+	make_free_space_for_kernel "$snapshot" || err "No free space in $boot_root for new kernel"
+
+	if [ "${#dstinitrd[@]}" -eq 0 ] && [ -e "$tmpdir/initrd-0" ]; then
+		i=0
+		while [ -e "$tmpdir/initrd-$i" ]; do
+			calc_chksum "$tmpdir/initrd-$i"
+			dstinitrd+=("${dst%/*}/initrd-$chksum")
+			((++i))
+		done
 	fi
 
 	local entry_machine_id=
@@ -3637,6 +3783,7 @@ define_options() {
 		[entry-keys]="_find_kernels"
 		[no-variables]=""
 		[no-reuse-initrd]=""
+		[no-reuse-profile]=""
 		[no-random-seed]=""
 		[all]=""
 		[sync]=""
@@ -3691,6 +3838,7 @@ while true ; do
 		--entry-keys) IFS=',' read -r -a arg_entry_keys <<<"$2"; shift 2 ;;
 		--no-variables) arg_no_variables=1; shift ;;
 		--no-reuse-initrd) arg_no_reuse_initrd=1; shift ;;
+		--no-reuse-profile) arg_no_reuse_profile=1; shift ;;
 		--no-random-seed) arg_no_random_seed=1; shift ;;
 		--all) arg_all_entries=1; shift ;;
 		--sync) arg_sync=1; shift ;;
