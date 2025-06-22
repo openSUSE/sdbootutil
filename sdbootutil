@@ -624,8 +624,13 @@ remove_uki()
 	local snapshot="$1"
 	local kernel_version="$2"
 	
+	subvol="${subvol_prefix}/.snapshots/${snapshot}/snapshot"
+	local src="${subvol#"${subvol_prefix}"}/lib/modules/$kernel_version/$image"
+	calc_chksum "$src"
+	ker_chksum="$chksum"
+
 	# Remove this snapshot's profile
-	local dir="$ukidir/${kernel_version}"
+	local dir="${ukidir}/${kernel_version}-${ker_chksum}"
 	local prof="$dir/profile-${snapshot}.efi"
 	if [ -f "$prof" ]; then
 		info "Deleting profile for snapshot $snapshot"
@@ -779,11 +784,18 @@ reuse_initrd()
 	local kernel_version="${3:?}"
 	local conf
 
+	local src="${subvol#"${subvol_prefix}"}/lib/modules/$kernel_version/$image"
+	calc_chksum "$src"
+	ker_chksum="$chksum"
+
 	[ -z "$arg_no_reuse_initrd" ] || return 1
 	settle_entry_token "${snapshot}"+
 
 	# Check if in our UKI build dir is our initrd
-	[ -z "$use_uki" ] || [ -f "$ukidir/${kernel_version}/initrd-0" ]
+	if [ -n "$use_uki" ]; then
+		[ -f "${ukidir}/${kernel_version}-${ker_chksum}/initrd-0" ]
+		return $?
+	fi
 
 	conf="$(find_conf_file "$kernel_version" "${snapshot}")"
 	local find_conf_status=$?
@@ -817,11 +829,15 @@ reuse_profile()
 {
 	local snapshot="$1"
 	local kernel_version="${2:?}"
+	subvol="${subvol_prefix}/.snapshots/${snapshot}/snapshot"
+	local src="${subvol#"${subvol_prefix}"}/lib/modules/$kernel_version/$image"
+	calc_chksum "$src"
+	ker_chksum="$chksum"
 
 	[ -z "$arg_no_reuse_profile" ] || return 1
 
 	# Check if a profile already exists for the snapshot
-	[ -f "${ukidir}/${kernel_version}/profile-${snapshot}.efi" ]
+	[ -f "${ukidir}/${kernel_version}-${ker_chksum}/profile-${snapshot}.efi" ]
 }
 
 mount_chroot()
@@ -1096,17 +1112,18 @@ install_kernel()
 
 	info "Installing kernel $kernel_version"
 	dbg_var "snapshot"
-
+	
 	calc_chksum "$src"
+	ker_chksum="$chksum"
 	settle_entry_token "${snapshot}"
-	local dst="/$entry_token/$kernel_version/linux-$chksum"
+	local dst="/$entry_token/$kernel_version/linux-$ker_chksum"
 	local linuxdir="$boot_root/EFI/Linux"
 
 	local initrd="${src%/*}/initrd"
 
 	mkdir -p "$boot_root${dst%/*}"
 	[ -z "$use_uki" ] || mkdir -p "$linuxdir"
-	[ -z "$use_uki" ] || mkdir -p "$ukidir/${kernel_version}"
+	[ -z "$use_uki" ] || mkdir -p "${ukidir}/${kernel_version}-${ker_chksum}"
 
 	if [ -e "$initrd" ]; then
 		ln -s "$initrd" "$tmpdir/initrd-0"
@@ -1164,34 +1181,39 @@ install_kernel()
 		if [ -e "$tmpdir/initrd-0" ]; then
 			i=0
 			while [ -e "$tmpdir/initrd-$i" ]; do
-				install_with_rollback "$tmpdir/initrd-$i" "$ukidir/${kernel_version}/initrd-$i" || { failed=initrd; break; }
+				install_with_rollback "$tmpdir/initrd-$i" "${ukidir}/${kernel_version}-${ker_chksum}/initrd-$i" || { failed=initrd; break; }
 				rm -f "$tmpdir/initrd-$i"
 				((++i))
 			done
 		fi
-		if ! reuse_profile "$snapshot" "$kernel_version"; then
-			info "Building UKI profile for snapshot $snapshot"
-			ukify build \
-			   --profile="TITLE=${title}${sort_key:+${nl}ID=$sort_key}" \
-        	   --cmdline="$boot_options" \
-        	   --output="$ukidir/${kernel_version}/profile-${snapshot}.efi"
-		else
-			info "Found existing UKI profile for snapshot $snapshot"
-		fi
-		info "Building UKI for kernel $kernel_version"
 		local ukify_args=(
 			--linux="${subvol#"$subvol_prefix"}"/lib/modules/"$kernel_version"/"$image"
 			--output="$tmpdir/uki-${kernel_version}.efi"
 		)
+		if ! reuse_profile "$snapshot" "$kernel_version"; then
+			info "Building UKI profile for snapshot $snapshot"
+			if [ "$snapshot" != "$root_snapshot" ]; then
+				ukify build \
+			   	  --profile="TITLE=${title}${snapshot:+${nl}ID=$snapshot}" \
+        		  --cmdline="$boot_options" \
+        		  --output="${ukidir}/${kernel_version}-${ker_chksum}/profile-${snapshot}.efi"
+			fi
+		else
+			info "Found existing UKI profile for snapshot $snapshot"
+		fi
+		info "Building UKI for kernel $kernel_version"
 		shopt -s nullglob
-		for initrd in "$ukidir"/"${kernel_version}"/initrd-*; do
+		for initrd in "${ukidir}/${kernel_version}-${ker_chksum}"/initrd-*; do
         	[ -f "$initrd" ] || continue
         	ukify_args+=(--initrd="$initrd")
     	done
-		for prof in "$ukidir"/"${kernel_version}"/profile-*.efi; do
+		for prof in "${ukidir}/${kernel_version}-${ker_chksum}"/profile-*.efi; do
         	[ -f "$prof" ] || continue
         	ukify_args+=(--join-profile="$prof")
     	done
+		root_subvol="${subvol_prefix}/.snapshots/${root_snapshot}/snapshot"
+		root_boot_options="$(create_boot_options "$root_subvol")"
+		ukify_args+=(--cmdline="$root_boot_options")
 		shopt -u nullglob
 		ukify build "${ukify_args[@]}"
 
