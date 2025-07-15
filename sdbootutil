@@ -1611,8 +1611,15 @@ install_bootloader()
 		install -p -D "$bootloader" "$boot_root/EFI/BOOT/BOOT${firmware_arch^^}.EFI"
 	fi
 
+	# shellcheck disable=SC2154
+	[ -n "${os_release_NAME}" ] || set_os_release "${snapshot}"
+	local split
+	IFS=" " read -r -a split <<<"${os_release_NAME}"
+	local boot_manager
+	boot_manager="${split[0]} Boot Manager"
+
 	# This is for shim to create the entry if missing
-	[ -n "$arg_portable" ] || echo "${entry##*/},openSUSE Boot Manager" | { echo -ne "\xff\xfe"; iconv -f ascii -t ucs-2le; } > "$boot_root$boot_dst/boot.csv"
+	[ -n "$arg_portable" ] || echo "${entry##*/},$boot_manager" | { echo -ne "\xff\xfe"; iconv -f ascii -t ucs-2le; } > "$boot_root$boot_dst/boot.csv"
 
 	mkdir -p "$boot_root/$entry_token"
 	echo "$entry_token" > "$boot_root$boot_dst/installed_by_sdbootutil"
@@ -1627,7 +1634,7 @@ install_bootloader()
 
 	# Create boot menu entry if it does not exist
 	local escaped_entry="${entry//\//\\\\}"
-	[ -n "$arg_no_variables" ] || [ -n "$arg_portable" ] || efibootmgr | grep -q "Boot.*openSUSE Boot Manager.*${escaped_entry}" || efibootmgr -q --create --disk "$drive" --part "$partno" --label "openSUSE Boot Manager ($bldr_name)" --loader "$entry" || true
+	[ -n "$arg_no_variables" ] || [ -n "$arg_portable" ] || efibootmgr | grep -q "Boot.*${boot_manager}.*${escaped_entry}" || efibootmgr -q --create --disk "$drive" --part "$partno" --label "${boot_manager} ($bldr_name)" --loader "$entry" || true
 
 	# Make it the first option
 	if [ -z "$arg_no_variables" ] && [ -z "$arg_portable" ]; then
@@ -1636,7 +1643,7 @@ install_bootloader()
 		boot_order="${boot_order#BootOrder: }"
 
 		local boot_entry
-		boot_entry="$(efibootmgr | grep "Boot.*openSUSE Boot Manager.*${escaped_entry}")"
+		boot_entry="$(efibootmgr | grep "Boot.*${boot_manager}.*${escaped_entry}")"
 		boot_entry="${boot_entry%\* *}"
 		boot_entry="${boot_entry#Boot}"
 
