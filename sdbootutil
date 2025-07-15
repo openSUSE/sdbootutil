@@ -2514,54 +2514,55 @@ generate_tpm2_predictions_pcrlock()
 	shift_component 600-gpt
 	pcrlock lock-gpt "$boot_root"
 
-	# Read the boot entry from the EFI boot menu
-	local entry
-	entry="$(efibootmgr | grep "Boot.*openSUSE Boot Manager")"
-	entry="${entry#*File(}"
-	entry="${entry%)}"
-	entry="${entry//\\/\/}"
-	if [ -n "$entry" ] && is_shim_installed; then
+	# Measure the boot loader.  Combinations:
+	#   - Removable media with shim: BOOTX64.EFI, grub.efi
+	#   - Removable media w/out shim: BOOTX64.EFI
+	#   - Installed system with shim: shim.efi, grub.efi
+	#   - Installed system w/out shim and grub2-bls: grub.efi
+	#   - Installed system w/out shim and systemd-boot: systemd-bootx64.efi
+	local shim_path bootloader_path
+	if is_shim_installed; then
+		if [ -n "$arg_portable" ]; then
+			shim_path="${boot_root}/EFI/BOOT/BOOT${firmware_arch^^}.EFI"
+			bootloader_path="${boot_root}/EFI/BOOT/grub.efi"
+		else
+			shim_path="${boot_root}${boot_dst}/shim.efi"
+			bootloader_path="${boot_root}${boot_dst}/grub.efi"
+		fi
+	else
+		local bootloader_filename
+		if is_sdboot; then
+			bootloader_filename="systemd-boot${firmware_arch,,}.efi"
+		elif is_grub2_bls; then
+			bootloader_filename="grub.efi"
+		fi
+		if [ -n "$arg_portable" ]; then
+			bootloader_path="${boot_root}/EFI/BOOT/${bootloader_filename}"
+		else
+			bootloader_path="${boot_root}${boot_dst}/${bootloader_filename}"
+		fi
+	fi
+
+	if [ -n "$shim_path" ]; then
 		# 630-shim-efi-application is not part of the pcrlock
-		# standards TODO: move to shim-pcrlock.rpm
+		# standards
+		# TODO: move to shim-pcrlock.rpm
 		shift_component 630-shim-efi-application
 		pcrlock \
 			lock-pe \
 			--pcrlock=/var/lib/pcrlock.d/630-shim-efi-application.pcrlock.d/generated.pcrlock \
-			"${boot_root}${entry}"
-
-		# 640-boot-loader-efi-application is not part of the
-		# pcrlock standards
-		# This is measuring the systemd-boot EFI binary (named
-		# grub.efi)
-		# TODO: move to systemd-boot-pcrlock.rpm
-		shift_component 640-boot-loader-efi-application
-		pcrlock \
-			lock-pe \
-			--pcrlock=/var/lib/pcrlock.d/640-boot-loader-efi-application.pcrlock.d/generated.pcrlock \
-			"${boot_root}${boot_dst}/grub.efi"
-	elif [ -n "$entry" ] && ! is_shim_installed; then
-		# 640-boot-loader-efi-application is not part of the
-		# pcrlock standards
-		# This is measuring the systemd-boot EFI binary in
-		# installed systems
-		# TODO: move to systemd-boot-pcrlock.rpm
-		shift_component 640-boot-loader-efi-application
-		pcrlock \
-			lock-pe \
-			--pcrlock=/var/lib/pcrlock.d/640-boot-loader-efi-application.pcrlock.d/generated.pcrlock \
-			"${boot_root}${entry}"
-	else
-		# 640-boot-loader-efi-application is not part of the
-		# pcrlock standards
-		# This is measuring the systemd-boot EFI binary in
-		# removable media
-		# TODO: move to systemd-boot-pcrlock.rpm
-		shift_component 640-boot-loader-efi-application
-		pcrlock \
-			lock-pe \
-			--pcrlock=/var/lib/pcrlock.d/640-boot-loader-efi-application.pcrlock.d/generated.pcrlock \
-			"${boot_root}/EFI/BOOT/BOOT${firmware_arch^^}.EFI"
+			"${shim_path}"
 	fi
+
+	# 640-boot-loader-efi-application is not part of the
+	# pcrlock standards
+	# This is measuring the grub / systemd-boot EFI binary
+	# TODO: move to systemd-boot-pcrlock.rpm / grub2-bls.rpm
+	shift_component 640-boot-loader-efi-application
+	pcrlock \
+		lock-pe \
+		--pcrlock=/var/lib/pcrlock.d/640-boot-loader-efi-application.pcrlock.d/generated.pcrlock \
+		"${bootloader_path}"
 
 	if is_sdboot; then
 		pcrlock_sdboot
@@ -3778,6 +3779,10 @@ dbg_var "boot_dst"
 
 if [ "$SECURE_BOOT" = "yes" ] || is_shim_installed; then
 	arg_secure_boot=1
+fi
+
+if [ "$UPDATE_NVRAM" = "no" ]; then
+	arg_portable=1
 fi
 
 # Keep initial components before they are replaced by some actions
