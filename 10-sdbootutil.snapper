@@ -6,7 +6,7 @@ set -e
 # check whether it's a transactional system
 is_transactional()
 {
-	[ ! -w /usr ] && [ -w /etc ]
+	findmnt --fstab / -O ro >/dev/null
 }
 
 # when creating a snapshot we fetch all bls configs from previous snapshot dir,
