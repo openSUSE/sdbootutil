@@ -233,36 +233,39 @@ helpandquit()
 dbg()
 {
 	[ "${verbose:-0}" -gt 1 ] || return 0
-	echo "DEBUG: $*" >&2
+	echo "DEBUG: $*" | tee >(systemd-cat -t sdbootutil -p debug) >&2
 }
 
 dbg_var()
 {
 	[ "${verbose:-0}" -gt 1 ] || return 0
 	local v="${1:?}"
-	echo "DEBUG: $v: ${!v}" >&2
+	echo "DEBUG: $v: ${!v}" | tee >(systemd-cat -t sdbootutil -p debug) >&2
 }
 
 dbg_cat()
 {
 	[ "${verbose:-0}" -gt 1 ] || return 0
-	[ ! -e "$1" ] || { echo "DEBUG: $1" >&2; cat "$1" >&2; }
+	[ ! -e "$1" ] || {
+		echo "DEBUG: $1" | tee >(systemd-cat -t sdbootutil -p debug) >&2
+		tee >(systemd-cat -t sdbootutil -p debug) < "$1" >&2
+	}
 }
 
 info()
 {
 	[ "${verbose:-0}" -gt 0 ] || return 0
-	echo "$@" >&2
+	echo "$@" | tee >(systemd-cat -t sdbootutil -p info) >&2
 }
 
 warn()
 {
-	echo "WARNING: $*" >&2
+	echo "WARNING: $*" | tee >(systemd-cat -t sdbootutil -p warning) >&2
 }
 
 err()
 {
-	echo "ERROR: $*" >&2
+	echo "ERROR: $*" | tee >(systemd-cat -t sdbootutil -p err) >&2
 	exit 1
 }
 
