@@ -333,7 +333,7 @@ reset_rollback()
 
 is_transactional()
 {
-	[ ! -w /usr ] && [ -w /etc ]
+	findmnt --fstab / -O ro >/dev/null
 }
 
 keyctl_add_with_timeout()
