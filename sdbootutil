@@ -22,6 +22,9 @@ if [ -f "$DEBUG_LOG" ]; then
 	set -x
 fi
 
+exec {LOG_INFO}> >(systemd-cat -t "$(basename "$0")" -p info)
+exec {LOG_ERR}> >(systemd-cat -t "$(basename "$0")" -p err)
+
 nl=$'\n'
 shimdir="/usr/share/efi/$(uname -m)"
 arg_esp_path="$SYSTEMD_ESP_PATH"
@@ -63,6 +66,7 @@ if { [ -t 1 ] \
 	color_red="\e[31m"
 	color_green="\e[32m"
 	color_yellow="\e[33m"
+	color_blue='\e[34m'
 	color_bu="\e[1;4m" # bold underscore
 	color_end="\e[m"
 fi
@@ -95,6 +99,9 @@ cleanup()
 	rm -rf "$tmpdir"
 
 	[ -z "$chroot_dir" ] || umount_chroot "$chroot_dir"
+
+	exec {LOG_INFO}>&-
+	exec {LOG_ERR}>&-
 }
 trap cleanup EXIT
 
@@ -260,39 +267,100 @@ helpandquit()
 	exit 0
 }
 
+_log_trmnl()
+{
+	local level="$1"
+	shift
+
+	local color
+	case "$level" in
+		"err")
+			color="${color_red}"
+			;;
+		"warning")
+			color="${color_yellow}"
+			;;
+		"debug")
+			color="${color_blue}"
+			;;
+		"info")
+			color="${color_green}"
+			;;
+	esac
+
+	echo -e "${color}$*${color_end}" >&2
+}
+
+_log_jrnl()
+{
+	local level="$1"
+	shift
+
+	local fd
+	case "$level" in
+		"err")
+			fd="${LOG_ERR}"
+			;;
+		"warning")
+			fd="${LOG_ERR}"
+			;;
+		"debug")
+			fd="${LOG_INFO}"
+			;;
+		"info")
+			fd="${LOG_INFO}"
+			;;
+	esac
+
+	echo -e "$*" >"/dev/fd/$fd"
+}
+
+_log()
+{
+	local level="$1"
+	shift
+
+	_log_trmnl "$level" "$*"
+	_log_jrnl "$level" "$*"
+}
+
 dbg()
 {
 	[ "${verbose:-0}" -gt 1 ] || return 0
-	echo -e "DEBUG: $*" >&2
+	_log "debug" "DEBUG: $*"
 }
 
 dbg_var()
 {
 	[ "${verbose:-0}" -gt 1 ] || return 0
 	local v="${1:?}"
-	echo "DEBUG: $v: ${!v}" >&2
+	_log "debug" "DEBUG: $v: ${!v}"
 }
 
 dbg_cat()
 {
 	[ "${verbose:-0}" -gt 1 ] || return 0
-	[ ! -e "$1" ] || { echo "DEBUG: $1" >&2; cat "$1" >&2; }
+	[ ! -e "$1" ] || {
+		_log "debug" "DEBUG: Content of $1"
+		sed 's/^/    /' "$1" | tee "/dev/fd/${LOG_INFO}" >&2
+	}
 }
 
 info()
 {
+	_log_jrnl "info" "$*"
 	[ "${verbose:-0}" -gt 0 ] || return 0
-	echo -e "$@" >&2
+	_log_trmnl "info" "$*"
 }
 
 warn()
 {
-	echo -e "WARNING: $*" >&2
+	_log "warning" "WARNING: $*"
 }
 
 err()
 {
-	echo -e "ERROR: $*" >&2
+	_log "err" "ERROR: $*"
 	exit 1
 }
 
