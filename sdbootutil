@@ -5,13 +5,17 @@ set -e
 shopt -s nullglob
 
 DEBUG_LOG="/var/log/sdbootutil.log"
-
 if [ -f "$DEBUG_LOG" ]; then
 	exec 3>>"$DEBUG_LOG"
 	export BASH_XTRACEFD=3
 	export PS4='+ \D{%F %T} ${BASH_SOURCE##*/}:${LINENO}:${FUNCNAME[0]:-main}: '
 	set -x
 fi
+
+exec 2> >(tee >(logger -p err -t $0))
+TEEPID_STDERR=$!
+exec 1> >(tee >(logger -t $0))
+TEEPID_STDOUT=$!
 
 verbose=
 nl=$'\n'
@@ -86,6 +90,10 @@ cleanup()
 	rm -rf "$tmpdir"
 
 	[ -z "$chroot_dir" ] || umount_chroot "$chroot_dir"
+
+	exec 1>&- 2>&-
+	wait $TEEPID_STDOUT
+	wait $TEEPID_STDERR
 }
 trap cleanup EXIT
 
