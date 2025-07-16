@@ -735,7 +735,7 @@ mount_chroot()
 	# We include the rootfs (the first line usually), as is needed
 	# to appear in the mounts under the chroot, allowing dracut to
 	# properly detect the fs type and load the relevant module.
-	findmnt -o TARGET,FSTYPE -Rv --pairs / > "$tmpdir/mounts"
+	findmnt --fstab -o TARGET,FSTYPE -Rv --pairs / > "$tmpdir/mounts"
 	mount --bind "$snapshot_dir" "$snapshot_dir"
 	while read -r line; do
 		eval "$line"
