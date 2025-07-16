@@ -333,7 +333,9 @@ reset_rollback()
 
 is_transactional()
 {
-	[ ! -w /usr ] && [ -w /etc ]
+	# Mostly wrong check, but others are "wronger".  Waiting for a
+	# configuation file.
+	[ -d /usr/share/licenses/read-only-root-fs ]
 }
 
 keyctl_add_with_timeout()
