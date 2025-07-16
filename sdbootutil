@@ -2880,7 +2880,8 @@ generate_tpm2_predictions_pcrlock()
 	local pcrlock_status=$?
 
 	if [ $pcrlock_status -ne 0 ]; then
-		echo "Error creating the systemd-pcrlock policy!"
+		warn "Error creating the systemd-pcrlock policy!"
+		# Do not exit, as this function can be re-tried
 		return 1
 	elif echo "$output" | grep -q "recovery PIN"; then
 		local split
@@ -2905,7 +2906,7 @@ generate_tpm2_predictions_pcrlock()
 	# dracut-pcr-signature
 	[ -e /var/lib/systemd/pcrlock.json ] && \
 		cp /var/lib/systemd/pcrlock.json "${boot_root}${boot_dst}" && {
-			echo "NVIndex policy created"
+			info "NVIndex policy created"
 		}
 }
 
@@ -2965,7 +2966,7 @@ generate_tpm2_predictions_pcr_oracle()
 	cp /etc/systemd/tpm2-pcr-public-key.pem "${boot_root}${boot_dst}"
 	[ -e /etc/systemd/tpm2-pcr-signature.json ] && \
 		cp /etc/systemd/tpm2-pcr-signature.json "${boot_root}${boot_dst}" && {
-			echo "Signed policy created"
+			info "Signed policy created"
 		}
 }
 
@@ -3713,8 +3714,8 @@ enroll()
 			# are trying with systemd-pcrlock, we try
 			# again with pcr-oracle
 			if ! is_pcr_oracle; then
-				echo "Predictions with systemd-pcrlock failed"
-				echo "Re-trying with pcr-oracle"
+				warn "Predictions with systemd-pcrlock failed"
+				warn "Re-trying with pcr-oracle"
 				unenroll_pcrlock
 				# This function generates
 				# /etc/systemd/tpm2-pcr-public-key.pem
@@ -4034,7 +4035,7 @@ while true ; do
 		--devices) IFS=',' read -r -a tracked_devices <<<"$2"; shift 2 ;;
 		--force) arg_force=1; shift ;;
 		--) shift ; break ;;
-		*) echo "Internal error!" ; exit 1 ;;
+		*) err "Internal error!" ;;
 	esac
 done
 
