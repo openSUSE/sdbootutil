@@ -2713,7 +2713,7 @@ generate_tpm2_predictions_pcr_15()
 	local devs=()
 	local msgs=()
 	local vks=()
-	local name dev opts fstype uuid pw
+	local name dev opts extra uuid pw
 
 	info "Generating predictions for PCR15"
 
@@ -2744,9 +2744,16 @@ generate_tpm2_predictions_pcr_15()
 		fi
 
 		# Get the FSTYPE of the real device (crypto_LUKS) and
-		# the slave / holder one (btrfs, swap, etc)
-		fstype="$(lsblk --noheadings -o FSTYPE "$dev")"
-		if [[ "$fstype" != *"swap"* ]]; then
+		# the slave / holder one (btrfs, swap, etc).  Also get
+		# the mount point so we can identify /etc or /var.
+		#
+		# According to https://systemd.io/MOUNT_REQUIREMENTS/
+		# /etc is mounted in initrd, and /var is mounted after
+		# initrd, but in MicroOS (via microos-tools) is adding
+		# /var to be mounted in the initrd stage too because
+		# of selinux (98selinux-microos).
+		extra="$(lsblk --noheadings -o FSTYPE,MOUNTPOINT "$dev")"
+		if [[ "$extra" != *"swap"* ]] && [[ "$extra" != *"/etc"* ]] && { [[ "$extra" != *"/var"* ]] || ! is_transactional; }; then
 			[[ "$opts" != *"x-initrd.attach"* ]] && continue
 		fi
 
