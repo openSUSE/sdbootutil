@@ -3,14 +3,15 @@
 shopt -s extglob nullglob
 set -e
 
-# check whether it's a transactional system
+# Check whether it's a transactional system
 is_transactional()
 {
 	findmnt --fstab / -O ro >/dev/null
 }
 
-# when creating a snapshot we fetch all bls configs from previous snapshot dir,
-# mangle them to contain current snapshot number, then install to efi partition.
+# When creating a snapshot we fetch all bls configs from previous
+# snapshot dir, mangle them to contain current snapshot number, then
+# install to efi partition.
 create_snapshot()
 {
 	path="$1"
@@ -21,8 +22,13 @@ create_snapshot()
 
 	/usr/bin/sdbootutil update --sync "$num" || :
 
+	# If we are in a transactional system we abort here.  The
+	# kernel entries are added later via set_default_snapshot,
+	# when tukit set via snapper the new snapshot as complete
 	is_transactional && return 0
 
+	# The entries are added here only for Tumbleweed
+	# (non-transactional systems)
 	/usr/bin/sdbootutil add-all-kernels "$num" || :
 	# In Tumblweed clean the default snapshot, not the new created
 	/usr/bin/sdbootutil cleanup || :
@@ -49,6 +55,9 @@ set_default_snapshot()
 	[ "$fs" = btrfs ] || return 1
 
 	if is_transactional; then
+		# In transactional systems the boot entries are added
+		# here, once the transaction is complete and tukit
+		# decides to keep it
 		/usr/bin/sdbootutil add-all-kernels "$num" || :
 
 		if [ -e /usr/lib/module-init-tools/regenerate-initrd-posttrans ]; then
