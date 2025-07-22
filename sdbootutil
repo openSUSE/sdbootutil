@@ -233,36 +233,39 @@ helpandquit()
 dbg()
 {
 	[ "${verbose:-0}" -gt 1 ] || return 0
-	echo "DEBUG: $*" >&2
+	echo "DEBUG: $*" | tee >(systemd-cat -t sdbootutil -p debug) >&2
 }
 
 dbg_var()
 {
 	[ "${verbose:-0}" -gt 1 ] || return 0
 	local v="${1:?}"
-	echo "DEBUG: $v: ${!v}" >&2
+	echo "DEBUG: $v: ${!v}" | tee >(systemd-cat -t sdbootutil -p debug) >&2
 }
 
 dbg_cat()
 {
 	[ "${verbose:-0}" -gt 1 ] || return 0
-	[ ! -e "$1" ] || { echo "DEBUG: $1" >&2; cat "$1" >&2; }
+	[ ! -e "$1" ] || {
+		echo "DEBUG: $1" | tee >(systemd-cat -t sdbootutil -p debug) >&2
+		tee >(systemd-cat -t sdbootutil -p debug) < "$1" >&2
+	}
 }
 
 info()
 {
 	[ "${verbose:-0}" -gt 0 ] || return 0
-	echo "$@" >&2
+	echo "$@" | tee >(systemd-cat -t sdbootutil -p info) >&2
 }
 
 warn()
 {
-	echo "WARNING: $*" >&2
+	echo "WARNING: $*" | tee >(systemd-cat -t sdbootutil -p warning) >&2
 }
 
 err()
 {
-	echo "ERROR: $*" >&2
+	echo "ERROR: $*" | tee >(systemd-cat -t sdbootutil -p err) >&2
 	exit 1
 }
 
@@ -737,7 +740,7 @@ mount_chroot()
 	# We include the rootfs (the first line usually), as is needed
 	# to appear in the mounts under the chroot, allowing dracut to
 	# properly detect the fs type and load the relevant module.
-	findmnt -o TARGET,FSTYPE -Rv --pairs / > "$tmpdir/mounts"
+	findmnt --fstab -o TARGET,FSTYPE -Rv --pairs / > "$tmpdir/mounts"
 	mount --bind "$snapshot_dir" "$snapshot_dir"
 	while read -r line; do
 		eval "$line"
@@ -1611,8 +1614,15 @@ install_bootloader()
 		install -p -D "$bootloader" "$boot_root/EFI/BOOT/BOOT${firmware_arch^^}.EFI"
 	fi
 
+	# shellcheck disable=SC2154
+	[ -n "${os_release_NAME}" ] || set_os_release "${snapshot}"
+	local split
+	IFS=" " read -r -a split <<<"${os_release_NAME}"
+	local boot_manager
+	boot_manager="${split[0]} Boot Manager"
+
 	# This is for shim to create the entry if missing
-	[ -n "$arg_portable" ] || echo "${entry##*/},openSUSE Boot Manager" | { echo -ne "\xff\xfe"; iconv -f ascii -t ucs-2le; } > "$boot_root$boot_dst/boot.csv"
+	[ -n "$arg_portable" ] || echo "${entry##*/},$boot_manager" | { echo -ne "\xff\xfe"; iconv -f ascii -t ucs-2le; } > "$boot_root$boot_dst/boot.csv"
 
 	mkdir -p "$boot_root/$entry_token"
 	echo "$entry_token" > "$boot_root$boot_dst/installed_by_sdbootutil"
@@ -1627,7 +1637,7 @@ install_bootloader()
 
 	# Create boot menu entry if it does not exist
 	local escaped_entry="${entry//\//\\\\}"
-	[ -n "$arg_no_variables" ] || [ -n "$arg_portable" ] || efibootmgr | grep -q "Boot.*openSUSE Boot Manager.*${escaped_entry}" || efibootmgr -q --create --disk "$drive" --part "$partno" --label "openSUSE Boot Manager ($bldr_name)" --loader "$entry" || true
+	[ -n "$arg_no_variables" ] || [ -n "$arg_portable" ] || efibootmgr | grep -q "Boot.*${boot_manager}.*${escaped_entry}" || efibootmgr -q --create --disk "$drive" --part "$partno" --label "${boot_manager} ($bldr_name)" --loader "$entry" || true
 
 	# Make it the first option
 	if [ -z "$arg_no_variables" ] && [ -z "$arg_portable" ]; then
@@ -1636,7 +1646,7 @@ install_bootloader()
 		boot_order="${boot_order#BootOrder: }"
 
 		local boot_entry
-		boot_entry="$(efibootmgr | grep "Boot.*openSUSE Boot Manager.*${escaped_entry}")"
+		boot_entry="$(efibootmgr | grep "Boot.*${boot_manager}.*${escaped_entry}")"
 		boot_entry="${boot_entry%\* *}"
 		boot_entry="${boot_entry#Boot}"
 
@@ -2507,54 +2517,55 @@ generate_tpm2_predictions_pcrlock()
 	shift_component 600-gpt
 	pcrlock lock-gpt "$boot_root"
 
-	# Read the boot entry from the EFI boot menu
-	local entry
-	entry="$(efibootmgr | grep "Boot.*openSUSE Boot Manager")"
-	entry="${entry#*File(}"
-	entry="${entry%)}"
-	entry="${entry//\\/\/}"
-	if [ -n "$entry" ] && is_shim_installed; then
+	# Measure the boot loader.  Combinations:
+	#   - Removable media with shim: BOOTX64.EFI, grub.efi
+	#   - Removable media w/out shim: BOOTX64.EFI
+	#   - Installed system with shim: shim.efi, grub.efi
+	#   - Installed system w/out shim and grub2-bls: grub.efi
+	#   - Installed system w/out shim and systemd-boot: systemd-bootx64.efi
+	local shim_path bootloader_path
+	if is_shim_installed; then
+		if [ -n "$arg_portable" ]; then
+			shim_path="${boot_root}/EFI/BOOT/BOOT${firmware_arch^^}.EFI"
+			bootloader_path="${boot_root}/EFI/BOOT/grub.efi"
+		else
+			shim_path="${boot_root}${boot_dst}shim.efi"
+			bootloader_path="${boot_root}${boot_dst}/grub.efi"
+		fi
+	else
+		local bootloader_filename
+		if is_sdboot; then
+			bootloader_filename="systemd-boot${firmware_arch,,}.efi"
+		elif is_grub2_bls; then
+			bootloader_filename="grub.efi"
+		fi
+		if [ -n "$arg_portable" ]; then
+			bootloader_path="${boot_root}/EFI/BOOT/${bootloader_filename}"
+		else
+			bootloader_path="${boot_root}${boot_dst}/${bootloader_filename}"
+		fi
+	fi
+
+	if [ -n "$shim_path" ]; then
 		# 630-shim-efi-application is not part of the pcrlock
-		# standards TODO: move to shim-pcrlock.rpm
+		# standards
+		# TODO: move to shim-pcrlock.rpm
 		shift_component 630-shim-efi-application
 		pcrlock \
 			lock-pe \
-			--pcrlock=/var/lib/pcrlock.d/630-shim-efi-application.pcrlock.d/generated.pcrlock \
-			"${boot_root}${entry}"
-
-		# 640-boot-loader-efi-application is not part of the
-		# pcrlock standards
-		# This is measuring the systemd-boot EFI binary (named
-		# grub.efi)
-		# TODO: move to systemd-boot-pcrlock.rpm
-		shift_component 640-boot-loader-efi-application
-		pcrlock \
-			lock-pe \
 			--pcrlock=/var/lib/pcrlock.d/640-boot-loader-efi-application.pcrlock.d/generated.pcrlock \
-			"${boot_root}${boot_dst}/grub.efi"
-	elif [ -n "$entry" ] && ! is_shim_installed; then
-		# 640-boot-loader-efi-application is not part of the
-		# pcrlock standards
-		# This is measuring the systemd-boot EFI binary in
-		# installed systems
-		# TODO: move to systemd-boot-pcrlock.rpm
-		shift_component 640-boot-loader-efi-application
-		pcrlock \
-			lock-pe \
-			--pcrlock=/var/lib/pcrlock.d/640-boot-loader-efi-application.pcrlock.d/generated.pcrlock \
-			"${boot_root}${entry}"
-	else
-		# 640-boot-loader-efi-application is not part of the
-		# pcrlock standards
-		# This is measuring the systemd-boot EFI binary in
-		# removable media
-		# TODO: move to systemd-boot-pcrlock.rpm
-		shift_component 640-boot-loader-efi-application
-		pcrlock \
-			lock-pe \
-			--pcrlock=/var/lib/pcrlock.d/640-boot-loader-efi-application.pcrlock.d/generated.pcrlock \
-			"${boot_root}/EFI/BOOT/BOOT${firmware_arch^^}.EFI"
+			"${shim_path}"
 	fi
+
+	# 640-boot-loader-efi-application is not part of the
+	# pcrlock standards
+	# This is measuring the grub / systemd-boot EFI binary
+	# TODO: move to systemd-boot-pcrlock.rpm / grub2-bls.rpm
+	shift_component 640-boot-loader-efi-application
+	pcrlock \
+		lock-pe \
+		--pcrlock=/var/lib/pcrlock.d/640-boot-loader-efi-application.pcrlock.d/generated.pcrlock \
+		"${bootloader_path}"
 
 	if is_sdboot; then
 		pcrlock_sdboot
@@ -2597,7 +2608,8 @@ generate_tpm2_predictions_pcrlock()
 	local pcrlock_status=$?
 
 	if [ $pcrlock_status -ne 0 ]; then
-		echo "Error creating the systemd-pcrlock policy!"
+		warn "Error creating the systemd-pcrlock policy!"
+		# Do not exit, as this function can be re-tried
 		return 1
 	elif echo "$output" | grep -q "recovery PIN"; then
 		local split
@@ -2622,7 +2634,7 @@ generate_tpm2_predictions_pcrlock()
 	# dracut-pcr-signature
 	[ -e /var/lib/systemd/pcrlock.json ] && \
 		cp /var/lib/systemd/pcrlock.json "${boot_root}${boot_dst}" && {
-			echo "NVIndex policy created"
+			info "NVIndex policy created"
 		}
 }
 
@@ -2682,7 +2694,7 @@ generate_tpm2_predictions_pcr_oracle()
 	cp /etc/systemd/tpm2-pcr-public-key.pem "${boot_root}${boot_dst}"
 	[ -e /etc/systemd/tpm2-pcr-signature.json ] && \
 		cp /etc/systemd/tpm2-pcr-signature.json "${boot_root}${boot_dst}" && {
-			echo "Signed policy created"
+			info "Signed policy created"
 		}
 }
 
@@ -2722,7 +2734,7 @@ get_volume_key()
 		# Both passwords can appear in the keyring separated
 		# by NULL
 		keyctl revoke %user:cryptenroll 2> /dev/null || true
-		keyctl reap 2> /dev/null || true
+		keyctl reap &> /dev/null || true
 		return 1
 	}
 	echo "$out" | sed -n '/MK dump:/,$p' | sed -E 's/MK dump:|[[:blank:]]+//g' | sed -z 's/\n//g'
@@ -2749,6 +2761,15 @@ generate_tpm2_predictions_pcr_15()
 	local name dev opts extra uuid pw
 
 	info "Generating predictions for PCR15"
+
+	# If we are not in interactive mode we cannot ask the LUKS2
+	# password and we cannot update the PCR 15 predictions.  This
+	# will halt the system in the next boot.
+	if [ -n "$TRANSACTIONAL_UPDATE" ] || [ -n "$SNAPPER_PLUGIN" ]; then
+		warn "PCR 15 predictions cannot be updated"
+		warn "Run 'sdbootutil update-predictions' manually"
+		return 0
+	fi
 
 	# Read /etc/crypttab lines that contains tpm2-device and
 	# tpm2-measure-pcr.  This code is the similar from
@@ -3369,8 +3390,8 @@ enroll()
 			# are trying with systemd-pcrlock, we try
 			# again with pcr-oracle
 			if ! is_pcr_oracle; then
-				echo "Predictions with systemd-pcrlock failed"
-				echo "Re-trying with pcr-oracle"
+				warn "Predictions with systemd-pcrlock failed"
+				warn "Re-trying with pcr-oracle"
 				unenroll_pcrlock
 				# This function generates
 				# /etc/systemd/tpm2-pcr-public-key.pem
@@ -3660,7 +3681,7 @@ while true ; do
 		--pcr) FDE_SEAL_PCR_LIST="$2"; shift 2 ;;
 		--devices) IFS=',' read -r -a tracked_devices <<<"$2"; shift 2 ;;
 		--) shift ; break ;;
-		*) echo "Internal error!" ; exit 1 ;;
+		*) err "Internal error!" ;;
 	esac
 done
 
@@ -3758,6 +3779,10 @@ dbg_var "boot_dst"
 
 if [ "$SECURE_BOOT" = "yes" ] || is_shim_installed; then
 	arg_secure_boot=1
+fi
+
+if [ "$UPDATE_NVRAM" = "no" ]; then
+	arg_portable=1
 fi
 
 # Keep initial components before they are replaced by some actions
