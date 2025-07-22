@@ -2392,7 +2392,7 @@ pcrlock_grub2_bls()
 		done < <(jq --raw-output '.[] | .options, .linux, .initrd[0]' "$initialentryfile")
 	fi
 
-	# With secure boot, grub2-bls will make shim to extend PCR4
+	# With secure boot, grub2-bls invokes shim to extend PCR4
 	if is_secure_boot; then
 		# 650-kernel-efi-application.pcrlock is not part of
 		# the pcrlock standards
@@ -2721,9 +2721,12 @@ get_volume_key()
 		# systemd-cryptenroll ask later for the password.
 		# Both passwords can appear in the keyring separated
 		# by NULL
-		keyctl revoke %user:cryptenroll 2> /dev/null || true
-		keyctl reap 2> /dev/null || true
-		return 1
+		keyctl revoke %user:cryptenroll &> /dev/null || true
+		keyctl reap &> /dev/null || true
+
+		# Try one more time
+		pw="$(get_volume_password "$dev")"
+		out="$(cryptsetup luksDump --batch-mode --dump-master-key "$dev" <<<"$pw")" || return 1
 	}
 	echo "$out" | sed -n '/MK dump:/,$p' | sed -E 's/MK dump:|[[:blank:]]+//g' | sed -z 's/\n//g'
 }
