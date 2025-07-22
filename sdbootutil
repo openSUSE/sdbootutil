@@ -1589,7 +1589,8 @@ install_bootloader()
 	local prefix=""
 	if [ -n "$have_snapshots" ]; then
 		snapshot="${1:-$root_snapshot}"
-		prefix="/.snapshots/${root_snapshot}/snapshot"
+		prefix="/.snapshots/$snapshot/snapshot"
+		[ -d "$prefix" ] || err "Snapshot $snapshot not found"
 	fi
 
 	info "Installing bootloader"
