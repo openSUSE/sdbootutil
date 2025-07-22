@@ -287,6 +287,11 @@ load_config_file()
 	done
 }
 
+is_secure_boot()
+{
+	grep -q $'\x01' /sys/firmware/efi/efivars/SecureBoot-8be4df61-93ca-11d2-aa0d-00e098032b8c
+}
+
 is_sdboot()
 {
 	local sdboot grub2_bls
@@ -2385,6 +2390,34 @@ pcrlock_grub2_bls()
 						  "${grub2_bls_drive}$linux $options" \
 						  "initrd ${grub2_bls_drive}$initrd" "0-$n"
 		done < <(jq --raw-output '.[] | .options, .linux, .initrd[0]' "$initialentryfile")
+	fi
+
+	# With secure boot, grub2-bls will make shim to extend PCR4
+	if is_secure_boot; then
+		# 650-kernel-efi-application.pcrlock is not part of
+		# the pcrlock standards
+		# TODO: move to kernel-TYPE-pcrlock.rpm
+		shift_component 650-kernel-efi-application
+		local n=0
+		local -A kernels
+		while read -r linux; do
+			[ -f "${boot_root}$linux" ] || {
+				info "Missing ${boot_root}$linux, ignoring entry for prediction"
+				continue
+			}
+			[ -z "${kernels["$linux"]}" ] || continue
+			kernels["$linux"]=1
+			n=$((n+1))
+			# Limit to 4 because of the separator
+			[ "$n" -le 4 ] || {
+				info "More than 4 variations for 650-kernel-efi-application"
+				continue
+			}
+			pcrlock \
+				lock-pe \
+				--pcrlock=/var/lib/pcrlock.d/650-kernel-efi-application.pcrlock.d/linux-"$n".pcrlock \
+				"${boot_root}/$linux"
+		done < <(jq --raw-output 'sort_by(.priority, (.kernel | map(-.))) | map(.linux) | .[]' "$entryfile")
 	fi
 
 	# Join the kernel and the initrd in a single component
