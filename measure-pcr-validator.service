@@ -2,7 +2,7 @@
 Description=Validate LUKS2 devices
 DefaultDependencies=false
 
-OnFailure=systemd-halt.service
+FailureAction=poweroff-immediate
 
 Wants=cryptsetup.target
 After=cryptsetup.target
