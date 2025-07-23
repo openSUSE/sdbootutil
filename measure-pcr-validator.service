@@ -6,7 +6,7 @@ FailureAction=poweroff-immediate
 
 Wants=cryptsetup.target
 After=cryptsetup.target
-Before=local-fs.target
+Before=initrd-root-device.target
 
 [Service]
 Type=oneshot
@@ -18,5 +18,5 @@ StandardOutput=tty
 StandardInput=tty
 
 [Install]
-# If we use RequiredBy we trigger the debug shell
-WantedBy=local-fs.target
+# If we use RequiredBy we trigger its OnFailure=emergency.target
+WantedBy=initrd-root-device.target
