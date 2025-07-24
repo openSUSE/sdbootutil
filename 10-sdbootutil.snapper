@@ -24,7 +24,8 @@ create_snapshot()
 	is_transactional && return 0
 
 	/usr/bin/sdbootutil add-all-kernels "$num" || :
-	/usr/bin/sdbootutil cleanup "$num" || :
+	# In Tumblweed clean the default snapshot, not the new created
+	/usr/bin/sdbootutil cleanup || :
 }
 
 delete_snapshot()
