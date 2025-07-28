@@ -3542,6 +3542,7 @@ set_image_name() {
 	declare -gA arch_image_map=(
 		[x64]="vmlinuz"
 		[aa64]="Image"
+		[riscv64]="Image"
 	)
 
 	if [ -n "${arch_image_map[$firmware_arch]}" ]; then
