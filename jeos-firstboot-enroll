@@ -107,16 +107,12 @@ enroll_systemd_firstboot() {
 
 write_issue_file() {
 	local recovery_key="$1"
+	local issuefile="/run/issue.d/90-recovery-key.issue"
 
-	if [ -e '/usr/sbin/issue-generator' ] && [ -z "$dry" ]; then
-		mkdir -p "/run/issue.d/"
-		issuefile="/run/issue.d/90-diskencrypt.conf"
-	else
-		issuefile='/dev/stdout'
-	fi
-
+	[ -x '/usr/sbin/issue-generator' ] && issuefile="/run/issue.d/90-recovery-key.conf"
+	mkdir -p "/run/issue.d"
 	echo "$recovery_key" > "$issuefile"
-	run issue-generator
+	[ -x '/usr/sbin/issue-generator' ] && run issue-generator
 }
 
 enroll_post() {
