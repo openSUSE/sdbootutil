@@ -20,14 +20,10 @@ have_luks2() {
 write_issue_file()
 {
 	local recovery_key="$1"
+	local issuefile="/run/issue.d/90-recovery-key.issue"
 
+	[ -x '/usr/sbin/issue-generator' ] && issuefile="/run/issue.d/90-recovery-key.conf"
 	mkdir -p "/run/issue.d"
-	if [ -x '/usr/sbin/issue-generator' ]; then
-		issuefile="/run/issue.d/90-diskencrypt.conf"
-	else
-		issuefile="/run/issue.d/90-diskencrypt.issue"
-	fi
-
 	echo "$recovery_key" > "$issuefile"
 	[ -x '/usr/sbin/issue-generator' ] && issue-generator
 }
