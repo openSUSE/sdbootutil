@@ -2942,7 +2942,9 @@ add_crypttab_option()
 {
 	# This version will share the same options for all crypto_LUKS
 	# devices.  This imply that all of them will be unlocked by
-	# the same TPM2, or the same FIDO2 key
+	# the same TPM2, or the same FIDO2 key.
+	#
+	# The ones ignored will be untouched.
 	local option="$1"
 
 	dbg "Adding \"$option\" to /etc/crypttab"
@@ -2959,7 +2961,7 @@ add_crypttab_option()
 	local opts
 	while read -r name device key opts; do
 		[[ "$name" = \#* ]] && continue
-		if [[ "$opts" != *"$option"* ]]; then
+		if [[ "$opts" != *"x-sdbootutil.ignore"* ]] && [[ "$opts" != *"$option"* ]]; then
 			[ -z "$opts" ] && opts="$option" || opts="$opts,$option"
 			# crypttab has changed so initrd needs to be
 			# updated
@@ -2978,7 +2980,9 @@ add_crypttab_option()
 remove_crypttab_option()
 {
 	# Similar to add_crypttab_option, the option will be removed
-	# from all the entries
+	# from all the entries.
+	#
+	# The ones ignored will be untouched.
 	local option="$1"
 
 	dbg "Removing \"$option\" to /etc/crypttab"
@@ -2987,6 +2991,7 @@ remove_crypttab_option()
 	local crypttab
 	crypttab="$(mktemp -t crypttab.XXXXXX)"
 	echo "# File created by sdbootutil.  Comments will be removed" > "$crypttab"
+	echo "# Add the 'x-sdbootutil.ignore' option to un-track a device" >> "$crypttab"
 
 	local name
 	local device
@@ -2994,7 +2999,7 @@ remove_crypttab_option()
 	local opts
 	while read -r name device key opts; do
 		[[ "$name" = \#* ]] && continue
-		if [[ "$opts" == *"$option"* ]]; then
+		if [[ "$opts" != *"x-sdbootutil.ignore"* ]] && [[ "$opts" = *"$option"* ]]; then
 			opts="${opts#"$option",}"
 			opts="${opts//,"$option"}"
 			opts="${opts//"$option"}"
