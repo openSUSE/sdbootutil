@@ -7,15 +7,8 @@ check() {
     return 0
 }
 
-depends() {
-    return 0
-}
-
-installkernel() {
-    inst_multiple grep openssl
-}
-
 install() {
+    inst_multiple grep openssl
     inst_script "$moddir/measure-pcr-generator.sh" "/usr/lib/systemd/system-generators/measure-pcr-generator"
     inst_script "$moddir/measure-pcr-validator.sh" "/usr/bin/measure-pcr-validator"
     inst_simple "$moddir/measure-pcr-validator.service" "$systemdsystemunitdir/measure-pcr-validator.service"
