@@ -4,6 +4,15 @@
 set -e
 shopt -s nullglob
 
+DEBUG_LOG="/var/log/sdbootutil.log"
+
+if [ -f "$DEBUG_LOG" ]; then
+	exec 3>>"$DEBUG_LOG"
+	export BASH_XTRACEFD=3
+	export PS4='+ \D{%F %T} ${BASH_SOURCE##*/}:${LINENO}:${FUNCNAME[0]:-main}: '
+	set -x
+fi
+
 verbose=
 nl=$'\n'
 shimdir="/usr/share/efi/$(uname -m)"
