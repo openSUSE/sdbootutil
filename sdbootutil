@@ -3098,6 +3098,11 @@ enroll_pcrlock()
 	else
 		return 1
 	fi
+
+	# Not all PCR predictions match the current system state and
+	# will be excluded from the policy. Trigger an update on the
+	# next boot which should include them
+	systemctl --quiet enable sdbootutil-update-predictions.service || true
 }
 
 enroll_pcroracle()
@@ -3437,6 +3442,7 @@ enroll()
 
 unenroll_pcrlock()
 {
+	systemctl --quiet disable sdbootutil-update-predictions.service || true
 	pcrlock remove-policy &> /dev/null || true
 	rm -fr /var/lib/pcrlock.d
 	rm -f /var/lib/systemd/pcrlock.json
