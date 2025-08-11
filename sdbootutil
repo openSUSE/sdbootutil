@@ -3782,7 +3782,7 @@ if [ "$SECURE_BOOT" = "yes" ] || is_shim_installed; then
 fi
 
 if [ "$UPDATE_NVRAM" = "no" ]; then
-	arg_portable=1
+	arg_no_variables=1
 fi
 
 # Keep initial components before they are replaced by some actions
