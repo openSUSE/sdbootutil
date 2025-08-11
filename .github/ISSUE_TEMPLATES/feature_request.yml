@@ -1,0 +1,67 @@
+name: "Feature request"
+description: "Suggest an enhancement or new capability"
+labels: [enhancement]
+title: "[feat]: <short description>"
+body:
+  - type: checkboxes
+    id: preflight
+    attributes:
+      label: Pre‑submission checklist
+      options:
+        - label: I searched existing issues and discussions to avoid duplicates
+          required: true
+        - label: This is not a bug report
+          required: true
+  - type: input
+    id: summary
+    attributes:
+      label: Short description
+      placeholder: e.g., "Allow selecting FIDO2 during initial enrollment via CLI flag"
+    validations:
+      required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem / use case
+      description: What problem does this solve? Who benefits?
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution / expected behavior
+      description: Describe how you expect it to work (CLI flags, UI, workflow...).
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Other approaches you’ve tried or could work
+      render: text
+    validations:
+      required: false
+  - type: input
+    id: scope
+    attributes:
+      label: Affected component(s)
+      placeholder: e.g., sdbootutil, enrollment, predictions, installer, docs
+    validations:
+      required: false
+  - type: input
+    id: versions
+    attributes:
+      label: Version(s) you’re using
+      placeholder: e.g., "sdbootutil 0.9.0 on Tumbleweed x86_64"
+    validations:
+      required: false
+  - type: textarea
+    id: extra
+    attributes:
+      label: Additional context
+      description: Mockups, links, related issues, prior art, etc.
+      render: text
+    validations:
+      required: false

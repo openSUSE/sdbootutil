@@ -1,0 +1,144 @@
+name: "Bug report"
+description: "Report a problem with sdbootutil/FDE on openSUSE"
+labels: [bug]
+title: "[bug]: <short summary>"
+body:
+  - type: checkboxes
+    id: preflight
+    attributes:
+      label: Pre‑submission checklist
+      options:
+        - label: I searched existing issues and discussions to avoid duplicates
+          required: true
+        - label: I tested with the latest released packages or the current git (if applicable)
+          required: true
+        - label: I can reproduce this on a clean boot or after reboot
+          required: false
+  - type: input
+    id: summary
+    attributes:
+      label: Short summary
+      description: One line that captures the essence of the bug
+      placeholder: e.g., "TPM2 unlock fails after kernel update when Secure Boot is enabled"
+    validations:
+      required: true
+  - type: textarea
+    id: observed
+    attributes:
+      label: Observed behavior
+      description: What actually happens? Include exact error messages shown on screen or in logs.
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+      description: What should have happened instead?
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      description: Numbered, minimal steps we can follow to reproduce the issue.
+      placeholder: |
+        1. …
+        2. …
+        3. …
+      render: markdown
+    validations:
+      required: true
+  - type: dropdown
+    id: product
+    attributes:
+      label: Product / distro
+      options:
+        - MicroOS
+        - Tumbleweed
+        - Leap
+        - Other
+    validations:
+      required: true
+  - type: dropdown
+    id: architecture
+    attributes:
+      label: Architecture
+      options:
+        - x86_64
+        - aarch64
+        - s390x
+        - ppc64le
+        - Other
+    validations:
+      required: true
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Platform
+      options:
+        - Bare metal
+        - VM (QEMU/KVM)
+        - VM (other)
+    validations:
+      required: true
+  - type: dropdown
+    id: bootloader
+    attributes:
+      label: Bootloader
+      options:
+        - systemd-boot
+        - grub2-bls
+        - Other/unknown
+    validations:
+      required: true
+  - type: input
+    id: versions
+    attributes:
+      label: sdbootutil version
+      description: Output of `zypper info sdbootutil | grep Version`
+      placeholder: sdbootutil 1+git20250804.8dccab3-1.1
+    validations:
+      required: false
+  - type: textarea
+    id: sysinfo
+    attributes:
+      label: System specs (paste output)
+      description: |
+        Paste the output of this one‑liner (run as root). It collects common diagnostics without requiring extra tools:
+
+        ```sh
+        printf '## os-release\n'; cat /etc/os-release; \
+        printf '\n## uname\n'; uname -a; \
+        printf '\n## bootctl status\n'; bootctl status --no-pager || true; \
+        printf '\n## lsblk\n'; lsblk -o NAME,SIZE,TYPE,FSTYPE,MOUNTPOINTS; \
+        printf '\n## systemd-detect-virt\n'; systemd-detect-virt || true; \
+        printf '\n## sdbootutil version\n'; rpm -q sdbootutil || true
+        ```
+      render: shell
+    validations:
+      required: false
+  - type: textarea
+    id: debuglog
+    attributes:
+      label: Debug trace excerpts (sanitized)
+      description: |
+        If you enabled the **opt‑in debug trace** (create `/var/log/sdbootutil.log` and set permissions to 600 before running), please paste only the **relevant, sanitized excerpts** here.
+
+        ⚠️ **Privacy warning:** trace lines may include sensitive data (e.g. passwords typed as command arguments). **You must review and redact** any secrets before sharing. If in doubt, **omit** the trace and instead describe what you observed.
+
+        Tips:
+        * Use `sed`/`grep` to keep only the relevant portion (e.g. around the failure time).
+        * Replace secrets with placeholders like `<REDACTED>`.
+      render: text
+    validations:
+      required: false
+  - type: textarea
+    id: extrainfo
+    attributes:
+      label: Additional context
+      description: Any other logs (journal excerpts), config, or details that help diagnose the issue.
+      render: text
+    validations:
+      required: false
