@@ -3773,6 +3773,7 @@ fi
 if [ "$1" != "install" ] && [ ! -d "${boot_root}${boot_dst}" ]; then
 	info "Removable installation detected"
 	boot_dst="/EFI/BOOT"
+	arg_portable=1
 fi
 
 dbg_var "boot_dst"
