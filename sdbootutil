@@ -3797,7 +3797,8 @@ if [ "$SECURE_BOOT" = "yes" ] || is_shim_installed; then
 	arg_secure_boot=1
 fi
 
-if [ "$UPDATE_NVRAM" = "no" ]; then
+# Do not follow UPDATE_NVRAM for now (bsc#1247952)
+if [ "$UPDATE_NVRAM" = "no" ] && false; then
 	arg_no_variables=1
 fi
 
