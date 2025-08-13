@@ -4,6 +4,15 @@
 set -e
 shopt -s nullglob
 
+DEBUG_LOG="/var/log/sdbootutil.log"
+
+if [ -f "$DEBUG_LOG" ]; then
+	exec 3>>"$DEBUG_LOG"
+	export BASH_XTRACEFD=3
+	export PS4='+ \D{%F %T} ${BASH_SOURCE##*/}:${LINENO}:${FUNCNAME[0]:-main}: '
+	set -x
+fi
+
 verbose=
 nl=$'\n'
 shimdir="/usr/share/efi/$(uname -m)"
@@ -1612,8 +1621,15 @@ install_bootloader()
 		install -p -D "$bootloader" "$boot_root/EFI/BOOT/BOOT${firmware_arch^^}.EFI"
 	fi
 
+	# shellcheck disable=SC2154
+	[ -n "${os_release_NAME}" ] || set_os_release "${snapshot}"
+	local split
+	IFS=" " read -r -a split <<<"${os_release_NAME}"
+	local boot_manager
+	boot_manager="${split[0]} Boot Manager"
+
 	# This is for shim to create the entry if missing
-	[ -n "$arg_portable" ] || echo "${entry##*/},openSUSE Boot Manager" | { echo -ne "\xff\xfe"; iconv -f ascii -t ucs-2le; } > "$boot_root$boot_dst/boot.csv"
+	[ -n "$arg_portable" ] || echo "${entry##*/},$boot_manager" | { echo -ne "\xff\xfe"; iconv -f ascii -t ucs-2le; } > "$boot_root$boot_dst/boot.csv"
 
 	mkdir -p "$boot_root/$entry_token"
 	echo "$entry_token" > "$boot_root$boot_dst/installed_by_sdbootutil"
@@ -1628,7 +1644,7 @@ install_bootloader()
 
 	# Create boot menu entry if it does not exist
 	local escaped_entry="${entry//\//\\\\}"
-	[ -n "$arg_no_variables" ] || [ -n "$arg_portable" ] || efibootmgr | grep -q "Boot.*openSUSE Boot Manager.*${escaped_entry}" || efibootmgr -q --create --disk "$drive" --part "$partno" --label "openSUSE Boot Manager ($bldr_name)" --loader "$entry" || true
+	[ -n "$arg_no_variables" ] || [ -n "$arg_portable" ] || efibootmgr | grep -q "Boot.*${boot_manager}.*${escaped_entry}" || efibootmgr -q --create --disk "$drive" --part "$partno" --label "${boot_manager} ($bldr_name)" --loader "$entry" || true
 
 	# Make it the first option
 	if [ -z "$arg_no_variables" ] && [ -z "$arg_portable" ]; then
@@ -1637,7 +1653,7 @@ install_bootloader()
 		boot_order="${boot_order#BootOrder: }"
 
 		local boot_entry
-		boot_entry="$(efibootmgr | grep "Boot.*openSUSE Boot Manager.*${escaped_entry}")"
+		boot_entry="$(efibootmgr | grep "Boot.*${boot_manager}.*${escaped_entry}")"
 		boot_entry="${boot_entry%\* *}"
 		boot_entry="${boot_entry#Boot}"
 
@@ -2513,54 +2529,55 @@ generate_tpm2_predictions_pcrlock()
 	shift_component 600-gpt
 	pcrlock lock-gpt "$boot_root"
 
-	# Read the boot entry from the EFI boot menu
-	local entry
-	entry="$(efibootmgr | grep "Boot.*openSUSE Boot Manager")"
-	entry="${entry#*File(}"
-	entry="${entry%)}"
-	entry="${entry//\\/\/}"
-	if [ -n "$entry" ] && is_shim_installed; then
+	# Measure the boot loader.  Combinations:
+	#   - Removable media with shim: BOOTX64.EFI, grub.efi
+	#   - Removable media w/out shim: BOOTX64.EFI
+	#   - Installed system with shim: shim.efi, grub.efi
+	#   - Installed system w/out shim and grub2-bls: grub.efi
+	#   - Installed system w/out shim and systemd-boot: systemd-bootx64.efi
+	local shim_path bootloader_path
+	if is_shim_installed; then
+		if [ -n "$arg_portable" ]; then
+			shim_path="${boot_root}/EFI/BOOT/BOOT${firmware_arch^^}.EFI"
+			bootloader_path="${boot_root}/EFI/BOOT/grub.efi"
+		else
+			shim_path="${boot_root}${boot_dst}/shim.efi"
+			bootloader_path="${boot_root}${boot_dst}/grub.efi"
+		fi
+	else
+		local bootloader_filename
+		if is_sdboot; then
+			bootloader_filename="systemd-boot${firmware_arch,,}.efi"
+		elif is_grub2_bls; then
+			bootloader_filename="grub.efi"
+		fi
+		if [ -n "$arg_portable" ]; then
+			bootloader_path="${boot_root}/EFI/BOOT/${bootloader_filename}"
+		else
+			bootloader_path="${boot_root}${boot_dst}/${bootloader_filename}"
+		fi
+	fi
+
+	if [ -n "$shim_path" ]; then
 		# 630-shim-efi-application is not part of the pcrlock
-		# standards TODO: move to shim-pcrlock.rpm
+		# standards
+		# TODO: move to shim-pcrlock.rpm
 		shift_component 630-shim-efi-application
 		pcrlock \
 			lock-pe \
 			--pcrlock=/var/lib/pcrlock.d/630-shim-efi-application.pcrlock.d/generated.pcrlock \
-			"${boot_root}${entry}"
-
-		# 640-boot-loader-efi-application is not part of the
-		# pcrlock standards
-		# This is measuring the systemd-boot EFI binary (named
-		# grub.efi)
-		# TODO: move to systemd-boot-pcrlock.rpm
-		shift_component 640-boot-loader-efi-application
-		pcrlock \
-			lock-pe \
-			--pcrlock=/var/lib/pcrlock.d/640-boot-loader-efi-application.pcrlock.d/generated.pcrlock \
-			"${boot_root}${boot_dst}/grub.efi"
-	elif [ -n "$entry" ] && ! is_shim_installed; then
-		# 640-boot-loader-efi-application is not part of the
-		# pcrlock standards
-		# This is measuring the systemd-boot EFI binary in
-		# installed systems
-		# TODO: move to systemd-boot-pcrlock.rpm
-		shift_component 640-boot-loader-efi-application
-		pcrlock \
-			lock-pe \
-			--pcrlock=/var/lib/pcrlock.d/640-boot-loader-efi-application.pcrlock.d/generated.pcrlock \
-			"${boot_root}${entry}"
-	else
-		# 640-boot-loader-efi-application is not part of the
-		# pcrlock standards
-		# This is measuring the systemd-boot EFI binary in
-		# removable media
-		# TODO: move to systemd-boot-pcrlock.rpm
-		shift_component 640-boot-loader-efi-application
-		pcrlock \
-			lock-pe \
-			--pcrlock=/var/lib/pcrlock.d/640-boot-loader-efi-application.pcrlock.d/generated.pcrlock \
-			"${boot_root}/EFI/BOOT/BOOT${firmware_arch^^}.EFI"
+			"${shim_path}"
 	fi
+
+	# 640-boot-loader-efi-application is not part of the
+	# pcrlock standards
+	# This is measuring the grub / systemd-boot EFI binary
+	# TODO: move to systemd-boot-pcrlock.rpm / grub2-bls.rpm
+	shift_component 640-boot-loader-efi-application
+	pcrlock \
+		lock-pe \
+		--pcrlock=/var/lib/pcrlock.d/640-boot-loader-efi-application.pcrlock.d/generated.pcrlock \
+		"${bootloader_path}"
 
 	if is_sdboot; then
 		pcrlock_sdboot
@@ -2822,6 +2839,10 @@ generate_tpm2_predictions_pcr_15()
 
 	for i in "${!dgsts[@]}"; do
 		pcr15="$(printf '0%.0s' $(seq 1 "${sizes[i]}"))"
+		# Add the 0x00...0 predictions as a valid one.
+		# Workaround the systemd-cryptsetup issue for LVM
+		# devices
+		echo "$pcr15" >> "/var/lib/sdbootutil/measure-pcr-prediction"
 		for j in "${!msgs[@]}"; do
 			hmac="$(echo -ne "${msgs[j]}" | /usr/libexec/sdbootutil/uhmac "${dgsts[i]}" <(echo "${vks[j]}"))"
 			pcr15="$(extend_pcr "${dgsts[i]}" "$pcr15" "$hmac")"
@@ -2948,7 +2969,9 @@ add_crypttab_option()
 {
 	# This version will share the same options for all crypto_LUKS
 	# devices.  This imply that all of them will be unlocked by
-	# the same TPM2, or the same FIDO2 key
+	# the same TPM2, or the same FIDO2 key.
+	#
+	# The ones ignored will be untouched.
 	local option="$1"
 
 	dbg "Adding \"$option\" to /etc/crypttab"
@@ -2965,7 +2988,7 @@ add_crypttab_option()
 	local opts
 	while read -r name device key opts; do
 		[[ "$name" = \#* ]] && continue
-		if [[ "$opts" != *"$option"* ]]; then
+		if [[ "$opts" != *"x-sdbootutil.ignore"* ]] && [[ "$opts" != *"$option"* ]]; then
 			[ -z "$opts" ] && opts="$option" || opts="$opts,$option"
 			# crypttab has changed so initrd needs to be
 			# updated
@@ -2984,7 +3007,9 @@ add_crypttab_option()
 remove_crypttab_option()
 {
 	# Similar to add_crypttab_option, the option will be removed
-	# from all the entries
+	# from all the entries.
+	#
+	# The ones ignored will be untouched.
 	local option="$1"
 
 	dbg "Removing \"$option\" to /etc/crypttab"
@@ -2993,6 +3018,7 @@ remove_crypttab_option()
 	local crypttab
 	crypttab="$(mktemp -t crypttab.XXXXXX)"
 	echo "# File created by sdbootutil.  Comments will be removed" > "$crypttab"
+	echo "# Add the 'x-sdbootutil.ignore' option to un-track a device" >> "$crypttab"
 
 	local name
 	local device
@@ -3000,7 +3026,7 @@ remove_crypttab_option()
 	local opts
 	while read -r name device key opts; do
 		[[ "$name" = \#* ]] && continue
-		if [[ "$opts" == *"$option"* ]]; then
+		if [[ "$opts" != *"x-sdbootutil.ignore"* ]] && [[ "$opts" = *"$option"* ]]; then
 			opts="${opts#"$option",}"
 			opts="${opts//,"$option"}"
 			opts="${opts//"$option"}"
@@ -3087,6 +3113,11 @@ enroll_pcrlock()
 	else
 		return 1
 	fi
+
+	# Not all PCR predictions match the current system state and
+	# will be excluded from the policy. Trigger an update on the
+	# next boot which should include them
+	systemctl --quiet enable sdbootutil-update-predictions.service || true
 }
 
 enroll_pcroracle()
@@ -3426,6 +3457,7 @@ enroll()
 
 unenroll_pcrlock()
 {
+	systemctl --quiet disable sdbootutil-update-predictions.service || true
 	pcrlock remove-policy &> /dev/null || true
 	rm -fr /var/lib/pcrlock.d
 	rm -f /var/lib/systemd/pcrlock.json
@@ -3548,6 +3580,7 @@ set_image_name() {
 	declare -gA arch_image_map=(
 		[x64]="vmlinuz"
 		[aa64]="Image"
+		[riscv64]="Image"
 	)
 
 	if [ -n "${arch_image_map[$firmware_arch]}" ]; then
@@ -3761,12 +3794,18 @@ fi
 if [ "$1" != "install" ] && [ ! -d "${boot_root}${boot_dst}" ]; then
 	info "Removable installation detected"
 	boot_dst="/EFI/BOOT"
+	arg_portable=1
 fi
 
 dbg_var "boot_dst"
 
 if [ "$SECURE_BOOT" = "yes" ] || is_shim_installed; then
 	arg_secure_boot=1
+fi
+
+# Do not follow UPDATE_NVRAM for now (bsc#1247952)
+if [ "$UPDATE_NVRAM" = "no" ] && false; then
+	arg_no_variables=1
 fi
 
 # Keep initial components before they are replaced by some actions

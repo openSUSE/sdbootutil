@@ -4,4 +4,10 @@ ConditionSecurity=tpm2
 
 [Service]
 Type=oneshot
+RemainAfterExit=yes
+KeyringMode=shared
 ExecStart=/usr/bin/sdbootutil update-predictions
+ImportCredential=sdbootutil-update-predictions.*
+
+[Install]
+WantedBy=default.target
