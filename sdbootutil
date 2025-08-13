@@ -1174,17 +1174,18 @@ cleanup_entries()
 		fi
 	fi
 
-	local id snapshot kernel_version subvol src
+	local id path snapshot kernel_version subvol src
 	while read -r id; do
+		read -r path
 		read -r snapshot
 		read -r kernel_version
 		subvol="${subvol_prefix}/.snapshots/${snapshot}/snapshot"
 		src="${subvol#"${subvol_prefix}"}/lib/modules/$kernel_version/$image"
 		[ -e "$src" ] || {
 			info "Cleaning boot entry $id"
-			rm "${boot_root}/loader/entries/$id"
+			rm "$path"
 		}
-	done < <(jq -r '.[] | .id, (.version | scan("(.*)@(.*)") | .[])' "$entryfile")
+	done < <(jq -r '.[] | .id, .path, (.version | scan("(.*)@(.*)") | .[])' "$entryfile")
 
 	dbg "Calling bootctl cleanup"
 	bootctl -q cleanup 2> /dev/null
@@ -1797,7 +1798,12 @@ set_default_entry()
 	info "Setting default entry $id"
 
 	if [ ! -f "${boot_root}/loader/entries/$id" ] && [ ! -f "${boot_root}/loader/entries/$id.conf" ]; then
-		err "Boot loader entry $id not found"
+		update_entries
+		while read -r path; do
+			if [ ! -f "$path" ]; then
+				err "Boot loader entry $id not found"
+ 			fi
+		done < <(jq -r --arg id "$id" '.[] | select(.id == $id) | .path' < "$entryfile")
 	fi
 	if is_sdboot; then
 		set_default_sdboot "$id"
