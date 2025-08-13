@@ -33,6 +33,13 @@ arg_ask_key_pin_or_pw=
 arg_method=
 arg_signed_policy=
 arg_measure_pcr=
+
+arg_store_secrets=
+arg_secret_user=
+secret_user=
+secret_uid=
+secret_ok=
+
 have_snapshots=
 # for x in vmlinuz image vmlinux linux bzImage uImage Image zImage; do
 image=
@@ -125,6 +132,10 @@ helpandquit()
 		  --pcr			Comma seperated list of PCRs to enroll
 		  --devices		Comma separated list of devices to enroll or unenroll
 		                        By default all (not ignored) devices are [un]enrolled
+		  --store-secrets     yes|no|ask   Persist secrets in desktop keyring
+		  						Default: ask if interactive
+		  --secret-user       USER|UID     Which desktop session/user keyring to use
+		  						Default: auto-detect
 		  -v, --verbose		More verbose output
 		  -h, --help		This screen
 
@@ -348,6 +359,153 @@ reset_rollback()
 is_transactional()
 {
 	findmnt --fstab / -O ro >/dev/null
+}
+
+# Secret Service helpers (GNOME Keyring / KDE Wallet)
+xtrace_off() { case $- in *x*) had_xtrace=1; set +x;; *) had_xtrace=0;; esac; }
+xtrace_on()  { [ "${had_xtrace:-0}" = 1 ] && set -x || :; }
+
+resolve_secret_user() {
+	# Respect --secret-user, else prefer SUDO_USER, else pick a logged-in user with a session bus
+	local uid
+	if [ -n "$arg_secret_user" ]; then
+		if [[ "$arg_secret_user" =~ ^[0-9]+$ ]]; then uid="$arg_secret_user"
+		else uid="$(getent passwd "$arg_secret_user" | cut -d: -f3)"; fi
+	elif [ -n "$SUDO_USER" ]; then
+		uid="$(id -u "$SUDO_USER" 2>/dev/null || true)"
+	fi
+	if [ -z "$uid" ]; then
+		for p in /run/user/*/bus; do [ -S "$p" ] || continue; uid="${p#/run/user/}"; uid="${uid%/bus}"; [ "$uid" -ge 1000 ] && break; done
+	fi
+	[ -n "$uid" ] || return 1
+	[ -S "/run/user/$uid/bus" ] || return 1
+	secret_uid="$uid"
+	secret_user="$(getent passwd "$uid" | cut -d: -f1)"
+	dbg_var "secret_user"
+	return 0
+}
+
+secret_service_available() {
+	[ -n "$secret_ok" ] && { [ "$secret_ok" = 1 ]; return 0; } || :
+	command -v secret-tool >/dev/null 2>&1 || { secret_ok=0; return 1; }
+	resolve_secret_user || { secret_ok=0; return 1; }
+	secret_ok=1; return 0
+}
+
+run_as_secret_user() {
+    # Usage: run_as_secret_user <cmd...>
+    resolve_secret_user ||  return 1
+    local addr="unix:path=/run/user/${secret_uid}/bus"
+    if command -v sudo >/dev/null 2>&1; then
+        sudo -u "${secret_user}" -- env DBUS_SESSION_BUS_ADDRESS="$addr" "$@"
+    elif command -v runuser >/dev/null 2>&1; then
+        runuser -u "${secret_user}" -- env DBUS_SESSION_BUS_ADDRESS="$addr" "$@"
+    else
+        # su needs careful quoting
+        local qcmd
+        printf -v qcmd '%q ' "$@"
+        su -s /bin/sh - "${secret_user}" -c "DBUS_SESSION_BUS_ADDRESS='$addr' $qcmd"
+    fi
+}
+
+secret_lookup() {
+	# secret_lookup TYPE ID -> prints secret, returns 0 if found
+	secret_service_available || return 1
+	xtrace_off
+	local out rc=0
+	out="$(run_as_secret_user secret-tool lookup sdbootutil 1 type "$1" id "$2" 2>/dev/null)" || rc=$?
+	xtrace_on
+	[ $rc -eq 0 ] && [ -n "$out" ] && { printf '%s' "$out"; return 0; }
+	return 1
+}
+
+secret_store() {
+	# _secret_store TYPE ID LABEL SECRET
+	secret_service_available || return 1
+	xtrace_off
+	printf '%s' "$4" | run_as_secret_user secret-tool store --label="$3" sdbootutil 1 type "$1" id "$2" >/dev/null 2>&1
+	local rc=$?
+	xtrace_on
+	return $rc
+}
+
+is_interactive() { [ -t 0 ] && [ -t 1 ]; }
+
+should_store_secret() {
+	# arg_store_secrets: yes|no|ask (default ask if interactive & available)
+	secret_service_available || return 1
+	case "${arg_store_secrets:-ask}" in
+		yes) return 0;;
+		no)  return 1;;
+		ask)
+			is_interactive || return 1
+			local ans
+			read -r -p "Store this secret in your desktop keyring for reuse? [y/N] " ans
+			[ "${ans}" = "y" ] || [ "${ans}" = "Y" ]
+			;;
+		*) return 1;;
+	esac
+}
+
+# Store SECRET in Secret Service only if it's not already there (or differs).
+maybe_store_secret() {
+    local type="$1"
+	local id="$2"
+	local label="$3"
+	local secret="$4"
+    secret_service_available || return 0
+    [ -n "$secret" ] || return 0
+
+    # If the exact same secret is already stored, do nothing.
+    local existing
+    if existing="$(secret_lookup "$type" "$id")"; then
+        [ "$existing" = "$secret" ] && return 0
+    fi
+
+    # Otherwise ask (or auto-store if --store-secrets=yes)
+    should_store_secret || return 0
+    secret_store "$type" "$id" "$label" "$secret" \
+        || warn "Failed to store $type in keyring"
+}
+
+# Order: Secret Service → ENVVAR → keyctl entries → interactive (ask)
+get_secret() {
+    local type="$1" id="$2" outvar="$3" prompt="$4" env="$5"
+    local confirm="${6:-}"              # confirm|single or empty
+    local start_key_idx=6
+    case "$confirm" in
+        confirm|single) start_key_idx=7 ;;
+        *) confirm="" ;;                 # not provided → keep start at 6
+    esac
+
+    local val=""
+    if val="$(secret_lookup "$type" "$id")"; then
+        info "got secret $id from secret service" 
+    elif [ -n "${!env}" ]; then
+        val="${!env}"
+    else
+        local keyid name
+        for name in "${@:$start_key_idx}"; do
+            keyid="$(keyctl id %user:"$name" 2>/dev/null || true)"
+            [ -z "$keyid" ] || { val="$(keyctl pipe "$keyid")"; info "got secret $id from keyring"; break; }
+        done
+        if [ -z "$val" ] && is_interactive; then
+            local should_prompt=0
+            if [ "$type" = "luks-passphrase" ]; then
+                should_prompt=1
+            elif [ -n "$arg_ask_key_pin_or_pw" ]; then
+                should_prompt=1
+            fi
+            if [ "$should_prompt" -eq 1 ]; then
+                if [ "$confirm" = "single" ]; then
+                    ask_password "$prompt" val
+                else
+                    ask_new_password "$prompt" val
+                fi
+            fi
+        fi
+    fi
+    printf -v "$outvar" '%s' "$val"
 }
 
 keyctl_add_with_timeout()
@@ -2587,27 +2745,18 @@ generate_tpm2_predictions_pcrlock()
 	# same entry, the PIN environment variable, or the
 	# --ask-{key,pin,pw} parameter.
 	local pin
+	get_secret "tpm2-recovery-pin" "${entry_token:-system}" pin "Recovery PIN" PIN single sdbootutil-pin sdbootutil cryptenroll
+
 	local extra=()
-	local keyid keyid_int
-	keyid="$(keyctl id %user:sdbootutil 2> /dev/null)" || true
-	keyid_int="$(keyctl id %user:sdbootutil-pin 2> /dev/null)" || true
-	if [ -n "$arg_ask_key_pin_or_pw" ]; then
-		ask_password "Recovery PIN" pin
-		extra=("--recovery-pin=yes")
-	elif [ -n "$PIN" ]; then
-		pin="$PIN"
-		extra=("--recovery-pin=yes")
-	elif [ -n "$keyid_int" ]; then
-		pin="$(keyctl pipe "$keyid_int")"
-		extra=("--recovery-pin=yes")
-	elif [ -n "$keyid" ]; then
-		pin="$(keyctl pipe "$keyid")"
+	if [ -n "$pin" ]; then
 		extra=("--recovery-pin=yes")
 	else
-		# No PIN was provided, systemd-pcrlock will generate
-		# one
+		# No PIN provided → let pcrlock generate one and show it
 		extra=("--recovery-pin=show")
 	fi
+
+	# If we already have a PIN (from env/keyring), offer to persist it
+	maybe_store_secret "tpm2-recovery-pin" "${entry_token:-system}" "sdbootutil: TPM2 Recovery PIN (${entry_token:-system})" "$pin"
 
 	local output
 	output="$(PIN="$pin" pcrlock --pcr="$pcrs" "${extra[@]}" make-policy)"
@@ -2633,6 +2782,13 @@ generate_tpm2_predictions_pcrlock()
 		# keyring, so that it is available to `sdbootutil
 		# enroll --method=recovery-key`
 		keyctl_add_with_timeout "sdbootutil-pin" "$pin"
+
+		# Also persist to the desktop keyring if the user allows
+		if should_store_secret; then
+			secret_store "tpm2-recovery-pin" "${entry_token:-system}" \
+				"sdbootutil: TPM2 Recovery PIN (${entry_token:-system})" "$pin" \
+				|| warn "Failed to store TPM2 recovery PIN in keyring"
+		fi
 	fi
 
 	# Publish the assets in the ESP, so can be imported by
@@ -2706,24 +2862,22 @@ generate_tpm2_predictions_pcr_oracle()
 get_volume_password()
 {
 	local dev="$1"
-	local pw keyid
-	# If we are enrolling for the first time, sdbootutil-pin can
-	# contain the recovery PIN, that cannot be used to unlock the
-	# device (unless later it is done an enrollment of a new
-	# recovery key)
-	keyid="$(keyctl id %user:sdbootutil 2> /dev/null)" || true
-	keyid_ce="$(keyctl id %user:cryptenroll 2> /dev/null)" || true
-	if [ -n "$keyid_ce" ]; then
-		pw="$(keyctl pipe "$keyid_ce")"
-	elif [ -n "$keyid" ]; then
-		pw="$(keyctl pipe "$keyid")"
-	else
-		ask_password "Password for $dev" pw
-		# If the key was missing for all the keyrings put back
-		# into the cryptenroll keyring, as there is a chance
-		# that this is part or a re-enrollment
-		keyctl_add_with_timeout "cryptenroll" "$pw"
-	fi
+	local pw uuid keyid
+
+	uuid="$(get_uuid_for_dev "$dev")"
+
+	get_secret "luks-passphrase" "$uuid" pw "Password for $dev" PW single cryptenroll sdbootutil
+
+	# If nothing was found (e.g. non-interactive run), bail out
+	[ -n "$pw" ] || return 1
+
+	# Ensure systemd-cryptenroll can see it shortly after
+	keyid="$(keyctl id %user:cryptenroll 2>/dev/null)" || true
+	[ -n "$keyid" ] || keyctl_add_with_timeout "cryptenroll" "$pw"
+
+	# Offer to persist into the desktop keyring (no-op if identical already stored)
+	[ -n "$uuid" ] && maybe_store_secret "luks-passphrase" "$uuid" "sdbootutil: LUKS passphrase ($uuid)" "$pw"
+
 	echo "$pw"
 }
 
@@ -2761,6 +2915,20 @@ extend_pcr()
 	echo "$digest"
 }
 
+get_uuid_for_dev()
+{
+	local dev="$1"
+	# If the device name is UUID= convert as a real device
+	# name, and if not, retrieve the UUID
+	if [[ "$dev" = "UUID="* ]]; then
+		uuid="${dev#"UUID="}"
+		dev="$(blkid --uuid "$uuid")"
+	else
+		uuid="$(blkid "$dev" -o value -s UUID)"
+	fi
+	echo "$uuid"
+}
+
 generate_tpm2_predictions_pcr_15()
 {
 	local devs=()
@@ -2787,14 +2955,7 @@ generate_tpm2_predictions_pcr_15()
 		[[ "$opts" != *"tpm2-device="* ]] && continue
 		[[ "$opts" != *"tpm2-measure-pcr="* ]] && continue
 
-		# If the device name is UUID= convert as a real device
-		# name, and if not, retrieve the UUID
-		if [[ "$dev" = "UUID="* ]]; then
-			uuid="${dev#"UUID="}"
-			dev="$(blkid --uuid "$uuid")"
-		else
-			uuid="$(blkid "$dev" -o value -s UUID)"
-		fi
+		uuid="$(get_uuid_for_dev "$dev")"
 
 		# Get the FSTYPE of the real device (crypto_LUKS) and
 		# the slave / holder one (btrfs, swap, etc).  Also get
@@ -3198,18 +3359,8 @@ enroll_recovery_key()
 
 	# If no recovery key is provided, systemd-cryptenroll will
 	# generate one
-	local key keyid keyid_int
-	keyid="$(keyctl id %user:sdbootutil 2> /dev/null)" || true
-	keyid_int="$(keyctl id %user:sdbootutil-pin 2> /dev/null)" || true
-	if [ -n "$arg_ask_key_pin_or_pw" ]; then
-		ask_new_password "recovery key" key
-	elif [ -n "$KEY" ]; then
-		key="$KEY"
-	elif [ -n "$keyid_int" ]; then
-		key="$(keyctl pipe "$keyid_int")"
-	elif [ -n "$keyid" ]; then
-		key="$(keyctl pipe "$keyid")"
-	fi
+	local key
+	get_secret "recovery-key" "${entry_token:-system}" key "recovery key" KEY confirm sdbootutil-pin sdbootutil
 
 	local generated_key=
 	# This function will be called for every device.  Let systemd
@@ -3273,6 +3424,9 @@ enroll_recovery_key()
 	fi
 	# ... and to --method=tpm2[+pin] via a private keyring
 	keyctl_add_with_timeout "sdbootutil-pin" "$key"
+
+	# Offer to persist the recovery key in the desktop keyring
+	maybe_store_secret "recovery-key" "${entry_token:-system}" "sdbootutil: Recovery key (${entry_token:-system})" "$key"
 }
 
 enroll_device()
@@ -3421,27 +3575,15 @@ enroll()
 	# environment variable, or introduced by the user
 	local pin_or_pw keyid
 	if [ "$arg_method" = "tpm2+pin" ]; then
-		keyid="$(keyctl id %user:sdbootutil 2> /dev/null)" || true
-		if [ -n "$arg_ask_key_pin_or_pw" ]; then
-			ask_new_password "TPM2 PIN" pin_or_pw
-		elif [ -n "$PIN" ]; then
-			pin_or_pw="$PIN"
-		elif [ -n "$keyid" ]; then
-			pin_or_pw="$(keyctl pipe "$keyid")"
-		else
-			err "Use %u:sdbootutil, PIN or --ask-pin to provide the TPM2 PIN"
-		fi
+		get_secret "tpm2-pin" "${entry_token:-system}" pin_or_pw "TPM2 PIN" PIN confirm sdbootutil
+		[ -n "$pin_or_pw" ] || err "Use %u:sdbootutil, PIN or --ask-pin to provide the TPM2 PIN"
+		# Offer to store in keyring (once we have it)
+		maybe_store_secret "tpm2-pin" "${entry_token:-system}" "sdbootutil: TPM2 PIN (${entry_token:-system})" "$pin_or_pw"
 	elif [ "$arg_method" = "password" ]; then
-		keyid="$(keyctl id %user:sdbootutil 2> /dev/null)" || true
-		if [ -n "$arg_ask_key_pin_or_pw" ]; then
-			ask_new_password "password" pin_or_pw
-		elif [ -n "$PW" ]; then
-			pin_or_pw="$PW"
-		elif [ -n "$keyid" ]; then
-			pin_or_pw="$(keyctl pipe "$keyid")"
-		else
-			err "Use %u:sdbootutil, PW or --ask-pw to provide the password"
-		fi
+		get_secret "password" "${entry_token:-system}" pin_or_pw "password" PW confirm sdbootutil
+		[ -n "$pin_or_pw" ] || err "Use %u:sdbootutil, PW or --ask-pw to provide the password"
+		# Offer to store in keyring (once we have it)
+		maybe_store_secret "password" "${entry_token:-system}" "sdbootutil: Password (${entry_token:-system})" "$pin_or_pw"
 	fi
 
 	for dev in "${tracked_devices[@]}"; do
@@ -3644,6 +3786,8 @@ define_options() {
 		[measure-pcr]=""
 		[pcr]="_none"
 		[devices]="_devices"
+		[store-secrets]="_store_mode"
+		[secret-user]="_none"
 	)
 	opts_long=""
 	for opt in "${!options_with_arg[@]}"; do
@@ -3695,6 +3839,8 @@ while true ; do
 		--measure-pcr) arg_measure_pcr=1; shift ;;
 		--pcr) FDE_SEAL_PCR_LIST="$2"; shift 2 ;;
 		--devices) IFS=',' read -r -a tracked_devices <<<"$2"; shift 2 ;;
+		--store-secrets) arg_store_secrets="$2"; shift 2 ;;
+		--secret-user) arg_secret_user="$2"; shift 2 ;;
 		--) shift ; break ;;
 		*) echo "Internal error!" ; exit 1 ;;
 	esac
@@ -3807,6 +3953,12 @@ fi
 if [ "$SDB_ADD_INITIAL_COMPONENT" = "1" ]; then
 	backup_initial_components
 fi
+
+# Normalize store-secrets
+case "${arg_store_secrets:-}" in
+	yes|no|ask|"") : ;; 
+	*) warn "--store-secrets expects yes|no|ask (got '${arg_store_secrets}')"; arg_store_secrets=ask;;
+esac
 
 case "$1" in
 	install)
