@@ -32,7 +32,9 @@ arg_default_snapshot=
 arg_ask_key_pin_or_pw=
 arg_method=
 arg_signed_policy=
+arg_no_measure_pcr=
 arg_measure_pcr=
+arg_pcr=
 have_snapshots=
 # for x in vmlinuz image vmlinux linux bzImage uImage Image zImage; do
 image=
@@ -120,6 +122,7 @@ helpandquit()
 		  --ask-pw		Ask password when initial enrollment
 		  --method		"tpm2", "tpm2+pin", "fido2", "password", "recovery-key"
 		  --signed-policy	Use signed policy for TPM2 enrollment
+		  --no-measure-pcr	During enrollment, do not include PCR 15 protection
 		  --measure-pcr		Force update of PCR 15 prediction for LUKS2 volume key
 		                        Requires LUKS2 password to accessing the volume key
 		  --pcr			Comma seperated list of PCRs to enroll
@@ -2768,6 +2771,8 @@ generate_tpm2_predictions_pcr_15()
 	local vks=()
 	local name dev opts extra uuid pw
 
+	grep -q "tpm2-measure-pcr=yes" /etc/crypttab || return
+
 	info "Generating predictions for PCR15"
 
 	# Read /etc/crypttab lines that contains tpm2-device and
@@ -2885,7 +2890,8 @@ generate_tpm2_predictions()
 	# because we generate the prediction first and later we do the
 	# enrollment
 	is_config_file || err "/etc/sysconfig/fde-tools not found"
-	[ -n "$FDE_SEAL_PCR_LIST" ] || load_config_file
+	load_config_file
+	[ -z "$arg_pcr" ] || FDE_SEAL_PCR_LIST="$arg_pcr"
 
 	if is_pcr_oracle; then
 		generate_tpm2_predictions_pcr_oracle
@@ -3335,7 +3341,7 @@ enroll()
 			have_tpm2 || err "No TPM2 found found"
 			! in_lockout || err "The TPM2 is in lockout. Use 'tpm2_dictionarylockout -c [ -p passwd ]' to continue"
 			add_crypttab_option 'tpm2-device=auto'
-			add_crypttab_option 'tpm2-measure-pcr=yes'
+			[ -n "$arg_no_measure_pcr" ] || add_crypttab_option 'tpm2-measure-pcr=yes'
 			;;
 
 		"fido2")
@@ -3370,6 +3376,9 @@ enroll()
 	# early.  Also we need to set the PCRs used to assest the
 	# system status
 	if [ "$arg_method" = "tpm2" ] || [ "$arg_method" = "tpm2+pin" ]; then
+		load_config_file
+		[ -z "$arg_pcr" ] || FDE_SEAL_PCR_LIST="$arg_pcr"
+
 		if [ -z "${FDE_SEAL_PCR_LIST}" ]; then
 			if systemd-detect-virt -q; then
 				info "Virtualized systemd detected ($(systemd-detect-virt)). Dropping PCR0 and PCR2"
@@ -3641,6 +3650,7 @@ define_options() {
 		[ask-pw]=""
 		[method]="_method"
 		[signed-policy]=""
+		[no-measure-pcr]=""
 		[measure-pcr]=""
 		[pcr]="_none"
 		[devices]="_devices"
@@ -3692,8 +3702,9 @@ while true ; do
 		--ask-key|--ask-pin|--ask-pw) arg_ask_key_pin_or_pw=1; shift ;;
 		--method) arg_method="$2"; shift 2 ;;
 		--signed-policy) arg_signed_policy=1; shift ;;
+		--no-measure-pcr) arg_no_measure_pcr=1; shift ;;
 		--measure-pcr) arg_measure_pcr=1; shift ;;
-		--pcr) FDE_SEAL_PCR_LIST="$2"; shift 2 ;;
+		--pcr) arg_pcr="$2"; shift 2 ;;
 		--devices) IFS=',' read -r -a tracked_devices <<<"$2"; shift 2 ;;
 		--) shift ; break ;;
 		*) echo "Internal error!" ; exit 1 ;;
