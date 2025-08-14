@@ -69,6 +69,7 @@ exit_with_msg() {
 }
 
 [ -f /etc/crypttab ] || exit 0
+grep -q 'tpm2-measure-pcr=yes' /etc/crypttab || exit 0
 [ -f "/var/lib/sdbootutil/measure-pcr-prediction" ] || exit_with_msg "Missing measure-pcr-prediction file"
 [ -f "/var/lib/sdbootutil/measure-pcr-prediction.sha256" ] || exit_with_msg "Missing measure-pcr-prediction.sha256 signature file"
 validate_measure_pcr_signature || exit_with_msg "Signature for the prediction file is not valid"
