@@ -245,36 +245,39 @@ helpandquit()
 dbg()
 {
 	[ "${verbose:-0}" -gt 1 ] || return 0
-	echo "DEBUG: $*" >&2
+	echo "DEBUG: $*" | tee >(systemd-cat -t sdbootutil -p debug) >&2
 }
 
 dbg_var()
 {
 	[ "${verbose:-0}" -gt 1 ] || return 0
 	local v="${1:?}"
-	echo "DEBUG: $v: ${!v}" >&2
+	echo "DEBUG: $v: ${!v}" | tee >(systemd-cat -t sdbootutil -p debug) >&2
 }
 
 dbg_cat()
 {
 	[ "${verbose:-0}" -gt 1 ] || return 0
-	[ ! -e "$1" ] || { echo "DEBUG: $1" >&2; cat "$1" >&2; }
+	[ ! -e "$1" ] || {
+		echo "DEBUG: $1" | tee >(systemd-cat -t sdbootutil -p debug) >&2
+		tee >(systemd-cat -t sdbootutil -p debug) < "$1" >&2
+	}
 }
 
 info()
 {
 	[ "${verbose:-0}" -gt 0 ] || return 0
-	echo "$@" >&2
+	echo "$@" | tee >(systemd-cat -t sdbootutil -p info) >&2
 }
 
 warn()
 {
-	echo "WARNING: $*" >&2
+	echo "WARNING: $*" | tee >(systemd-cat -t sdbootutil -p warning) >&2
 }
 
 err()
 {
-	echo "ERROR: $*" >&2
+	echo "ERROR: $*" | tee >(systemd-cat -t sdbootutil -p err) >&2
 	exit 1
 }
 
@@ -749,7 +752,7 @@ mount_chroot()
 	# We include the rootfs (the first line usually), as is needed
 	# to appear in the mounts under the chroot, allowing dracut to
 	# properly detect the fs type and load the relevant module.
-	findmnt -o TARGET,FSTYPE -Rv --pairs / > "$tmpdir/mounts"
+	findmnt --fstab -o TARGET,FSTYPE -Rv --pairs / > "$tmpdir/mounts"
 	mount --bind "$snapshot_dir" "$snapshot_dir"
 	while read -r line; do
 		eval "$line"
@@ -1576,7 +1579,8 @@ install_bootloader()
 	local prefix=""
 	if [ -n "$have_snapshots" ]; then
 		snapshot="${1:-$root_snapshot}"
-		prefix="/.snapshots/${root_snapshot}/snapshot"
+		prefix="/.snapshots/$snapshot/snapshot"
+		[ -d "$prefix" ] || err "Snapshot $snapshot not found"
 	fi
 
 	info "Installing bootloader"
@@ -2617,7 +2621,8 @@ generate_tpm2_predictions_pcrlock()
 	local pcrlock_status=$?
 
 	if [ $pcrlock_status -ne 0 ]; then
-		echo "Error creating the systemd-pcrlock policy!"
+		warn "Error creating the systemd-pcrlock policy!"
+		# Do not exit, as this function can be re-tried
 		return 1
 	elif echo "$output" | grep -q "recovery PIN"; then
 		local split
@@ -2642,7 +2647,7 @@ generate_tpm2_predictions_pcrlock()
 	# dracut-pcr-signature
 	[ -e /var/lib/systemd/pcrlock.json ] && \
 		cp /var/lib/systemd/pcrlock.json "${boot_root}${boot_dst}" && {
-			echo "NVIndex policy created"
+			info "NVIndex policy created"
 		}
 }
 
@@ -2702,7 +2707,7 @@ generate_tpm2_predictions_pcr_oracle()
 	cp /etc/systemd/tpm2-pcr-public-key.pem "${boot_root}${boot_dst}"
 	[ -e /etc/systemd/tpm2-pcr-signature.json ] && \
 		cp /etc/systemd/tpm2-pcr-signature.json "${boot_root}${boot_dst}" && {
-			echo "Signed policy created"
+			info "Signed policy created"
 		}
 }
 
@@ -2774,6 +2779,15 @@ generate_tpm2_predictions_pcr_15()
 	grep -q "tpm2-measure-pcr=yes" /etc/crypttab || return
 
 	info "Generating predictions for PCR15"
+
+	# If we are not in interactive mode we cannot ask the LUKS2
+	# password and we cannot update the PCR 15 predictions.  This
+	# will halt the system in the next boot.
+	if [ -n "$TRANSACTIONAL_UPDATE" ] || [ -n "$SNAPPER_PLUGIN" ]; then
+		warn "PCR 15 predictions cannot be updated"
+		warn "Run 'sdbootutil update-predictions' manually"
+		return 0
+	fi
 
 	# Read /etc/crypttab lines that contains tpm2-device and
 	# tpm2-measure-pcr.  This code is the similar from
@@ -3412,8 +3426,8 @@ enroll()
 			# are trying with systemd-pcrlock, we try
 			# again with pcr-oracle
 			if ! is_pcr_oracle; then
-				echo "Predictions with systemd-pcrlock failed"
-				echo "Re-trying with pcr-oracle"
+				warn "Predictions with systemd-pcrlock failed"
+				warn "Re-trying with pcr-oracle"
 				unenroll_pcrlock
 				# This function generates
 				# /etc/systemd/tpm2-pcr-public-key.pem
@@ -3707,7 +3721,7 @@ while true ; do
 		--pcr) arg_pcr="$2"; shift 2 ;;
 		--devices) IFS=',' read -r -a tracked_devices <<<"$2"; shift 2 ;;
 		--) shift ; break ;;
-		*) echo "Internal error!" ; exit 1 ;;
+		*) err "Internal error!" ;;
 	esac
 done
 
