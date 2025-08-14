@@ -978,7 +978,7 @@ make_free_space_for_kernel()
 create_boot_options() {
 	local subvol="$1"
 	local boot_options=
-	for i in /etc/kernel/cmdline /usr/lib/kernel/cmdline /proc/cmdline; do
+	for i in "${subvol:1}/etc/kernel/cmdline" "${subvol:1}/usr/lib/kernel/cmdline" /proc/cmdline; do
 		[ -f "$i" ] || continue
 		dbg_cat "$i"
 		boot_options="$(sedrootflags "$subvol" < "$i")"
