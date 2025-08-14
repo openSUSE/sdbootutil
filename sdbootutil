@@ -3,7 +3,6 @@
 # SPDX-FileCopyrightText: Copyright 2023 SUSE LLC
 set -e
 shopt -s nullglob
-source "/etc/sdbootutil"
 
 DEBUG_LOG="/var/log/sdbootutil.log"
 
