@@ -756,6 +756,7 @@ mount_chroot()
 		# shellcheck disable=SC2153
 		[ "$FSTYPE" = "btrfs" ] || [ "$FSTYPE" = "vfat" ] || [ "$FSTYPE" = "xfs" ] || [[ "$FSTYPE" == ext* ]] || continue
 		[ "$TARGET" != "/" ] || continue
+		[ "$TARGET" = "/etc" ] && [ "$FSTYPE" = "btrfs" ] && continue
 		[[ "$TARGET" != /.snapshots* ]] || continue
 		mountpoint --quiet "$snapshot_dir$TARGET" || mount --bind "$TARGET" "$snapshot_dir$TARGET"
 	done < "$tmpdir/mounts"
