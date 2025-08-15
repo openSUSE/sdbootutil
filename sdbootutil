@@ -663,7 +663,7 @@ remove_uki()
 		done
 
 		ukify build "${ukify_args[@]}"
-		make_free_space_for_uki "$tmp_uki" || err "No free space in $boot_root for new UKI"
+		make_free_space_for_uki "$snapshot" "$tmp_uki" || err "No free space in $boot_root for new UKI"
 		install_with_rollback "$tmp_uki" "$linuxdir/openSUSE-$kernel_version-$chksum.efi"  || failed="UKI"
 		rm -f "$tmp_uki"
 
@@ -1072,17 +1072,90 @@ make_free_space_for_kernel()
 	make_free_space "$snapshot" "$total_size"
 }
 
+select_uki_entries_for_free_space()
+{
+	local snapshot="$1"
+	local protected_re
+	protected_re="$(regex_snapshot_ids_for_free_space "$snapshot")"
+
+	local running_linux
+	running_linux="$(grep -oE 'BOOT_IMAGE=[^ ]*EFI/Linux/[^ ]+' /proc/cmdline | sed 's/^BOOT_IMAGE=//')" || true
+
+	bootctl list --json=short | \
+	jq --arg re "$protected_re" --arg run "${running_linux:-}" '
+	  [ .[]
+	    | select(has("linux"))
+	    | select(.linux | test("^/EFI/Linux/.*\\.efi$"))
+	  ]
+	  | group_by(.linux)
+	  | map({
+	      linux: .[0].linux,
+	      id: .[0].id,
+	      isDefault: any(.[]; .isDefault == true),
+	      isSelected: any(.[]; .isSelected == true),
+	      snaps: (
+	        [ .[]
+	          | ((.options // .cmdline // ""))
+	          | capture("rootflags=subvol=(?:@/)?(?:[^ ]*/)?\\.snapshots/(?<sid>[0-9]+)/snapshot")?
+	          | .sid? | tonumber?
+	        ] | map(select(. != null))
+	      ),
+	      kernel: ((.[0].linux | scan("(\\d+)\\.(\\d+)\\.(\\d+)-(\\d+)")) | map(tonumber))
+	    })
+	  | map(. + {
+	      protected: (
+	        .isDefault or .isSelected or (.linux == $run) or
+	        any(.snaps[]?; (tostring | test("^" + $re + "$")))
+	      ),
+	      prio: ((.snaps | select(length>0) | min) // 999999)
+	    })
+	  | map(select(.protected | not))
+	  | map({id, linux, prio, kernel})
+	' > "$entryfile"
+
+	dbg "Selected UKI groups for free space"
+	dbg_cat "$entryfile"
+}
+
+
 make_free_space_for_uki()
 {
-	local uki="$1"
+	local snapshot="$1"
+	local uki="$2"
 
 	# Calculate the free space and the required size.  All sizes
 	# are in Kb to avoid big numbers
 	local free_space total_size
 	total_size=$(($(pending_kernel_size "$uki")))
 
-	# TODO: Needs adoption to work with UKIs
-	make_free_space "$snapshot" "$total_size"
+	info "Required free space in ESP: $total_size KB"
+
+	free_space="$(boot_free_space)"
+	[ "$total_size" -gt "$free_space" ] || return 0
+
+	# Clean obvious cruft
+	dbg "Calling bootctl cleanup"
+	bootctl -q cleanup 2> /dev/null
+
+	# Build UKI removal candidates (grouped per /EFI/Linux/*.efi)
+	select_uki_entries_for_free_space "$snapshot"
+
+	# Remove low-priority UKIs until we have enough space
+	local id
+	while read -r id; do
+		free_space="$(boot_free_space)"
+		dbg "Free space in the ESP: $free_space KB"
+		if [ "$total_size" -gt "$free_space" ]; then
+			info "Removing UKI via boot entry $id"
+			bootctl unlink "$id"
+		else
+			return 0
+		fi
+	done < <(jq -r 'sort_by(.prio, .kernel) | .[] | .id' < "$entryfile")
+
+	free_space="$(boot_free_space)"
+	dbg "Free space in the ESP after deallocation: $free_space KB"
+	[ "$total_size" -lt "$free_space" ]
 }
 
 create_boot_options() {
@@ -1191,12 +1264,10 @@ install_kernel()
 		)
 		if ! reuse_profile "$snapshot" "$kernel_version"; then
 			info "Building UKI profile for snapshot $snapshot"
-			if [ "$snapshot" != "$root_snapshot" ]; then
-				ukify build \
-			   	  --profile="TITLE=${title}${snapshot:+${nl}ID=$snapshot}" \
-        		  --cmdline="$boot_options" \
-        		  --output="${ukidir}/${kernel_version}-${ker_chksum}/profile-${snapshot}.efi"
-			fi
+			ukify build \
+			  --profile="TITLE=${title}${snapshot:+${nl}ID=$snapshot}" \
+        	  --cmdline="$boot_options" \
+        	  --output="${ukidir}/${kernel_version}-${ker_chksum}/profile-${snapshot}.efi"
 		else
 			info "Found existing UKI profile for snapshot $snapshot"
 		fi
@@ -1210,13 +1281,10 @@ install_kernel()
         	[ -f "$prof" ] || continue
         	ukify_args+=(--join-profile="$prof")
     	done
-		root_subvol="${subvol_prefix}/.snapshots/${root_snapshot}/snapshot"
-		root_boot_options="$(create_boot_options "$root_subvol")"
-		ukify_args+=(--cmdline="$root_boot_options")
 		shopt -u nullglob
 		ukify build "${ukify_args[@]}"
 
-		make_free_space_for_uki "$tmpdir/uki-${kernel_version}.efi" || err "No free space in $boot_root for new UKI"
+		make_free_space_for_uki "$snapshot" "$tmpdir/uki-${kernel_version}.efi" || err "No free space in $boot_root for new UKI"
 
 		install_with_rollback "$tmpdir/uki-${kernel_version}.efi" "$linuxdir/openSUSE-$kernel_version-$chksum.efi" || failed="UKI"
 		rm -f "$tmpdir/uki-${kernel_version}.efi"
