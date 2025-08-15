@@ -1685,57 +1685,93 @@ declare -A installed_kernels
 # Map of ESP path to id of kernels that are not in the subvol
 declare -A stale_kernels
 is_bootable=
-update_kernels()
-{
+update_kernels() {
 	local snapshot="$1"
-	local path id
+	local path id sum
 	installed_kernels=()
 	stale_kernels=()
 	is_bootable=
 	find_kernels "$snapshot"
-	settle_entry_token "${snapshot}"
+	settle_entry_token "${snapshot}"	
+	# Seed expected ESP paths for each found kernel version
 	for kv in "${!found_kernels[@]}"; do
-		installed_kernels["/$entry_token/$kv/linux-${found_kernels[$kv]}"]=''
-	done
-	update_entries_for_snapshot "$snapshot"
-
-	# XXX: maybe we should parse the actual path in the entry
+		sum="${found_kernels[$kv]}"
+		# classic BLS kernel image path
+		installed_kernels["/$entry_token/$kv/linux-$sum"]=''
+		# UKI path used by sdbootutil (and bootctl type2)
+		installed_kernels["/EFI/Linux/openSUSE-$kv-$sum.efi"]=''
+	done	
+	update_entries_for_snapshot "$snapshot"	
+	# Fill matches from bootctl JSON and mark truly stale ones
 	while read -r path id; do
-		if [ "${installed_kernels[$path]+none}" = 'none' ]; then
+		if [[ -v 'installed_kernels[$path]' ]]; then
 			installed_kernels["$path"]="$id"
 			is_bootable=1
-		else
-			# kernel in ESP that is not installed
+		# mark "stale" only if it looks like one of our kernel layouts
+		elif [[ "$path" == /$entry_token/*/linux-* || "$path" == /EFI/Linux/openSUSE-*.efi ]]; then
 			stale_kernels["$path"]="$id"
 		fi
-	done < <(jq -r '.[]|select(has("linux"))|[.linux,.id]|join(" ")'< "$entryfile")
+	done < <(jq -r '.[]|select(has("linux"))|[.linux,.id]|join(" ")' < "$entryfile")
 }
 
-list_kernels()
-{
+kv_from_path() {
+	local p="$1" base
+	case "$p" in
+		# classic BLS: /$entry_token/<kv>/linux-<sha>
+		"/$entry_token/"*"/linux-"*)
+		  base="${p#"/$entry_token/"}"
+		  printf '%s\n' "${base%%/*}"
+		  ;;
+		# UKI: /EFI/Linux/openSUSE-<kv>-<sha>.efi
+		/EFI/Linux/openSUSE-*.efi)
+		  base="${p##*/openSUSE-}"          # <kv>-<sha>.efi
+		  if [[ "$base" =~ ^(.+)-([0-9a-f]{40})\.efi$ ]]; then
+		  	printf '%s\n' "${BASH_REMATCH[1]}"
+		  fi
+		  ;;
+	esac
+}
+
+list_kernels() {
 	local snapshot=""
 	[ -z "$have_snapshots" ] || snapshot="${1:?}"
 
 	info "Listing kernels"
 
 	update_kernels "$snapshot"
-	local kernelfiles=("${!installed_kernels[@]}")
-	for k in "${kernelfiles[@]}"; do
-		local id="${installed_kernels[$k]}"
-		local kv="${k%/*}"
-		kv="${kv##*/}"
-		if [ -z "$id" ]; then
-			echo -e "${color_yellow}missing /lib/modules/$kv/$image${color_end}"
-		else
-			echo -e "${color_green}ok /lib/modules/$kv/$image -> $id${color_end}"
+
+	# Aggregate by kv: ok if any layout matched
+	declare -A kv_any_matched kv_any_expected kv_example_path kv_example_id
+	local k id kv
+
+	for k in "${!installed_kernels[@]}"; do
+		kv="$(kv_from_path "$k")"
+		[ -n "$kv" ] || continue
+		kv_any_expected["$kv"]=1
+		id="${installed_kernels[$k]}"
+		if [ -n "$id" ]; then
+			kv_any_matched["$kv"]=1
+			kv_example_path["$kv"]="$k"
+			kv_example_id["$kv"]="$id"
 		fi
 	done
-	kernelfiles=("${!stale_kernels[@]}")
-	for k in "${kernelfiles[@]}"; do
-		local id="${stale_kernels[$k]}"
-		printf "${color_red}stale %s${color_end}\n" "$id"
+
+	# Print once per kernel version
+	for kv in "${!kv_any_expected[@]}"; do
+		if [ -n "${kv_any_matched[$kv]+x}" ]; then
+			# show a representative mapping
+			echo -e "${color_green}ok /lib/modules/$kv/$image -> ${kv_example_id[$kv]}${color_end}"
+		else
+			echo -e "${color_yellow}missing /lib/modules/$kv/$image${color_end}"
+		fi
+	done
+
+	# Stale: entries that look like our kernel layouts but don’t belong to this snapshot
+	for k in "${!stale_kernels[@]}"; do
+		printf "${color_red}stale %s${color_end}\n" "${stale_kernels[$k]}"
 	done
 }
+
 
 list_devices()
 {
