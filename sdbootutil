@@ -493,7 +493,11 @@ update_entries_for_subvol()
 	local ext="${2:-}"
 
 	[ -z "$ext" ] || ext="|$ext"
-	update_entries jq "[.[]|select(has(\"options\"))|select(.options|test(\"root=(?:UUID=$root_uuid|$root_device) .*rootflags=subvol=$subvol\")$ext)]"
+	# Look at .options (BLS #1) OR .cmdline (UKI auto-entry)
+	update_entries jq "[.[] \
+	  | select(has(\"options\") or has(\"cmdline\")) \
+	  | select((.options // .cmdline) \
+	  | test(\"root=(?:UUID=$root_uuid|$root_device) .*rootflags=subvol=$subvol\")$ext)]"
 }
 
 update_entries_for_snapshot()
@@ -510,7 +514,28 @@ update_entries_for_snapshot_invert()
 
 update_entries_for_this_system()
 {
-	update_entries jq "[.[]|select(has(\"options\"))|select(.options|test(\"root=(?:UUID=$root_uuid|$root_device)\"))]"
+	update_entries jq "[.[] \
+	  | select(has(\"options\") or has(\"cmdline\")) \
+	  | select((.options // .cmdline) | test(\"root=(?:UUID=$root_uuid|$root_device)\"))]"
+}
+
+declare -A uki_uname_cache
+uki_uname() {
+    local path="${1:?}"
+    if [[ -n "${uki_uname_cache[$path]+x}" ]]; then
+        printf '%s' "${uki_uname_cache[$path]}"; return
+    fi
+    local kv=""
+    # Try JSON first (works with both full and --section outputs)
+    kv="$(ukify inspect --section=.uname --json "$path" 2>/dev/null \
+          | jq -r 'first( (.. | objects | select(.name?==".uname") | .text?) ) // ""')"
+    if [[ -z "$kv" ]]; then
+        # Plain-text fallback: read the line after "text:" within .uname section
+        kv="$(ukify inspect "$path" 2>/dev/null \
+              | awk '$1==".uname:"{f=1;next} f&&$1=="text:"{getline; sub(/^[[:space:]]+/,""); print; exit}')"
+    fi
+    uki_uname_cache[$path]="$kv"
+    printf '%s' "$kv"
 }
 
 entry_conf_file()
@@ -622,15 +647,20 @@ remove_uki()
 {
 	local snapshot="$1"
 	local kernel_version="$2"
+	local ker_chksum="$3"
+	local linuxdir="$boot_root/EFI/Linux"
 	
 	subvol="${subvol_prefix}/.snapshots/${snapshot}/snapshot"
-	local src="${subvol#"${subvol_prefix}"}/lib/modules/$kernel_version/$image"
-	calc_chksum "$src"
-	ker_chksum="$chksum"
+	if [ -z "$ker_chksum" ]; then
+		local src="${subvol#"${subvol_prefix}"}/lib/modules/$kernel_version/$image"
+		calc_chksum "$src"
+		ker_chksum="$chksum"
+	fi
 
 	# Remove this snapshot's profile
 	local dir="${ukidir}/${kernel_version}-${ker_chksum}"
 	local prof="$dir/profile-${snapshot}.efi"
+	dbg "Profile path: $prof"
 	if [ -f "$prof" ]; then
 		info "Deleting profile for snapshot $snapshot"
 		rm -f "$prof"
@@ -649,7 +679,7 @@ remove_uki()
 		info "Rebuilding UKI for kernel $kernel_version for remaining snapshots"
 		local tmp_uki="$tmpdir/uki-${kernel_version}.efi"
 		local ukify_args=(
-			--linux="${subvol#"$subvol_prefix"}"/lib/modules/"$kernel_version"/"$image"
+			--linux="${ukidir}/${kernel_version}-${ker_chksum}"/"$image"
 			--output="$tmp_uki"
 		)
 		# add all initrds
@@ -664,7 +694,7 @@ remove_uki()
 
 		ukify build "${ukify_args[@]}"
 		make_free_space_for_uki "$snapshot" "$tmp_uki" || err "No free space in $boot_root for new UKI"
-		install_with_rollback "$tmp_uki" "$linuxdir/openSUSE-$kernel_version-$chksum.efi"  || failed="UKI"
+		install_with_rollback "$tmp_uki" "$linuxdir/openSUSE-$kernel_version-$ker_chksum.efi"  || failed="UKI"
 		rm -f "$tmp_uki"
 
 		[ -z "$failed" ] || err "Failed to install $failed"
@@ -1258,8 +1288,11 @@ install_kernel()
 				((++i))
 			done
 		fi
+
+		[ -f "${ukidir}/${kernel_version}-${ker_chksum}"/"$image" ] || cp "${subvol#"$subvol_prefix"}"/lib/modules/"$kernel_version"/"$image" "${ukidir}/${kernel_version}-${ker_chksum}"/"$image"
+
 		local ukify_args=(
-			--linux="${subvol#"$subvol_prefix"}"/lib/modules/"$kernel_version"/"$image"
+			--linux="${ukidir}/${kernel_version}-${ker_chksum}"/"$image"
 			--output="$tmpdir/uki-${kernel_version}.efi"
 		)
 		if ! reuse_profile "$snapshot" "$kernel_version"; then
@@ -1396,6 +1429,7 @@ cleanup_entries()
 {
 	info "Cleaning up boot entries"
 
+	# Ensure $entryfile is populated
 	if [ ! -s "$entryfile" ]; then
 		if [ -n "$1" ]; then
 			update_entries_for_snapshot "$1"
@@ -1404,17 +1438,62 @@ cleanup_entries()
 		fi
 	fi
 
+	# UKI entries - derive kernel version from UKI's .uname
+	declare -A _seen_uki_pair=()
+	while IFS=$'\t' read -r _id _snap _linux; do
+		key="${_snap}|${_linux}"
+		[ -z "${_seen_uki_pair[$key]+x}" ] || continue
+		_seen_uki_pair[$key]=1
+
+		if [ ! -f "$boot_root$_linux" ]; then
+			dbg "UKI $_linux not found on ESP; skipping"
+			continue
+		fi
+
+		kv="$(uki_uname "$boot_root$_linux")"
+		if [ -z "$kv" ]; then
+			dbg "No .uname in $_linux; skipping"
+			continue
+		fi
+
+		subvol="${subvol_prefix}/.snapshots/${_snap}/snapshot"
+		src="${subvol#"${subvol_prefix}"}/lib/modules/$kv/$image"
+		if [ ! -e "$src" ]; then
+			info "Cleaning UKI for snapshot $_snap, kernel $kv (entry $_id)"
+			ker_chksum="${_linux##*-}"
+			ker_chksum="${ker_chksum%.efi}"
+			remove_uki "$_snap" "$kv" "$ker_chksum"
+		fi
+	done < <(
+		jq -r '
+		  [ .[]
+		    | select(has("linux"))
+		    | select(.linux | test("^/EFI/Linux/.*\\.efi$"))
+		    | ( .options // .cmdline // "" ) as $cmd
+		    | select($cmd | test("rootflags=subvol=(?:@/)?(?:[^ ]*/)?\\.snapshots/\\d+/snapshot"))
+		    | [ .id
+		      , ($cmd | capture("rootflags=subvol=(?:@/)?(?:[^ ]*/)?\\.snapshots/(?<sid>\\d+)/snapshot").sid)
+		      , .linux ] | @tsv ] | .[]' "$entryfile")
+
+	# classic BLS type#1 entries (loader/entries/*.conf) — filter strictly to type1
 	local id snapshot kernel_version subvol src
-	while read -r id; do
-		read -r snapshot
-		read -r kernel_version
+	while IFS=$'\t' read -r id snapshot kernel_version; do
 		subvol="${subvol_prefix}/.snapshots/${snapshot}/snapshot"
 		src="${subvol#"${subvol_prefix}"}/lib/modules/$kernel_version/$image"
-		[ -e "$src" ] || {
+		if [ ! -e "$src" ]; then
 			info "Cleaning boot entry $id"
-			rm "${boot_root}/loader/entries/$id"
-		}
-	done < <(jq -r '.[] | .id, (.version | scan("(.*)@(.*)") | .[])' "$entryfile")
+			# Try both with and without .conf to cover differing bootctl id formats
+			rm -f "${boot_root}/loader/entries/$id" \
+			      "${boot_root}/loader/entries/$id.conf"
+		fi
+	done < <(
+		jq -r '
+		  .[]
+		  | select(.type=="type1")
+		  | (.version | capture("(?<snap>[^@]+)@(?<kv>.+)")) as $m
+		  | [ .id, $m.snap, $m.kv ] | @tsv
+		' "$entryfile"
+	)
 
 	dbg "Calling bootctl cleanup"
 	bootctl -q cleanup 2> /dev/null
