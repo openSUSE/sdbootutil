@@ -1529,7 +1529,7 @@ list_entries()
 		fi
 
 		local errors=()
-		if [ -n "$verbose" ] && [ -n "$conf" ] && [ -e "$conf" ]; then
+		if [ -n "$verbose" ] && [ "$type" = "type1" ] && [ -n "$conf" ] && [ -e "$conf" ]; then
 			local k
 			local v
 			while read -r k v; do
