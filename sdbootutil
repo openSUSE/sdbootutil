@@ -2217,6 +2217,91 @@ loader_conf_get()
 	fi
 }
 
+default_kernel_version_from_id() {
+	local id="$1"
+	local kv=
+
+	# UKI id example:
+	#   openSUSE-6.16.0-1-default-f89b6e7...efi@1
+	if [[ "$id" =~ ^openSUSE-([^-]+-[^-]+-[^-]+)-[0-9a-f]{40}\.efi@ ]]; then
+		kv="${BASH_REMATCH[1]}"
+		echo "$kv"
+		return 0
+	fi
+
+	# Type1/BLS id examples:
+	#   opensuse-tumbleweed-6.16.0-1-default-1.conf
+	#   system-opensuse-tumbleweed-6.16.0-1-default-1+3.conf
+	# General form: <prefix>-<kv>-<snap>[+tries].conf
+	# Extract <kv> as the part between the last-but-one '-' sequence(s) and '-<snap>'
+	# We'll search for "-<snap>" and strip everything after; then take the last '-' chunk as snapshot,
+	# leaving "...-<kv>" before that and isolate <kv>.
+	if [[ "$id" =~ ^[^@]+$ ]]; then
+		local base="${id%.conf}"
+		base="${base%%+*}"                  # drop +tries
+		local head="${base%-[0-9]*}"        # strip -<snap>
+		# head ends in "...-<kv>"; but <kv> itself contains dashes.
+		# Try to capture last 3 dash groups (x-y-z) like "6.16.0-1-default"
+		if [[ "$head" =~ ([0-9]+\.[0-9]+\.[0-9]+-[0-9]+-[^-]+)$ ]]; then
+			kv="${BASH_REMATCH[1]}"
+			echo "$kv"
+			return 0
+		fi
+	fi
+
+	echo ""
+}
+
+pick_entry_id_for_snapshot() {
+	local snapshot="$1"
+
+	# Read current default first (this may overwrite $entryfile)
+	local default_id default_kv
+	default_id="$(get_default_entry || true)"
+	default_kv="$(default_kernel_version_from_id "$default_id")"
+
+	# (re)filter entries strictly to this snapshot
+	update_entries_for_snapshot "$snapshot"
+
+	# Prefer same kernel version as current default, but only for @<snapshot>
+	local candidate=
+	if [ -n "$default_kv" ]; then
+		candidate="$(
+			jq -r --arg kv "$default_kv" --arg snap "$snapshot" '
+			  .[]
+			  | select(.linux? != null)
+			  | select(.linux | test("^/EFI/Linux/openSUSE-" + $kv + "-[0-9a-f]{40}\\.efi$"))
+			  | select(.id | endswith("@" + $snap))
+			  | .id
+			' < "$entryfile" | head -n1
+		)"
+	fi
+
+	# Otherwise: take the first UKI for this snapshot
+	if [ -z "$candidate" ]; then
+		candidate="$(
+			jq -r --arg snap "$snapshot" '
+			  .[]
+			  | select(.linux? != null)
+			  | select(.linux | test("^/EFI/Linux/openSUSE-.*-[0-9a-f]{40}\\.efi$"))
+			  | select(.id | endswith("@" + $snap))
+			  | .id
+			' < "$entryfile" | head -n1
+		)"
+	fi
+
+	# Fallback: any entry for this snapshot
+	if [ -z "$candidate" ]; then
+		candidate="$(
+			jq -r --arg snap "$snapshot" '
+			  .[] | select(.id | endswith("@" + $snap)) | .id
+			' < "$entryfile" | head -n1
+		)"
+	fi
+
+	[ -n "$candidate" ] && echo "$candidate"
+}
+
 grubenv_set()
 {
 	local key="${1:?}"
@@ -2271,15 +2356,21 @@ set_default_grub2_bls()
 	grubenv_set "default" "$id"
 }
 
-set_default_entry()
-{
+set_default_entry() {
 	local id="${1:?}"
 
 	info "Setting default entry $id"
 
-	if [ ! -f "${boot_root}/loader/entries/$id" ] && [ ! -f "${boot_root}/loader/entries/$id.conf" ]; then
-		err "Boot loader entry $id not found"
+	if is_type2_id "$id"; then
+		# Type #2 (UKI): validate via bootctl entries, not filesystem
+		entry_id_exists "$id" || err "Boot loader entry $id not found among loader entries"
+	else
+		# Type #1 (BLS): validate by presence of the .conf file
+		if [ ! -f "${boot_root}/loader/entries/$id" ] && [ ! -f "${boot_root}/loader/entries/$id.conf" ]; then
+			err "Boot loader entry $id not found"
+		fi
 	fi
+
 	if is_sdboot; then
 		set_default_sdboot "$id"
 	elif is_grub2_bls; then
@@ -2395,26 +2486,39 @@ get_timeout()
 	fi
 }
 
-set_default_snapshot()
-{
+entry_id_exists() {
+	local id="${1:?}"
+	local saved="$entryfile"
+	update_entries_for_this_system
+	local ok
+	ok=$(jq -r '.[].id' < "$entryfile" | grep -Fx -- "$id" || true)
+	[ -n "$ok" ]
+	entryfile="$saved"
+}
+
+is_type2_id() {
+	# UKI ids look like: openSUSE-<kv>-<sha40>.efi@<profile-id>
+	[[ "$1" =~ \.efi@[0-9]+$ ]]
+}
+
+set_default_snapshot() {
 	[ -n "$have_snapshots" ] || { info "System does not support snapshots."; return 0; }
 	local num="${1:?}"
-	local configs
 
 	info "Setting default snapshot $num"
 
 	update_entries_for_snapshot "$num"
-	mapfile configs < <(jq '.[]|[.id]|join(" ")' -r < "$entryfile")
-	configs=("${configs[@]%$nl}")
-	if [ -z "${configs[0]}" ]; then
-		info "Snapshot $num has no configs, trying to create them..."
+
+	# Try to pick a best entry id (UKI preferred, same kv as current default if possible)
+	local id
+	id="$(pick_entry_id_for_snapshot "$num" || true)"
+
+	if [ -z "$id" ]; then
+		info "Snapshot $num has no boot entries, trying to create them..."
 		install_all_kernels "$num"
 		update_entries_for_snapshot "$num"
-		mapfile configs < <(jq '.[]|[.id]|join(" ")' -r < "$entryfile")
-		configs=("${configs[@]%$nl}")
-		if [ -z "${configs[0]}" ]; then
-			err "snapshot $num has no kernels"
-		fi
+		id="$(pick_entry_id_for_snapshot "$num" || true)"
+		[ -n "$id" ] || err "snapshot $num has no kernels"
 	fi
 
 	# The default snapshot is not the criteria used for the
@@ -2429,7 +2533,7 @@ set_default_snapshot()
 	btrfs subvolume set-default "${subvolume_id}" /.snapshots
 	rm -f "$snapperfile"
 
-	set_default_entry "${configs[0]}"
+	set_default_entry "$id"
 }
 
 have_pcrlock()
