@@ -521,21 +521,21 @@ update_entries_for_this_system()
 
 declare -A uki_uname_cache
 uki_uname() {
-    local path="${1:?}"
-    if [[ -n "${uki_uname_cache[$path]+x}" ]]; then
-        printf '%s' "${uki_uname_cache[$path]}"; return
-    fi
-    local kv=""
-    # Try JSON first (works with both full and --section outputs)
-    kv="$(ukify inspect --section=.uname --json "$path" 2>/dev/null \
-          | jq -r 'first( (.. | objects | select(.name?==".uname") | .text?) ) // ""')"
-    if [[ -z "$kv" ]]; then
-        # Plain-text fallback: read the line after "text:" within .uname section
-        kv="$(ukify inspect "$path" 2>/dev/null \
-              | awk '$1==".uname:"{f=1;next} f&&$1=="text:"{getline; sub(/^[[:space:]]+/,""); print; exit}')"
-    fi
-    uki_uname_cache[$path]="$kv"
-    printf '%s' "$kv"
+	local path="${1:?}"
+	if [[ -n "${uki_uname_cache[$path]+x}" ]]; then
+		printf '%s' "${uki_uname_cache[$path]}"; return
+	fi
+	local kv=""
+	# Try JSON first (works with both full and --section outputs)
+	kv="$(ukify inspect --section=.uname --json "$path" 2>/dev/null \
+		  | jq -r 'first( (.. | objects | select(.name?==".uname") | .text?) ) // ""')"
+	if [[ -z "$kv" ]]; then
+		# Plain-text fallback: read the line after "text:" within .uname section
+		kv="$(ukify inspect "$path" 2>/dev/null \
+			  | awk '$1==".uname:"{f=1;next} f&&$1=="text:"{getline; sub(/^[[:space:]]+/,""); print; exit}')"
+	fi
+	uki_uname_cache[$path]="$kv"
+	printf '%s' "$kv"
 }
 
 entry_conf_file()
@@ -1114,31 +1114,31 @@ select_uki_entries_for_free_space()
 	bootctl list --json=short | \
 	jq --arg re "$protected_re" --arg run "${running_linux:-}" '
 	  [ .[]
-	    | select(has("linux"))
-	    | select(.linux | test("^/EFI/Linux/.*\\.efi$"))
+		| select(has("linux"))
+		| select(.linux | test("^/EFI/Linux/.*\\.efi$"))
 	  ]
 	  | group_by(.linux)
 	  | map({
-	      linux: .[0].linux,
-	      id: .[0].id,
-	      isDefault: any(.[]; .isDefault == true),
-	      isSelected: any(.[]; .isSelected == true),
-	      snaps: (
-	        [ .[]
-	          | ((.options // .cmdline // ""))
-	          | capture("rootflags=subvol=(?:@/)?(?:[^ ]*/)?\\.snapshots/(?<sid>[0-9]+)/snapshot")?
-	          | .sid? | tonumber?
-	        ] | map(select(. != null))
-	      ),
-	      kernel: ((.[0].linux | scan("(\\d+)\\.(\\d+)\\.(\\d+)-(\\d+)")) | map(tonumber))
-	    })
+		  linux: .[0].linux,
+		  id: .[0].id,
+		  isDefault: any(.[]; .isDefault == true),
+		  isSelected: any(.[]; .isSelected == true),
+		  snaps: (
+			[ .[]
+			  | ((.options // .cmdline // ""))
+			  | capture("rootflags=subvol=(?:@/)?(?:[^ ]*/)?\\.snapshots/(?<sid>[0-9]+)/snapshot")?
+			  | .sid? | tonumber?
+			] | map(select(. != null))
+		  ),
+		  kernel: ((.[0].linux | scan("(\\d+)\\.(\\d+)\\.(\\d+)-(\\d+)")) | map(tonumber))
+		})
 	  | map(. + {
-	      protected: (
-	        .isDefault or .isSelected or (.linux == $run) or
-	        any(.snaps[]?; (tostring | test("^" + $re + "$")))
-	      ),
-	      prio: ((.snaps | select(length>0) | min) // 999999)
-	    })
+		  protected: (
+			.isDefault or .isSelected or (.linux == $run) or
+			any(.snaps[]?; (tostring | test("^" + $re + "$")))
+		  ),
+		  prio: ((.snaps | select(length>0) | min) // 999999)
+		})
 	  | map(select(.protected | not))
 	  | map({id, linux, prio, kernel})
 	' > "$entryfile"
@@ -1146,7 +1146,6 @@ select_uki_entries_for_free_space()
 	dbg "Selected UKI groups for free space"
 	dbg_cat "$entryfile"
 }
-
 
 make_free_space_for_uki()
 {
@@ -1299,21 +1298,21 @@ install_kernel()
 			info "Building UKI profile for snapshot $snapshot"
 			ukify build \
 			  --profile="TITLE=${title}${snapshot:+${nl}ID=$snapshot}" \
-        	  --cmdline="$boot_options" \
-        	  --output="${ukidir}/${kernel_version}-${ker_chksum}/profile-${snapshot}.efi"
+			  --cmdline="$boot_options" \
+			  --output="${ukidir}/${kernel_version}-${ker_chksum}/profile-${snapshot}.efi"
 		else
 			info "Found existing UKI profile for snapshot $snapshot"
 		fi
 		info "Building UKI for kernel $kernel_version"
 		shopt -s nullglob
 		for initrd in "${ukidir}/${kernel_version}-${ker_chksum}"/initrd-*; do
-        	[ -f "$initrd" ] || continue
-        	ukify_args+=(--initrd="$initrd")
-    	done
+			[ -f "$initrd" ] || continue
+			ukify_args+=(--initrd="$initrd")
+		done
 		for prof in "${ukidir}/${kernel_version}-${ker_chksum}"/profile-*.efi; do
-        	[ -f "$prof" ] || continue
-        	ukify_args+=(--join-profile="$prof")
-    	done
+			[ -f "$prof" ] || continue
+			ukify_args+=(--join-profile="$prof")
+		done
 		shopt -u nullglob
 		ukify build "${ukify_args[@]}"
 
@@ -1467,13 +1466,13 @@ cleanup_entries()
 	done < <(
 		jq -r '
 		  [ .[]
-		    | select(has("linux"))
-		    | select(.linux | test("^/EFI/Linux/.*\\.efi$"))
-		    | ( .options // .cmdline // "" ) as $cmd
-		    | select($cmd | test("rootflags=subvol=(?:@/)?(?:[^ ]*/)?\\.snapshots/\\d+/snapshot"))
-		    | [ .id
-		      , ($cmd | capture("rootflags=subvol=(?:@/)?(?:[^ ]*/)?\\.snapshots/(?<sid>\\d+)/snapshot").sid)
-		      , .linux ] | @tsv ] | .[]' "$entryfile")
+			| select(has("linux"))
+			| select(.linux | test("^/EFI/Linux/.*\\.efi$"))
+			| ( .options // .cmdline // "" ) as $cmd
+			| select($cmd | test("rootflags=subvol=(?:@/)?(?:[^ ]*/)?\\.snapshots/\\d+/snapshot"))
+			| [ .id
+			  , ($cmd | capture("rootflags=subvol=(?:@/)?(?:[^ ]*/)?\\.snapshots/(?<sid>\\d+)/snapshot").sid)
+			  , .linux ] | @tsv ] | .[]' "$entryfile")
 
 	# classic BLS type#1 entries (loader/entries/*.conf) — filter strictly to type1
 	local id snapshot kernel_version subvol src
@@ -1484,7 +1483,7 @@ cleanup_entries()
 			info "Cleaning boot entry $id"
 			# Try both with and without .conf to cover differing bootctl id formats
 			rm -f "${boot_root}/loader/entries/$id" \
-			      "${boot_root}/loader/entries/$id.conf"
+				  "${boot_root}/loader/entries/$id.conf"
 		fi
 	done < <(
 		jq -r '
