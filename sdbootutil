@@ -526,7 +526,7 @@ uki_uname() {
 		printf '%s' "${uki_uname_cache[$path]}"; return
 	fi
 	local kv=""
-	# Try JSON first (works with both full and --section outputs)
+	# Try JSON first
 	kv="$(ukify inspect --section=.uname --json "$path" 2>/dev/null \
 		  | jq -r 'first( (.. | objects | select(.name?==".uname") | .text?) ) // ""')"
 	if [[ -z "$kv" ]]; then
@@ -818,7 +818,7 @@ reuse_initrd()
 	ker_chksum="$chksum"
 
 	[ -z "$arg_no_reuse_initrd" ] || return 1
-	settle_entry_token "${snapshot}"+
+	settle_entry_token "${snapshot}"
 
 	# Check if in our UKI build dir is our initrd
 	if [ -n "$use_uki" ]; then
@@ -1213,7 +1213,7 @@ install_kernel()
 
 	info "Installing kernel $kernel_version"
 	dbg_var "snapshot"
-	
+
 	calc_chksum "$src"
 	ker_chksum="$chksum"
 	settle_entry_token "${snapshot}"
@@ -1712,7 +1712,8 @@ update_entry_conf()
 	cp "$tmpdir/entry.conf" "$conf"
 }
 
-update_entry() {
+update_entry()
+{
 	local snapshot="$1"
 	local kernel_version="$2"
 
@@ -1740,7 +1741,8 @@ update_entry() {
 	warn "No entry found to update for kernel $kernel_version (snapshot $snapshot)"
 }
 
-update_all_entries() {
+update_all_entries()
+{
 	local snapshot="$1"
 	make_free_space "$snapshot" 1024
 
@@ -1767,6 +1769,7 @@ update_all_entries() {
 		fi
 	done < <(jq -r '.[] | .linux? // empty' < "$entryfile")
 
+	# This action will require to update the PCR predictions
 	update_predictions=1
 }
 
@@ -1821,7 +1824,8 @@ declare -A installed_kernels
 # Map of ESP path to id of kernels that are not in the subvol
 declare -A stale_kernels
 is_bootable=
-update_kernels() {
+update_kernels()
+{
 	local snapshot="$1"
 	local path id sum
 	installed_kernels=()
@@ -1868,7 +1872,8 @@ kv_from_path() {
 	esac
 }
 
-list_kernels() {
+list_kernels()
+{
 	local snapshot=""
 	[ -z "$have_snapshots" ] || snapshot="${1:?}"
 
@@ -1907,7 +1912,6 @@ list_kernels() {
 		printf "${color_red}stale %s${color_end}\n" "${stale_kernels[$k]}"
 	done
 }
-
 
 list_devices()
 {
@@ -2356,7 +2360,8 @@ set_default_grub2_bls()
 	grubenv_set "default" "$id"
 }
 
-set_default_entry() {
+set_default_entry()
+{
 	local id="${1:?}"
 
 	info "Setting default entry $id"
@@ -2501,7 +2506,8 @@ is_type2_id() {
 	[[ "$1" =~ \.efi@[0-9]+$ ]]
 }
 
-set_default_snapshot() {
+set_default_snapshot()
+{
 	[ -n "$have_snapshots" ] || { info "System does not support snapshots."; return 0; }
 	local num="${1:?}"
 
