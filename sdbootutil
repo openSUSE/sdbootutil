@@ -1556,63 +1556,144 @@ list_entries()
 }
 
 show_entry_fields() {
-    local snapshot="$1"
-    local kernel_version="${2:?Missing kernel version}"
-    settle_entry_token "${snapshot}"
+	local snapshot="$1"
+	local kernel_version="${2:?Missing kernel version}"
+	settle_entry_token "${snapshot}"
 
-    # --- Try classic type1 (BLS *.conf) first ---
-    local id conf
-    id="$(entry_conf_file "$kernel_version" "$snapshot")"
-    conf="$(find_conf_file "$kernel_version" "$snapshot" || true)"
-    if [ -n "$conf" ] && [ -f "$conf" ]; then
-        [ -z "$verbose" ] || echo -e "ID\t$id"
-        local k v
-        while read -r k v; do
-            case "$k" in title|version|sort-key|options|linux|initrd) ;; *) continue ;; esac
-            if [ "${#arg_entry_keys[@]}" -eq 0 ] || [[ ${arg_entry_keys[*]} == *"all"* ]] || [[ ${arg_entry_keys[*]} == *"$k"* ]]; then
-                echo -e "$k\t$v"
-            fi
-        done < "$conf"
-        return
-    fi
+	# --- Try classic type1 (BLS *.conf) first ---
+	local id conf
+	id="$(entry_conf_file "$kernel_version" "$snapshot")"
+	conf="$(find_conf_file "$kernel_version" "$snapshot" || true)"
+	if [ -n "$conf" ] && [ -f "$conf" ]; then
+		[ -z "$verbose" ] || echo -e "ID\t$id"
+		local k v
+		while read -r k v; do
+			case "$k" in title|version|sort-key|options|linux|initrd) ;; *) continue ;; esac
+			if [ "${#arg_entry_keys[@]}" -eq 0 ] || [[ ${arg_entry_keys[*]} == *"all"* ]] || [[ ${arg_entry_keys[*]} == *"$k"* ]]; then
+				echo -e "$k\t$v"
+			fi
+		done < "$conf"
+		return
+	fi
 
-    # --- UKI (type2), only if it matches this snapshot ---
-    update_entries_for_snapshot "$snapshot"
+	# --- UKI (type2), only if it matches this snapshot ---
+	update_entries_for_snapshot "$snapshot"
 
-    # Pull a single matching entry from entries.json:
-    #  - filename contains "-$kernel_version-<hash>.efi"
-    #  - options/cmdline contains rootflags for this snapshot
-    local entry_id title options linux_path
-    IFS=$'\t' read -r entry_id title options linux_path < <(
-        jq -r --arg kv "$kernel_version" --arg snap "$snapshot" '
-          .[] | select(type=="object")
-             | select(.linux? != null)
-             | select(.linux | test("^/EFI/Linux/openSUSE-" + $kv + "-[0-9a-f]{40}\\.efi$"))
-             | select((.options? // .cmdline? // "")
-                      | test("(^| )rootflags=subvol=(?:@/)?(?:[^ ]*/)?\\.snapshots/" + ($snap|tostring) + "/snapshot( |$)"))
-             | [ .id, (.title // .showTitle // ""), (.options // .cmdline // ""), .linux ]
-             | @tsv
-        ' < "$entryfile" | head -n1
-    )
+	# Pull a single matching entry from entries.json:
+	#  - filename contains "-$kernel_version-<hash>.efi"
+	#  - options/cmdline contains rootflags for this snapshot
+	local entry_id title options linux_path
+	IFS=$'\t' read -r entry_id title options linux_path < <(
+		jq -r --arg kv "$kernel_version" --arg snap "$snapshot" '
+		  .[] | select(type=="object")
+			 | select(.linux? != null)
+			 | select(.linux | test("^/EFI/Linux/openSUSE-" + $kv + "-[0-9a-f]{40}\\.efi$"))
+			 | select((.options? // .cmdline? // "")
+					  | test("(^| )rootflags=subvol=(?:@/)?(?:[^ ]*/)?\\.snapshots/" + ($snap|tostring) + "/snapshot( |$)"))
+			 | [ .id, (.title // .showTitle // ""), (.options // .cmdline // ""), .linux ]
+			 | @tsv
+		' < "$entryfile" | head -n1
+	)
 
-    [ -n "$linux_path" ] || err "No UKI entry for kernel $kernel_version that matches snapshot $snapshot."
-    [ -f "$boot_root$linux_path" ] || err "UKI not found on ESP: $boot_root$linux_path"
+	[ -n "$linux_path" ] || err "No UKI entry for kernel $kernel_version that matches snapshot $snapshot."
+	[ -f "$boot_root$linux_path" ] || err "UKI not found on ESP: $boot_root$linux_path"
 
-    # Helper respecting --keys filtering
-    print_kv() {
-        local k="$1" v="$2"
-        if [ "${#arg_entry_keys[@]}" -eq 0 ] || [[ ${arg_entry_keys[*]} == *"all"* ]] || [[ ${arg_entry_keys[*]} == *"$k"* ]]; then
-            echo -e "$k\t$v"
-        fi
-    }
+	# Helper respecting --keys filtering
+	print_kv() {
+		local k="$1" v="$2"
+		if [ "${#arg_entry_keys[@]}" -eq 0 ] || [[ ${arg_entry_keys[*]} == *"all"* ]] || [[ ${arg_entry_keys[*]} == *"$k"* ]]; then
+			echo -e "$k\t$v"
+		fi
+	}
 
-    [ -z "$verbose" ] || echo -e "ID\t$entry_id"
-    print_kv title   "${title}"
-    # For type2 we don't get uname from the entry list; show the kernel version we were asked about.
-    print_kv version "${kernel_version}"
-    print_kv options "${options}"
-    print_kv linux   "${linux_path}"
-    print_kv initrd  "(embedded)"
+	[ -z "$verbose" ] || echo -e "ID\t$entry_id"
+	print_kv title   "${title}"
+	# For type2 we don't get uname from the entry list; show the kernel version we were asked about.
+	print_kv version "${kernel_version}"
+	print_kv options "${options}"
+	print_kv linux   "${linux_path}"
+	print_kv initrd  "(embedded)"
+}
+
+find_uki_for_snapshot() {
+	local snapshot="$1"
+	local kernel_version="$2"
+
+	update_entries_for_snapshot "$snapshot"
+
+	jq -r --arg kv "$kernel_version" --arg snap "$snapshot" '
+	  .[] | select(type=="object")
+		 | select(.linux? != null)
+		 | select(.linux | test("^/EFI/Linux/openSUSE-" + $kv + "-[0-9a-f]{40}\\.efi$"))
+		 | select(
+			 (.options? // .cmdline? // "")
+			 | test("(^| )rootflags=subvol=(?:@/)?(?:[^ ]*/)?\\.snapshots/" + ($snap|tostring) + "/snapshot( |$)")
+		   )
+		 | [ .id, .linux, (.options // .cmdline // ""), (.title // .showTitle // "") ]
+		 | @tsv
+	' < "$entryfile" | head -n1
+}
+
+update_uki_entry_conf() {
+	local snapshot="$1"
+	local kernel_version="$2"
+
+	# Locate matching UKI in entries.json
+	local entry_id linux_path old_opts title
+	IFS=$'\t' read -r entry_id linux_path old_opts title < <(find_uki_for_snapshot "$snapshot" "$kernel_version")
+	[ -n "$linux_path" ] || err "No UKI entry for kernel $kernel_version that matches snapshot $snapshot."
+	[ -f "$boot_root$linux_path" ] || err "UKI not found on ESP: $boot_root$linux_path"
+
+	# Compute subvol & new cmdline
+	local subvol=""
+	[ -z "$have_snapshots" ] || subvol="${subvol_prefix}/.snapshots/${snapshot}/snapshot"
+	local boot_options
+	boot_options="$(create_boot_options "$subvol")"
+
+	# Title: prefer the one from entries.json, else fall back
+	local effective_title="${title:-${os_release_PRETTY_NAME:-Linux $kernel_version}}"
+
+	# Derive checksum from filename (…/openSUSE-<kv>-<sum>.efi)
+	local fname sum kvdir ukidir_kv linuxdir
+	fname="${linux_path##*/}"
+	sum="${fname%.efi}"
+	sum="${sum#openSUSE-$kernel_version-}"
+	linuxdir="$boot_root/EFI/Linux"
+	ukidir_kv="${ukidir}/${kernel_version}-${sum}"
+
+	[ -d "$ukidir_kv" ] || err "UKI working dir not found: $ukidir_kv (kernel $kernel_version, sum $sum)."
+
+	# (Re)build this snapshot's profile
+	info "Updating UKI profile for snapshot $snapshot (kernel $kernel_version)"
+	ukify build \
+		--profile="TITLE=${effective_title}${nl}ID=${snapshot}" \
+		--cmdline="$boot_options" \
+		--output="${ukidir_kv}/profile-${snapshot}.efi"
+
+	# Rebuild the UKI joining ALL initrds and ALL profile-*.efi that still exist
+	local tmp_uki="$tmpdir/uki-${kernel_version}.efi"
+	local ukify_args=( --linux="${ukidir_kv}/${image}" --output="$tmp_uki" )
+
+	shopt -s nullglob
+	local f
+	for f in "${ukidir_kv}"/initrd-*; do
+		[ -f "$f" ] && ukify_args+=( --initrd="$f" )
+	done
+	for f in "${ukidir_kv}"/profile-*.efi; do
+		[ -f "$f" ] && ukify_args+=( --join-profile="$f" )
+	done
+	shopt -u nullglob
+
+	info "Rebuilding UKI image for kernel $kernel_version"
+	ukify build "${ukify_args[@]}"
+
+	make_free_space_for_uki "$snapshot" "$tmp_uki" || err "No free space in $boot_root for rebuilt UKI"
+	install_with_rollback "$tmp_uki" "$linuxdir/openSUSE-${kernel_version}-${sum}.efi" || err "Failed to install rebuilt UKI"
+	rm -f "$tmp_uki"
+	reset_rollback
+
+	# Predictors need refresh
+	update_predictions=1
 }
 
 update_entry_conf()
@@ -1631,38 +1712,61 @@ update_entry_conf()
 	cp "$tmpdir/entry.conf" "$conf"
 }
 
-update_entry()
-{
+update_entry() {
 	local snapshot="$1"
 	local kernel_version="$2"
 
 	settle_entry_token "${snapshot}"
-	local id
-	id="$(entry_conf_file "$kernel_version" "$snapshot")"
 
+	# Type1 first
 	local conf
-	conf="$(find_conf_file "$kernel_version" "$snapshot")"
-	[ -f "$conf" ] || return 0
+	conf="$(find_conf_file "$kernel_version" "$snapshot" || true)"
+	if [ -n "$conf" ] && [ -f "$conf" ]; then
+		local id
+		id="$(entry_conf_file "$kernel_version" "$snapshot")"
+		info "Updating boot entry $id"
+		update_entry_conf "$conf" "$snapshot"
+		update_predictions=1
+		return
+	fi
 
-	info "Updating boot entry $id"
-	update_entry_conf "$conf" "$snapshot"
+	# UKI path
+	if [ -n "${use_uki:-1}" ]; then
+		info "Updating UKI entry for kernel $kernel_version (snapshot $snapshot)"
+		update_uki_entry_conf "$snapshot" "$kernel_version"
+		return
+	fi
 
-	# This action will require to update the PCR predictions
-	update_predictions=1
+	warn "No entry found to update for kernel $kernel_version (snapshot $snapshot)"
 }
 
-update_all_entries()
-{
+update_all_entries() {
 	local snapshot="$1"
-
 	make_free_space "$snapshot" 1024
 
-	update_entries_for_snapshot "$1"
-	while read -r conf; do
-		update_entry_conf "$conf" "$snapshot"
-	done < <(jq -r '.[]|.path' < "$entryfile")
+	update_entries_for_snapshot "$snapshot"
 
-	# This action will require to update the PCR predictions
+	# Update classic BLS entries (have .path that is a *.conf on disk)
+	while read -r conf; do
+		[ -f "$conf" ] || continue
+		update_entry_conf "$conf" "$snapshot"
+	done < <(jq -r '.[] | select(.path? != null) | .path' < "$entryfile")
+
+	# Update UKI entries (have .linux pointing to /EFI/Linux/openSUSE-<kv>-<sum>.efi)
+	# Extract kernel version from the filename and rebuild each once.
+	local kvs_seen=()
+	while read -r linux_path; do
+		[ -n "$linux_path" ] || continue
+		local base kv
+		base="${linux_path##*/}"                 # openSUSE-<kv>-<sum>.efi
+		kv="${base#openSUSE-}"; kv="${kv%-*}"    # strip prefix and trailing -<sum>.efi
+		# de-duplicate kernel versions in case multiple entries point to the same UKI
+		if [[ " ${kvs_seen[*]} " != *" $kv "* ]]; then
+			kvs_seen+=("$kv")
+			update_uki_entry_conf "$snapshot" "$kv"
+		fi
+	done < <(jq -r '.[] | .linux? // empty' < "$entryfile")
+
 	update_predictions=1
 }
 
