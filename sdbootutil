@@ -666,7 +666,7 @@ remove_uki()
 	if [ "${#remaining_profiles[@]}" -gt 0 ]; then
 		info "Rebuilding UKI for kernel $kernel_version for remaining snapshots"
 		local out="$tmpdir/uki-${kernel_version}.efi"
-		build_uki_image "$kernel_version" "$ker_chksum" "$out"
+		build_uki_image "$kernel_version" "$ker_chksum" "$out" "$snapshot"
 		make_free_space_for_uki "$snapshot" "$out" || err "No free space for rebuilt UKI"
 		install_with_rollback "$out" "$linuxdir/openSUSE-$kernel_version-$ker_chksum.efi" || failed="UKI"
 		rm -f "$out"
@@ -1277,7 +1277,7 @@ install_kernel()
 
 		# Build the combined UKI
 		local out="$tmpdir/uki-${kernel_version}.efi"
-		build_uki_image "$kernel_version" "$ker_chksum" "$out"
+		build_uki_image "$kernel_version" "$ker_chksum" "$out" "$snapshot"
 		make_free_space_for_uki "$snapshot" "$out" || err "No free space in $boot_root for new UKI"
 		install_with_rollback "$out" "$linuxdir/openSUSE-$kernel_version-$ker_chksum.efi" || failed="UKI"
 		rm -f "$out"
@@ -1617,7 +1617,7 @@ update_uki_profile()
 
 	local out="$tmpdir/uki-${kv}.efi"
 	info "Rebuilding UKI image for kernel $kv"
-	build_uki_image "$kv" "$sum" "$out"
+	build_uki_image "$kv" "$sum" "$out" "$snapshot"
 	make_free_space_for_uki "$snapshot" "$out" || err "No free space in $boot_root for rebuilt UKI"
 	install_with_rollback "$out" "$boot_root/EFI/Linux/openSUSE-${kv}-${sum}.efi" || err "Failed to install rebuilt UKI"
 	rm -f "$out"
@@ -2395,13 +2395,120 @@ kernel_sum_for_snapshot()
 	echo "$chksum"
 }
 
+extract_running_snapshot_id()
+{
+	sed -nE 's/.*rootflags=subvol=(@\/)?([^ ]*\/)?\.snapshots\/([0-9]+)\/snapshot.*/\3/p' /proc/cmdline \
+	| head -n1 || true
+}
+
+select_profiles_for_uki()
+{
+	local snap="${1:?}"
+	local dir="${2:?}"
+
+	shopt -s nullglob
+	local profiles=( "$dir"/profile-*.efi )
+	shopt -u nullglob
+	[ "${#profiles[@]}" -gt 0 ] || return 0
+
+	local protected_re
+	protected_re="$(regex_snapshot_ids_for_free_space "$snap")"
+
+	local running_sid
+	running_sid="$(extract_running_snapshot_id || true)"
+
+	# Build JSON for available profiles from filenames
+	local profiles_json
+	profiles_json="$(
+		printf '%s\n' "${profiles[@]}" | jq -R '
+		  select(test("/profile-[0-9]+\\.efi$"))
+		  | {file: ., sid: (capture("/profile-(?<sid>[0-9]+)\\.efi$").sid | tonumber)}
+		' | jq -s '.'
+	)"
+
+	local bootctl_json
+	bootctl_json="$(bootctl list --json=short 2>/dev/null)"
+	: "${bootctl_json:='[]'}"
+
+	local prot_json
+	prot_json="$(
+		jq -n \
+		   --arg run "${running_sid:-}" \
+		   --argjson boot "$bootctl_json" '
+		  def sid_from_opts($s):
+			($s // "")
+			| capture("rootflags=subvol=(?:@/)?(?:[^ ]*/)?\\.snapshots/(?<sid>[0-9]+)/snapshot")?
+			| .sid? // empty
+			| tonumber;
+
+		  [
+			($run | select(. != "") | tonumber)?,
+			($boot[]? | select(.isDefault == true or .isSelected == true)
+			  | sid_from_opts((.options // .cmdline))
+			)?
+		  ]
+		  | map(select(. != null))
+		  | unique
+		'
+	)"
+
+	# Decide which profiles to keep (max 8). Prefer protected; then newest SIDs.
+	jq -rn --arg re "$protected_re" \
+			 --argjson profiles "$profiles_json" \
+			 --argjson prot "$prot_json" '
+		$profiles
+		| map(. as $p
+			| $p + {
+				protected: (
+				  ($p.sid | tostring | test("^" + $re + "$"))
+				  or
+				  (($prot | index($p.sid)) != null)
+				),
+				prio: $p.sid
+			  }
+		  )
+		| ( [ .[] | select(.protected) ] | sort_by(.prio) | reverse ) as $keep_prot
+		| ( [ .[] | select(.protected | not) ] | sort_by(.prio) | reverse ) as $keep_rest
+		| ($keep_prot + $keep_rest)[:8]
+		| .[] | .file
+	'
+}
+
 ukify_collect_args()
 {
 	local dir="${1:?}"
+	local snapshot="${2:?}"
 	shopt -s nullglob
 	local f
+
 	for f in "${dir}"/initrd-*; do [ -f "$f" ] && echo "--initrd=$f"; done
-	for f in "${dir}"/profile-*.efi; do [ -f "$f" ] && echo "--join-profile=$f"; done
+
+	mapfile -t uki_keep < <(select_profiles_for_uki "${snapshot:-${arg_default_snapshot:-0}}" "$dir")
+
+	declare -A keep_map=()
+	for f in "${uki_keep[@]}"; do keep_map["$f"]=1; done
+
+	local all_profiles=( "$dir"/profile-*.efi )
+	local dropped_profiles=()
+	local dropped_snapshots=()
+
+	for f in "${all_profiles[@]}"; do
+		if [ -f "$f" ] && [ -z "${keep_map["$f"]}" ]; then
+			dropped_profiles+=( "$f" )
+			local b; b="$(basename -- "$f")"
+			if [[ "$b" =~ ^profile-([0-9]+)\.efi$ ]]; then
+				dropped_snapshots+=( "${BASH_REMATCH[1]}" )
+			fi
+		fi
+	done
+
+	if [ "${#dropped_profiles[@]}" -gt 0 ]; then
+		warn "Dropping UKI profiles for snapshots: ${dropped_snapshots[*]}"
+		for f in "${dropped_profiles[@]}"; do rm -f -- "$f"; done
+	fi
+
+	for f in "${uki_keep[@]}"; do [ -f "$f" ] && echo "--join-profile=$f"; done
+
 	shopt -u nullglob
 }
 
@@ -2424,12 +2531,12 @@ build_uki_profile()
 
 build_uki_image()
 {
-	local kv="${1:?}" sum="${2:?}" out="${3:?}"
+	local kv="${1:?}" sum="${2:?}" out="${3:?}" snapshot="${4:?}"
 	local dir; dir="$(build_uki_workdir "$kv" "$sum")"
 	local linux_src="${dir}/${image}"
 	[ -f "$linux_src" ] || err "Missing ${linux_src} (kernel copy not staged)."
 
-	mapfile -t extra < <(ukify_collect_args "$dir")
+	mapfile -t extra < <(ukify_collect_args "$dir" "$snapshot")
 	ukify build --linux="$linux_src" --output="$out" "${extra[@]}"
 }
 
