@@ -307,6 +307,14 @@ is_secure_boot()
 	grep -q $'\x01' /sys/firmware/efi/efivars/SecureBoot-8be4df61-93ca-11d2-aa0d-00e098032b8c
 }
 
+use_uki()
+{
+	if [ "$UNIFIED_KERNEL_IMAGE" == "yes" ]; then
+		return
+	fi
+	return 1
+}
+
 is_sdboot()
 {
 	local sdboot grub2_bls
@@ -489,21 +497,44 @@ update_entries()
 
 update_entries_for_subvol()
 {
-	local subvol="$1"
+	local subvol="${1:?}"
 	local ext="${2:-}"
 
-	[ -z "$ext" ] || ext="|$ext"
-	# Look at .options (BLS #1) OR .cmdline (UKI auto-entry)
-	update_entries jq "[.[] \
-	  | select(has(\"options\") or has(\"cmdline\")) \
-	  | select((.options // .cmdline) \
-	  | test(\"root=(?:UUID=$root_uuid|$root_device) .*rootflags=subvol=$subvol\")$ext)]"
+	# Try to extract the snapshot number from the subvol path
+	local snap=
+	snap="$(printf '%s\n' "$subvol" | sed -n 's@.*/\.snapshots/\([0-9]\+\)/snapshot$@\1@p')"
+
+	[ -n "$snap" ] || err "No snapshot number detected!"
+	update_entries_for_snapshot "$snap" "$ext"
 }
 
 update_entries_for_snapshot()
 {
-	local n="$1"
-	update_entries_for_subvol "${subvol_prefix}/.snapshots/$n/snapshot"
+	local n="${1:?}"
+	local ext="${2:-}"
+
+	# shellcheck disable=SC2016
+	update_entries jq \
+	  --arg snap "$n" \
+	  --arg root_uuid "$root_uuid" \
+	  --arg root_device "$root_device" '
+	  [ .[]
+		| select(has("options") or has("cmdline"))
+		| (
+			(.options? // .cmdline? // "")
+		  ) as $cmd
+		| select(
+			($cmd | test("(^| )root=(?:UUID=" + $root_uuid + "|" + $root_device + ")( |$)"))
+			and
+			($cmd | test("(^| )rootflags=subvol=(?:@/)?(?:[^ ]*/)?\\.snapshots/" + $snap + "/snapshot( |$)"))
+		  )
+	  ]'
+
+	# If caller provided an extra filter, apply it in a second pass
+	if [ -n "$ext" ]; then
+		tmp="$(mktemp -t sdbootutil.entries.XXXXXX)"
+		jq "${ext}" < "$entryfile" > "$tmp" && mv "$tmp" "$entryfile"
+	fi
 }
 
 update_entries_for_snapshot_invert()
@@ -517,25 +548,6 @@ update_entries_for_this_system()
 	update_entries jq "[.[] \
 	  | select(has(\"options\") or has(\"cmdline\")) \
 	  | select((.options // .cmdline) | test(\"root=(?:UUID=$root_uuid|$root_device)\"))]"
-}
-
-declare -A uki_uname_cache
-uki_uname() {
-	local path="${1:?}"
-	if [[ -n "${uki_uname_cache[$path]+x}" ]]; then
-		printf '%s' "${uki_uname_cache[$path]}"; return
-	fi
-	local kv=""
-	# Try JSON first
-	kv="$(ukify inspect --section=.uname --json "$path" 2>/dev/null \
-		  | jq -r 'first( (.. | objects | select(.name?==".uname") | .text?) ) // ""')"
-	if [[ -z "$kv" ]]; then
-		# Plain-text fallback: read the line after "text:" within .uname section
-		kv="$(ukify inspect "$path" 2>/dev/null \
-			  | awk '$1==".uname:"{f=1;next} f&&$1=="text:"{getline; sub(/^[[:space:]]+/,""); print; exit}')"
-	fi
-	uki_uname_cache[$path]="$kv"
-	printf '%s' "$kv"
 }
 
 entry_conf_file()
@@ -625,6 +637,74 @@ settle_entry_token()
 	return 0
 }
 
+remove_uki()
+{
+	local snapshot="${1:?}"
+	local kernel_version="${2:?}"
+	local ker_chksum="${3:-}"
+
+	# Compute sum if not provided
+	if [ -z "$ker_chksum" ]; then
+		ker_chksum="$(kernel_sum_for_snapshot "$snapshot" "$kernel_version")"
+	fi
+
+	local work; work="$(build_uki_workdir "$kernel_version" "$ker_chksum")"
+	local prof="$work/profile-${snapshot}.efi"
+	local linuxdir="$boot_root/EFI/Linux"
+
+	if [ -f "$prof" ]; then
+		info "Deleting profile for snapshot $snapshot"
+		rm -f "$prof"
+	else
+		warn "Profile for snapshot $snapshot not found; skipping delete"
+	fi
+
+	shopt -s nullglob
+	local remaining_profiles=( "$work"/profile-*.efi )
+	shopt -u nullglob
+
+	if [ "${#remaining_profiles[@]}" -gt 0 ]; then
+		info "Rebuilding UKI for kernel $kernel_version for remaining snapshots"
+		local out="$tmpdir/uki-${kernel_version}.efi"
+		build_uki_image "$kernel_version" "$ker_chksum" "$out"
+		make_free_space_for_uki "$snapshot" "$out" || err "No free space for rebuilt UKI"
+		install_with_rollback "$out" "$linuxdir/openSUSE-$kernel_version-$ker_chksum.efi" || failed="UKI"
+		rm -f "$out"
+		[ -z "$failed" ] || err "Failed to install $failed"
+		reset_rollback
+	else
+		info "No snapshots left for $kernel_version; removing all artifacts"
+		rm -rf "$work"
+		rm -f "$linuxdir/openSUSE-${kernel_version}-"*.efi
+	fi
+
+	update_predictions=1
+}
+
+remove_kernel()
+{
+	local snapshot="$1"
+	local kernel_version="$2"
+	[ -n "$kernel_version" ] || err "Missing kernel version"
+
+	info "Removing kernel $kernel_version"
+	dbg_var "snapshot"
+
+	if use_uki; then
+		remove_uki "$snapshot" "$kernel_version"
+		return
+	fi
+
+	settle_entry_token "${snapshot}"
+	local id
+	id="$(entry_conf_file "$kernel_version" "$snapshot")"
+	info "Removing boot entry $id"
+	bootctl unlink "$id"
+
+	# This action will require to update the PCR predictions
+	update_predictions=1
+}
+
 install_with_rollback()
 {
 	local src="${1:?}"
@@ -641,99 +721,6 @@ install_with_rollback()
 	install -p -m 0644 "$src" "$dst" || return "$?"
 	chown root:root "$dst" 2>/dev/null || :
 	info "Installed $dst"
-}
-
-remove_uki()
-{
-	local snapshot="$1"
-	local kernel_version="$2"
-	local ker_chksum="$3"
-	local linuxdir="$boot_root/EFI/Linux"
-	
-	subvol="${subvol_prefix}/.snapshots/${snapshot}/snapshot"
-	if [ -z "$ker_chksum" ]; then
-		local src="${subvol#"${subvol_prefix}"}/lib/modules/$kernel_version/$image"
-		calc_chksum "$src"
-		ker_chksum="$chksum"
-	fi
-
-	# Remove this snapshot's profile
-	local dir="${ukidir}/${kernel_version}-${ker_chksum}"
-	local prof="$dir/profile-${snapshot}.efi"
-	dbg "Profile path: $prof"
-	if [ -f "$prof" ]; then
-		info "Deleting profile for snapshot $snapshot"
-		rm -f "$prof"
-	else
-		warn "Profile for snapshot $snapshot not found; skipping delete"
-	fi
-
-	# Rebuild or purge UKI
-	shopt -s nullglob
-	# gather remaining profiles
-	local remaining_profiles=( "$dir"/profile-*.efi )
-	shopt -u nullglob
-
-	if [ "${#remaining_profiles[@]}" -gt 0 ]; then
-		# still have other profiles --> rebuild UKI
-		info "Rebuilding UKI for kernel $kernel_version for remaining snapshots"
-		local tmp_uki="$tmpdir/uki-${kernel_version}.efi"
-		local ukify_args=(
-			--linux="${ukidir}/${kernel_version}-${ker_chksum}"/"$image"
-			--output="$tmp_uki"
-		)
-		# add all initrds
-		for initrd in "$dir"/initrd-*; do
-			[ -f "$initrd" ] || continue
-			ukify_args+=(--initrd="$initrd")
-		done
-		# add all remaining profiles
-		for p in "${remaining_profiles[@]}"; do
-			ukify_args+=(--join-profile="$p")
-		done
-
-		ukify build "${ukify_args[@]}"
-		make_free_space_for_uki "$snapshot" "$tmp_uki" || err "No free space in $boot_root for new UKI"
-		install_with_rollback "$tmp_uki" "$linuxdir/openSUSE-$kernel_version-$ker_chksum.efi"  || failed="UKI"
-		rm -f "$tmp_uki"
-
-		[ -z "$failed" ] || err "Failed to install $failed"
-		reset_rollback
-
-	else
-		# no profiles left --> remove entire kernel dir + UKI file
-		info "No snapshots left for $kernel_version; removing all artifacts"
-		rm -rf "$dir"
-		# remove the on-disk UKI(s)
-		rm -f "$linuxdir/openSUSE-${kernel_version}-"*.efi
-	fi
-
-	# This action will require to update the PCR predictions
-	update_predictions=1
-}
-
-remove_kernel()
-{
-	local snapshot="$1"
-	local kernel_version="$2"
-	[ -n "$kernel_version" ] || err "Missing kernel version"
-
-	info "Removing kernel $kernel_version"
-	dbg_var "snapshot"
-
-	if [ -n "$use_uki" ]; then
-		remove_uki "$snapshot" "$kernel_version"
-		return
-	fi
-
-	settle_entry_token "${snapshot}"
-	local id
-	id="$(entry_conf_file "$kernel_version" "$snapshot")"
-	info "Removing boot entry $id"
-	bootctl unlink "$id"
-
-	# This action will require to update the PCR predictions
-	update_predictions=1
 }
 
 update_snapper()
@@ -821,7 +808,7 @@ reuse_initrd()
 	settle_entry_token "${snapshot}"
 
 	# Check if in our UKI build dir is our initrd
-	if [ -n "$use_uki" ]; then
+	if use_uki; then
 		[ -f "${ukidir}/${kernel_version}-${ker_chksum}/initrd-0" ]
 		return $?
 	fi
@@ -856,17 +843,11 @@ reuse_initrd()
 
 reuse_profile()
 {
-	local snapshot="$1"
-	local kernel_version="${2:?}"
-	subvol="${subvol_prefix}/.snapshots/${snapshot}/snapshot"
-	local src="${subvol#"${subvol_prefix}"}/lib/modules/$kernel_version/$image"
-	calc_chksum "$src"
-	ker_chksum="$chksum"
+	local snapshot="${1:?}" kernel_version="${2:?}"
 
 	[ -z "$arg_no_reuse_profile" ] || return 1
-
-	# Check if a profile already exists for the snapshot
-	[ -f "${ukidir}/${kernel_version}-${ker_chksum}/profile-${snapshot}.efi" ]
+	local sum; sum="$(kernel_sum_for_snapshot "$snapshot" "$kernel_version")"
+	[ -f "$(build_uki_workdir "$kernel_version" "$sum")/profile-${snapshot}.efi" ]
 }
 
 mount_chroot()
@@ -1187,7 +1168,8 @@ make_free_space_for_uki()
 	[ "$total_size" -lt "$free_space" ]
 }
 
-create_boot_options() {
+create_boot_options()
+{
 	local subvol="$1"
 	local boot_options=
 	for i in "${subvol:1}/etc/kernel/cmdline" "${subvol:1}/usr/lib/kernel/cmdline" /proc/cmdline; do
@@ -1223,8 +1205,6 @@ install_kernel()
 	local initrd="${src%/*}/initrd"
 
 	mkdir -p "$boot_root${dst%/*}"
-	[ -z "$use_uki" ] || mkdir -p "$linuxdir"
-	[ -z "$use_uki" ] || mkdir -p "${ukidir}/${kernel_version}-${ker_chksum}"
 
 	if [ -e "$initrd" ]; then
 		ln -s "$initrd" "$tmpdir/initrd-0"
@@ -1278,53 +1258,31 @@ install_kernel()
 		add_kernel_version_to_title
 	fi
 
-	if [ -n "$use_uki" ]; then
-		if [ -e "$tmpdir/initrd-0" ]; then
-			i=0
-			while [ -e "$tmpdir/initrd-$i" ]; do
-				install_with_rollback "$tmpdir/initrd-$i" "${ukidir}/${kernel_version}-${ker_chksum}/initrd-$i" || { failed=initrd; break; }
-				rm -f "$tmpdir/initrd-$i"
-				((++i))
-			done
-		fi
+	if use_uki; then
+		# Copy initrds into workdir
+		local i=0 work; work="$(build_uki_workdir "$kernel_version" "$ker_chksum")"
+		while [ -e "$tmpdir/initrd-$i" ]; do
+			install_with_rollback "$tmpdir/initrd-$i" "$work/initrd-$i" || { failed=initrd; break; }
+			rm -f "$tmpdir/initrd-$i"
+			((++i))
+		done
+		ensure_image_in_workdir "$snapshot" "$kernel_version" "$ker_chksum"
 
-		[ -f "${ukidir}/${kernel_version}-${ker_chksum}"/"$image" ] || cp "${subvol#"$subvol_prefix"}"/lib/modules/"$kernel_version"/"$image" "${ukidir}/${kernel_version}-${ker_chksum}"/"$image"
-
-		local ukify_args=(
-			--linux="${ukidir}/${kernel_version}-${ker_chksum}"/"$image"
-			--output="$tmpdir/uki-${kernel_version}.efi"
-		)
+		# Create/refresh this snapshot's profile if missing or --no-reuse-profile
 		if ! reuse_profile "$snapshot" "$kernel_version"; then
-			info "Building UKI profile for snapshot $snapshot"
-			ukify build \
-			  --profile="TITLE=${title}${snapshot:+${nl}ID=$snapshot}" \
-			  --cmdline="$boot_options" \
-			  --output="${ukidir}/${kernel_version}-${ker_chksum}/profile-${snapshot}.efi"
+			build_uki_profile "$snapshot" "$kernel_version" "$ker_chksum" "$boot_options"
 		else
 			info "Found existing UKI profile for snapshot $snapshot"
 		fi
-		info "Building UKI for kernel $kernel_version"
-		shopt -s nullglob
-		for initrd in "${ukidir}/${kernel_version}-${ker_chksum}"/initrd-*; do
-			[ -f "$initrd" ] || continue
-			ukify_args+=(--initrd="$initrd")
-		done
-		for prof in "${ukidir}/${kernel_version}-${ker_chksum}"/profile-*.efi; do
-			[ -f "$prof" ] || continue
-			ukify_args+=(--join-profile="$prof")
-		done
-		shopt -u nullglob
-		ukify build "${ukify_args[@]}"
 
-		make_free_space_for_uki "$snapshot" "$tmpdir/uki-${kernel_version}.efi" || err "No free space in $boot_root for new UKI"
-
-		install_with_rollback "$tmpdir/uki-${kernel_version}.efi" "$linuxdir/openSUSE-$kernel_version-$chksum.efi" || failed="UKI"
-		rm -f "$tmpdir/uki-${kernel_version}.efi"
-
+		# Build the combined UKI
+		local out="$tmpdir/uki-${kernel_version}.efi"
+		build_uki_image "$kernel_version" "$ker_chksum" "$out"
+		make_free_space_for_uki "$snapshot" "$out" || err "No free space in $boot_root for new UKI"
+		install_with_rollback "$out" "$linuxdir/openSUSE-$kernel_version-$ker_chksum.efi" || failed="UKI"
+		rm -f "$out"
 		[ -z "$failed" ] || err "Failed to install $failed"
 		reset_rollback
-
-		# This action will require to update the PCR predictions
 		update_predictions=1
 		return
 	fi
@@ -1449,7 +1407,7 @@ cleanup_entries()
 			continue
 		fi
 
-		kv="$(uki_uname "$boot_root$_linux")"
+		kv="$(kv_from_any "$_linux"  "$_snap")"
 		if [ -z "$kv" ]; then
 			dbg "No .uname in $_linux; skipping"
 			continue
@@ -1555,7 +1513,8 @@ list_entries()
 	done < <(jq '.[]|[.isDefault, if has("isReported") then .isReported else 0 end, if has("type") then .type else "unknown" end, .id, .root, .path, .showTitle]|join(" ")' -r < "$entryfile")
 }
 
-show_entry_fields() {
+show_entry_fields()
+{
 	local snapshot="$1"
 	local kernel_version="${2:?Missing kernel version}"
 	settle_entry_token "${snapshot}"
@@ -1599,7 +1558,8 @@ show_entry_fields() {
 	[ -f "$boot_root$linux_path" ] || err "UKI not found on ESP: $boot_root$linux_path"
 
 	# Helper respecting --keys filtering
-	print_kv() {
+	print_kv()
+	{
 		local k="$1" v="$2"
 		if [ "${#arg_entry_keys[@]}" -eq 0 ] || [[ ${arg_entry_keys[*]} == *"all"* ]] || [[ ${arg_entry_keys[*]} == *"$k"* ]]; then
 			echo -e "$k\t$v"
@@ -1615,7 +1575,8 @@ show_entry_fields() {
 	print_kv initrd  "(embedded)"
 }
 
-find_uki_for_snapshot() {
+find_uki_for_snapshot()
+{
 	local snapshot="$1"
 	local kernel_version="$2"
 
@@ -1634,65 +1595,35 @@ find_uki_for_snapshot() {
 	' < "$entryfile" | head -n1
 }
 
-update_uki_entry_conf() {
-	local snapshot="$1"
-	local kernel_version="$2"
+update_uki_profile()
+{
+	local snapshot="${1:?}" kv="${2:?}"
 
-	# Locate matching UKI in entries.json
 	local entry_id linux_path old_opts title
-	IFS=$'\t' read -r entry_id linux_path old_opts title < <(find_uki_for_snapshot "$snapshot" "$kernel_version")
-	[ -n "$linux_path" ] || err "No UKI entry for kernel $kernel_version that matches snapshot $snapshot."
+	IFS=$'\t' read -r entry_id linux_path old_opts title < <(find_uki_entry "$snapshot" "$kv")
+	[ -n "$linux_path" ] || err "No UKI entry for kernel $kv that matches snapshot $snapshot."
 	[ -f "$boot_root$linux_path" ] || err "UKI not found on ESP: $boot_root$linux_path"
 
-	# Compute subvol & new cmdline
-	local subvol=""
-	[ -z "$have_snapshots" ] || subvol="${subvol_prefix}/.snapshots/${snapshot}/snapshot"
-	local boot_options
-	boot_options="$(create_boot_options "$subvol")"
+	# Derive kv/sum & ensure linux staged in workdir
+	local _kv sum; read -r _kv sum < <(uki_sum_from_path "$linux_path")
+	local work; work="$(build_uki_workdir "$kv" "$sum")"
+	[ -d "$work" ] || err "UKI working dir not found: $work"
 
-	# Title: prefer the one from entries.json, else fall back
-	local effective_title="${title:-${os_release_PRETTY_NAME:-Linux $kernel_version}}"
+	local subvol="${subvol_prefix}/.snapshots/${snapshot}/snapshot"
+	local boot_options; boot_options="$(create_boot_options "$subvol")"
 
-	# Derive checksum from filename (…/openSUSE-<kv>-<sum>.efi)
-	local fname sum kvdir ukidir_kv linuxdir
-	fname="${linux_path##*/}"
-	sum="${fname%.efi}"
-	sum="${sum#openSUSE-$kernel_version-}"
-	linuxdir="$boot_root/EFI/Linux"
-	ukidir_kv="${ukidir}/${kernel_version}-${sum}"
+	info "Updating UKI profile for snapshot $snapshot (kernel $kv)"
+	build_uki_profile "$snapshot" "$kv" "$sum" "$boot_options"
 
-	[ -d "$ukidir_kv" ] || err "UKI working dir not found: $ukidir_kv (kernel $kernel_version, sum $sum)."
-
-	# (Re)build this snapshot's profile
-	info "Updating UKI profile for snapshot $snapshot (kernel $kernel_version)"
-	ukify build \
-		--profile="TITLE=${effective_title}${nl}ID=${snapshot}" \
-		--cmdline="$boot_options" \
-		--output="${ukidir_kv}/profile-${snapshot}.efi"
-
-	# Rebuild the UKI joining ALL initrds and ALL profile-*.efi that still exist
-	local tmp_uki="$tmpdir/uki-${kernel_version}.efi"
-	local ukify_args=( --linux="${ukidir_kv}/${image}" --output="$tmp_uki" )
-
-	shopt -s nullglob
-	local f
-	for f in "${ukidir_kv}"/initrd-*; do
-		[ -f "$f" ] && ukify_args+=( --initrd="$f" )
-	done
-	for f in "${ukidir_kv}"/profile-*.efi; do
-		[ -f "$f" ] && ukify_args+=( --join-profile="$f" )
-	done
-	shopt -u nullglob
-
-	info "Rebuilding UKI image for kernel $kernel_version"
-	ukify build "${ukify_args[@]}"
-
-	make_free_space_for_uki "$snapshot" "$tmp_uki" || err "No free space in $boot_root for rebuilt UKI"
-	install_with_rollback "$tmp_uki" "$linuxdir/openSUSE-${kernel_version}-${sum}.efi" || err "Failed to install rebuilt UKI"
-	rm -f "$tmp_uki"
+	local out="$tmpdir/uki-${kv}.efi"
+	info "Rebuilding UKI image for kernel $kv"
+	build_uki_image "$kv" "$sum" "$out"
+	make_free_space_for_uki "$snapshot" "$out" || err "No free space in $boot_root for rebuilt UKI"
+	install_with_rollback "$out" "$boot_root/EFI/Linux/openSUSE-${kv}-${sum}.efi" || err "Failed to install rebuilt UKI"
+	rm -f "$out"
 	reset_rollback
 
-	# Predictors need refresh
+	# This action will require to update the PCR predictions
 	update_predictions=1
 }
 
@@ -1732,9 +1663,9 @@ update_entry()
 	fi
 
 	# UKI path
-	if [ -n "${use_uki:-1}" ]; then
+	if use_uki; then
 		info "Updating UKI entry for kernel $kernel_version (snapshot $snapshot)"
-		update_uki_entry_conf "$snapshot" "$kernel_version"
+		update_uki_profile "$snapshot" "$kernel_version"
 		return
 	fi
 
@@ -1743,29 +1674,25 @@ update_entry()
 
 update_all_entries()
 {
-	local snapshot="$1"
+	local snapshot="${1:?}"
 	make_free_space "$snapshot" 1024
 
 	update_entries_for_snapshot "$snapshot"
 
-	# Update classic BLS entries (have .path that is a *.conf on disk)
+	# Type #1 (BLS) updates
 	while read -r conf; do
 		[ -f "$conf" ] || continue
 		update_entry_conf "$conf" "$snapshot"
 	done < <(jq -r '.[] | select(.path? != null) | .path' < "$entryfile")
 
-	# Update UKI entries (have .linux pointing to /EFI/Linux/openSUSE-<kv>-<sum>.efi)
-	# Extract kernel version from the filename and rebuild each once.
-	local kvs_seen=()
+	# Type #2 (UKI) updates — dedupe by kv
+	local seen=()
 	while read -r linux_path; do
 		[ -n "$linux_path" ] || continue
-		local base kv
-		base="${linux_path##*/}"                 # openSUSE-<kv>-<sum>.efi
-		kv="${base#openSUSE-}"; kv="${kv%-*}"    # strip prefix and trailing -<sum>.efi
-		# de-duplicate kernel versions in case multiple entries point to the same UKI
-		if [[ " ${kvs_seen[*]} " != *" $kv "* ]]; then
-			kvs_seen+=("$kv")
-			update_uki_entry_conf "$snapshot" "$kv"
+		local kv sum; read -r kv sum < <(uki_sum_from_path "$linux_path") || continue
+		if [[ " ${seen[*]} " != *" $kv "* ]]; then
+			seen+=("$kv")
+			update_uki_profile "$snapshot" "$kv"
 		fi
 	done < <(jq -r '.[] | .linux? // empty' < "$entryfile")
 
@@ -1854,24 +1781,6 @@ update_kernels()
 	done < <(jq -r '.[]|select(has("linux"))|[.linux,.id]|join(" ")' < "$entryfile")
 }
 
-kv_from_path() {
-	local p="$1" base
-	case "$p" in
-		# classic BLS: /$entry_token/<kv>/linux-<sha>
-		"/$entry_token/"*"/linux-"*)
-		  base="${p#"/$entry_token/"}"
-		  printf '%s\n' "${base%%/*}"
-		  ;;
-		# UKI: /EFI/Linux/openSUSE-<kv>-<sha>.efi
-		/EFI/Linux/openSUSE-*.efi)
-		  base="${p##*/openSUSE-}"          # <kv>-<sha>.efi
-		  if [[ "$base" =~ ^(.+)-([0-9a-f]{40})\.efi$ ]]; then
-		  	printf '%s\n' "${BASH_REMATCH[1]}"
-		  fi
-		  ;;
-	esac
-}
-
 list_kernels()
 {
 	local snapshot=""
@@ -1886,7 +1795,7 @@ list_kernels()
 	local k id kv
 
 	for k in "${!installed_kernels[@]}"; do
-		kv="$(kv_from_path "$k")"
+		kv="$(kv_from_any "$k" "$snapshot")"
 		[ -n "$kv" ] || continue
 		kv_any_expected["$kv"]=1
 		id="${installed_kernels[$k]}"
@@ -2221,89 +2130,49 @@ loader_conf_get()
 	fi
 }
 
-default_kernel_version_from_id() {
-	local id="$1"
-	local kv=
+# Try to extract <KV> from *any* token:
+#   - BLS path:   /<entry_token>/<KV>/linux-<sha>
+#   - UKI path:   /EFI/Linux/openSUSE-<KV>-<sha>.efi
+#   - UKI id:     openSUSE-<KV>-<sha>.efi[@<snap>]
+#   - BLS id:     *-<KV>-<snap>[+tries].conf
+#   - UKI/BLS basenames work too (see above)
+# Returns KV to stdout; empty string if unknown.
+kv_from_any() {
+	local t="${1:?}"
+	t="${t#/boot/efi}"
+	t="${t#//}"
 
-	# UKI id example:
-	#   openSUSE-6.16.0-1-default-f89b6e7...efi@1
-	if [[ "$id" =~ ^openSUSE-([^-]+-[^-]+-[^-]+)-[0-9a-f]{40}\.efi@ ]]; then
-		kv="${BASH_REMATCH[1]}"
-		echo "$kv"
-		return 0
+	# Type1 path: /<token>/<KV>/linux-<sha>
+	if [[ "$t" =~ ^/[^/]+/([^/]+)/linux-[0-9a-f]{40}$ ]]; then
+		printf '%s\n' "${BASH_REMATCH[1]}"; return 0
 	fi
 
-	# Type1/BLS id examples:
-	#   opensuse-tumbleweed-6.16.0-1-default-1.conf
-	#   system-opensuse-tumbleweed-6.16.0-1-default-1+3.conf
-	# General form: <prefix>-<kv>-<snap>[+tries].conf
-	# Extract <kv> as the part between the last-but-one '-' sequence(s) and '-<snap>'
-	# We'll search for "-<snap>" and strip everything after; then take the last '-' chunk as snapshot,
-	# leaving "...-<kv>" before that and isolate <kv>.
-	if [[ "$id" =~ ^[^@]+$ ]]; then
-		local base="${id%.conf}"
-		base="${base%%+*}"                  # drop +tries
-		local head="${base%-[0-9]*}"        # strip -<snap>
-		# head ends in "...-<kv>"; but <kv> itself contains dashes.
-		# Try to capture last 3 dash groups (x-y-z) like "6.16.0-1-default"
+	# Type2 path: /EFI/Linux/openSUSE-<KV>-<sha>.efi
+	if [[ "$t" =~ ^/EFI/Linux/openSUSE-([^-]+-[^-]+-[^-]+)-[0-9a-f]{40}\.efi$ ]]; then
+		printf '%s\n' "${BASH_REMATCH[1]}"; return 0
+	fi
+
+	# Work with just the basename next
+	local base="${t##*/}"
+
+	# UKI id/basename: openSUSE-<KV>-<sha>.efi[@<snap>]
+	if [[ "$base" =~ ^openSUSE-([^-]+-[^-]+-[^-]+)-[0-9a-f]{40}\.efi(@[0-9]+)?$ ]]; then
+		printf '%s\n' "${BASH_REMATCH[1]}"; return 0
+	fi
+
+	# BLS id: *-<KV>-<snap>[+tries].conf
+	if [[ "$base" == *.conf ]]; then
+		local stem="${base%.conf}"
+		stem="${stem%%+*}"               # drop +tries
+		local head="${stem%-[0-9]*}"     # strip trailing -<snap>
 		if [[ "$head" =~ ([0-9]+\.[0-9]+\.[0-9]+-[0-9]+-[^-]+)$ ]]; then
-			kv="${BASH_REMATCH[1]}"
-			echo "$kv"
-			return 0
+			printf '%s\n' "${BASH_REMATCH[1]}"; return 0
 		fi
 	fi
 
-	echo ""
-}
-
-pick_entry_id_for_snapshot() {
-	local snapshot="$1"
-
-	# Read current default first (this may overwrite $entryfile)
-	local default_id default_kv
-	default_id="$(get_default_entry || true)"
-	default_kv="$(default_kernel_version_from_id "$default_id")"
-
-	# (re)filter entries strictly to this snapshot
-	update_entries_for_snapshot "$snapshot"
-
-	# Prefer same kernel version as current default, but only for @<snapshot>
-	local candidate=
-	if [ -n "$default_kv" ]; then
-		candidate="$(
-			jq -r --arg kv "$default_kv" --arg snap "$snapshot" '
-			  .[]
-			  | select(.linux? != null)
-			  | select(.linux | test("^/EFI/Linux/openSUSE-" + $kv + "-[0-9a-f]{40}\\.efi$"))
-			  | select(.id | endswith("@" + $snap))
-			  | .id
-			' < "$entryfile" | head -n1
-		)"
-	fi
-
-	# Otherwise: take the first UKI for this snapshot
-	if [ -z "$candidate" ]; then
-		candidate="$(
-			jq -r --arg snap "$snapshot" '
-			  .[]
-			  | select(.linux? != null)
-			  | select(.linux | test("^/EFI/Linux/openSUSE-.*-[0-9a-f]{40}\\.efi$"))
-			  | select(.id | endswith("@" + $snap))
-			  | .id
-			' < "$entryfile" | head -n1
-		)"
-	fi
-
-	# Fallback: any entry for this snapshot
-	if [ -z "$candidate" ]; then
-		candidate="$(
-			jq -r --arg snap "$snapshot" '
-			  .[] | select(.id | endswith("@" + $snap)) | .id
-			' < "$entryfile" | head -n1
-		)"
-	fi
-
-	[ -n "$candidate" ] && echo "$candidate"
+	# If we only have "linux-<sha>" without its parent folder, there’s no KV to extract.
+	printf '%s' ""
+	return 1
 }
 
 grubenv_set()
@@ -2491,20 +2360,138 @@ get_timeout()
 	fi
 }
 
-entry_id_exists() {
-	local id="${1:?}"
-	local saved="$entryfile"
+build_uki_workdir()
+{
+	local kv="${1:?}"
+	local sum="${2:?}"
+	local linuxdir="$boot_root/EFI/Linux"
+	local dir="${ukidir}/${kv}-${sum}"
+	mkdir -p "$linuxdir"
+	mkdir -p "$dir"
+
+	# Make sure we can write (and not immutable, just in case)
+	if [ ! -w "$dir" ]; then
+		chmod u+rwx "$dir" || true
+	fi
+
+	echo "$dir"
+}
+
+uki_sum_from_path()
+{
+	local p="${1:?}"; local base kv sum
+	base="${p##*/openSUSE-}"             # <kv>-<sum>.efi
+	[[ "$base" =~ ^(.+)-([0-9a-f]{40})\.efi$ ]] || return 1
+	kv="${BASH_REMATCH[1]}"; sum="${BASH_REMATCH[2]}"
+	echo "$kv $sum"
+}
+
+kernel_sum_for_snapshot()
+{
+	local snapshot="${1:?}" kv="${2:?}"
+	local path="${subvol_prefix}/.snapshots/${snapshot}/snapshot"
+	local src="${path#"${subvol_prefix}"}/lib/modules/${kv}/${image}"
+	calc_chksum "$src"
+	echo "$chksum"
+}
+
+ukify_collect_args()
+{
+	local dir="${1:?}"
+	shopt -s nullglob
+	local f
+	for f in "${dir}"/initrd-*; do [ -f "$f" ] && echo "--initrd=$f"; done
+	for f in "${dir}"/profile-*.efi; do [ -f "$f" ] && echo "--join-profile=$f"; done
+	shopt -u nullglob
+}
+
+build_uki_profile()
+{
+	local snap="${1:?}" kv="${2:?}" sum="${3:?}" cmd="${4:?}"
+	local title="${snapshot}@${kv}"
+	local subvol=""
+	[ -z "$have_snapshots" ] || subvol="${subvol_prefix}/.snapshots/${snapshot}/snapshot"
+	if subvol_is_ro "$subvol" && ! is_transactional; then
+		title="Snapper: $title"
+	fi
+	local dir; dir="$(build_uki_workdir "$kv" "$sum")"
+	mkdir -p "$dir"
+	ukify build \
+		--profile="TITLE=${title}${nl}ID=${snap}" \
+		--cmdline="$cmd" \
+		--output="${dir}/profile-${snap}.efi"
+}
+
+build_uki_image()
+{
+	local kv="${1:?}" sum="${2:?}" out="${3:?}"
+	local dir; dir="$(build_uki_workdir "$kv" "$sum")"
+	local linux_src="${dir}/${image}"
+	[ -f "$linux_src" ] || err "Missing ${linux_src} (kernel copy not staged)."
+
+	mapfile -t extra < <(ukify_collect_args "$dir")
+	ukify build --linux="$linux_src" --output="$out" "${extra[@]}"
+}
+
+ensure_image_in_workdir()
+{
+	local snap="${1:?}" kv="${2:?}" sum="${3:?}"
+	local work; work="$(build_uki_workdir "$kv" "$sum")"; mkdir -p "$work"
+	local src="${subvol_prefix}/.snapshots/${snap}/snapshot"
+	src="${src#"${subvol_prefix}"}/lib/modules/${kv}/${image}"
+	[ -f "${work}/${image}" ] || cp "$src" "${work}/${image}"
+}
+
+jq_effective_cmdline='(.options? // .cmdline? // "")'
+
+find_uki_entry()
+{
+	local snap="${1:?}" kv="${2:?}"
+	update_entries_for_snapshot "$snap"
+	jq -r --arg kv "$kv" '
+	  .[] | select(.linux? != null)
+		  | select(.linux | test("^/EFI/Linux/openSUSE-" + $kv + "-[0-9a-f]{40}\\.efi$"))
+		  | [ .id, .linux, '"${jq_effective_cmdline}"', (.title // .showTitle // "") ] | @tsv
+	' < "$entryfile" | head -n1
+}
+
+# The best (type2-then-type1) bootctl id to set for a given snapshot.
+pick_entry_id_for_snapshot()
+{
+	local snap="${1:?}"
+
+	# Read current default first to potentialy prefer its KV
+	local default_id default_kv
+	default_id="$(get_default_entry || true)"
+	default_kv="$(kv_from_any "$default_id")"
+
+	update_entries_for_snapshot "$snap"
+
+	# Try: UKI for same KV, else any UKI, else any entry ending with @<snap>
+	local id
+	id="$(jq -r --arg kv "$default_kv" --arg s "$snap" '
+		   .[]
+		   | select(.linux? != null)
+		   | select(.linux | test("^/EFI/Linux/openSUSE-" + $kv + "-[0-9a-f]{40}\\.efi$"))
+		   | select(.id | endswith("@" + $s))
+		   | .id' < "$entryfile" | head -n1)"
+	[ -n "$id" ] || id="$(jq -r --arg s "$snap" '
+		   .[] | select(.linux? != null)
+		   | select(.linux | test("^/EFI/Linux/openSUSE-.*-[0-9a-f]{40}\\.efi$"))
+		   | select(.id | endswith("@" + $s)) | .id' < "$entryfile" | head -n1)"
+	[ -n "$id" ] || id="$(jq -r --arg s "$snap" '.[] | select(.id|endswith("@" + $s)) | .id' < "$entryfile" | head -n1)"
+	[ -n "$id" ] && echo "$id"
+}
+
+entry_id_exists()
+{
+	local id="${1:?}"; local saved="$entryfile"
 	update_entries_for_this_system
-	local ok
-	ok=$(jq -r '.[].id' < "$entryfile" | grep -Fx -- "$id" || true)
-	[ -n "$ok" ]
+	jq -r '.[].id' < "$entryfile" | grep -Fxq -- "$id"
 	entryfile="$saved"
 }
 
-is_type2_id() {
-	# UKI ids look like: openSUSE-<kv>-<sha40>.efi@<profile-id>
-	[[ "$1" =~ \.efi@[0-9]+$ ]]
-}
+is_type2_id() { [[ "$1" =~ \.efi@[0-9]+$ ]]; }
 
 set_default_snapshot()
 {
