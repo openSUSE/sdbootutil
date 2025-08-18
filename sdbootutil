@@ -763,6 +763,10 @@ mount_chroot()
 	rm "$tmpdir/mounts"
 
 	mount -t tmpfs -o size=10m tmpfs "$snapshot_dir/run"
+	if [ -e /run/systemd/journal ]; then
+		mkdir -p "$snapshot_dir/run/systemd/journal"
+		mount --bind /run/systemd/journal "$snapshot_dir/run/systemd/journal"
+	fi
 	for i in proc dev sys tmp; do
 		mount --bind "/$i" "$snapshot_dir/$i"
 	done
