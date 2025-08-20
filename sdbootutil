@@ -145,6 +145,9 @@ helpandquit()
 		           Create boot entries for all kernels in SNAPSHOT,
 		           assumes --no-reuse-initrd to regenerate initrds
 
+		lsinitrd
+		           Print the content of the initrd image used to boot the system
+
 		remove-kernel VERSION [SNAPSHOT]
 		           Remove boot entry for specified kernel
 
@@ -1240,6 +1243,15 @@ list_entries()
 		fi
 		echo -e "$color$id${verbose:+: $title}${color_end}"
 	done < <(jq '.[]|[.isDefault, if has("isReported") then .isReported else 0 end, if has("type") then .type else "unknown" end, .id, .root, .path, .showTitle]|join(" ")' -r < "$entryfile")
+}
+
+print_initrd_content()
+{
+	local initrd_path
+	initrd_path=$(tr ' ' '\n' < /proc/cmdline | sed -n 's/^initrd=//p' | sed -e 's/\\/\//g')
+	[ -n "$initrd_path" ] || err "Couldn't get initrd= from /proc/cmdline"
+	[ -e "${boot_root}${initrd_path}" ] || err "${boot_root}${initrd_path} not found"
+	lsinitrd "${boot_root}${initrd_path}"
 }
 
 show_entry_fields()
@@ -3605,6 +3617,7 @@ define_commands() {
 		[set-default-snapshot]=""
 		[add-all-kernels]=""
 		[mkinitrd]=""
+		[lsinitrd]=""
 		[remove-all-kernels]=""
 		[is-installed]=""
 		[list-snapshots]=""
@@ -3841,6 +3854,8 @@ case "$1" in
 	mkinitrd)
 		arg_no_reuse_initrd=1
 		install_all_kernels "${2:-$root_snapshot}" ;;
+	lsinitrd)
+		print_initrd_content ;;
 	remove-kernel)
 		remove_kernel "${3:-$root_snapshot}" "$2" ;;
 	remove-all-kernels)
