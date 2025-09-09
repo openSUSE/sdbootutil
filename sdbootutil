@@ -2727,7 +2727,11 @@ get_volume_password()
 	# recovery key)
 	keyid="$(keyctl id %user:sdbootutil 2> /dev/null)" || true
 	keyid_ce="$(keyctl id %user:cryptenroll 2> /dev/null)" || true
-	if [ -n "$keyid_ce" ]; then
+	if [ -n "$PW" ]; then
+		key="$PW"
+	elif [ -n "$KEY" ]; then
+		key="$KEY"
+	elif [ -n "$keyid_ce" ]; then
 		pw="$(keyctl pipe "$keyid_ce")"
 	elif [ -n "$keyid" ]; then
 		pw="$(keyctl pipe "$keyid")"
