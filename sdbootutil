@@ -3576,7 +3576,8 @@ eval_bootctl()
 {
 	# XXX: bootctl should have json output for that too
 	# shellcheck disable=SC2016
-	eval "$(bootctl 2>/dev/null | sed -ne 's/Firmware Arch: *\(\w\+\)/firmware_arch="\1"/p;s/ *token: *\(\w\+\)/entry_token="\1"/p;s, *\$BOOT: *\([^ ]\+\).*,boot_root="\1",p')"
+	eval "$(bootctl 2>/dev/null | sed -ne 's/Firmware Arch: *\(\w\+\)/firmware_arch="\1"/p;s/ *token: *\(\w\+\)/entry_token="\1"/p')"
+	boot_root="$(bootctl --print-esp-path)"
 }
 
 bootloader_name()
