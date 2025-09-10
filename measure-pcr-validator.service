@@ -16,6 +16,7 @@ Environment=TERM=linux
 ExecStopPost=/bin/sh -c "/usr/bin/plymouth quit 2>/dev/null || :"
 StandardOutput=tty
 StandardInput=tty
+SuccessExitStatus=STDIN
 
 [Install]
 # If we use RequiredBy we trigger its OnFailure=emergency.target
