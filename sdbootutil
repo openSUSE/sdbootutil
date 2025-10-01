@@ -2936,9 +2936,13 @@ generate_tpm2_predictions()
 	# now this will ask the password (can be resolved by an
 	# external tool that extract the password from the TPM2 if the
 	# policy is still valid)
-	updated_crypttab || { generate_tpm2_predictions_pcr_15; arg_measure_pcr=; }
+	[ -z "$arg_measure_pcr" ] || generate_tpm2_predictions_pcr_15
 	# shellcheck disable=SC2015
-	[ -f "/var/lib/sdbootutil/measure-pcr-prediction" ] && [ -z "$arg_measure_pcr" ] || generate_tpm2_predictions_pcr_15
+	if ! updated_crypttab || [ ! -f "/var/lib/sdbootutil/measure-pcr-prediction" ]; then
+		warn "File measure-pcr-prediction should be updated"
+		warn "Call sdbootutil update-predictions --measure-pcr"
+	fi
+
 	# The user can remove measure-pcr-prediction file from the
 	# ESP, but generate_tpm2_predictions_pcr_15 will not be called
 	[ -f "${boot_root}${boot_dst}/measure-prediction" ] || {
