@@ -2803,15 +2803,6 @@ generate_tpm2_predictions_pcr_15()
 
 	info "Generating predictions for PCR15"
 
-	# If we are not in interactive mode we cannot ask the LUKS2
-	# password and we cannot update the PCR 15 predictions.  This
-	# will halt the system in the next boot.
-	if [ -n "$TRANSACTIONAL_UPDATE" ] || [ -n "$SNAPPER_PLUGIN" ]; then
-		warn "PCR 15 predictions cannot be updated"
-		warn "Run 'sdbootutil update-predictions' manually"
-		return 0
-	fi
-
 	# Read /etc/crypttab lines that contains tpm2-device and
 	# tpm2-measure-pcr.  This code is the similar from
 	# measure-pcr-generator.sh, so we guarantee the same ordering
