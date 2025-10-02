@@ -171,6 +171,7 @@ install -D -m 755 10-%{name}.snapper %{buildroot}%{_prefix}/lib/snapper/plugins/
 
 # Tukit
 install -D -m 755 10-%{name}.tukit %{buildroot}%{_prefix}/lib/tukit/plugins/10-%{name}.tukit
+install -D -m 755 10-%{name}.tukit.conf %{buildroot}%{_prefix}%{_sysconfdir}/tukit.conf.d/10-%{name}.conf
 
 # kernel-install
 install -D -m 755 50-%{name}.install %{buildroot}%{_prefix}/lib/kernel/install.d/50-%{name}.install
@@ -258,6 +259,8 @@ fi
 %dir %{_prefix}/lib/tukit
 %dir %{_prefix}/lib/tukit/plugins
 %{_prefix}/lib/tukit/plugins/*
+%dir %{_prefix}%{_sysconfdir}/tukit.conf.d
+%{_prefix}%{_sysconfdir}/tukit.conf.d/*
 
 %files kernel-install
 %dir %{_prefix}/lib/kernel
