@@ -2808,7 +2808,9 @@ get_volume_password()
 		pw="$(keyctl pipe "$keyid_ce")"
 	elif [ -n "$keyid" ]; then
 		pw="$(keyctl pipe "$keyid")"
-	else
+	elif [ -n "$arg_measure_pcr" ] || [ -n "$arg_ask_key_pin_or_pw" ]; then
+		# Ask the password only as a last resort, and only if
+		# --measure-pcr is set
 		ask_password "Password for $dev" pw
 		# If the key was missing for all the keyrings put back
 		# into the cryptenroll keyring, as there is a chance
@@ -2858,8 +2860,6 @@ generate_tpm2_predictions_pcr_15()
 	local msgs=()
 	local vks=()
 	local name dev opts extra uuid pw
-
-	grep -q "tpm2-measure-pcr=yes" /etc/crypttab || return
 
 	info "Generating predictions for PCR15"
 
@@ -2957,6 +2957,7 @@ generate_tpm2_predictions_pcr_15()
 updated_crypttab()
 {
 	local crypttab_sha1
+	grep -q "tpm2-measure-pcr=yes" /etc/crypttab || return 0
 	read -r crypttab_sha1 _ < <(sha1sum /etc/crypttab)
 	grep -Fixq "$crypttab_sha1" /var/lib/sdbootutil/crypttab.sha1 2> /dev/null
 }
@@ -2994,12 +2995,19 @@ generate_tpm2_predictions()
 	# now this will ask the password (can be resolved by an
 	# external tool that extract the password from the TPM2 if the
 	# policy is still valid)
-	[ -z "$arg_measure_pcr" ] || generate_tpm2_predictions_pcr_15
-	# shellcheck disable=SC2015
-	if ! updated_crypttab || [ ! -f "/var/lib/sdbootutil/measure-pcr-prediction" ]; then
-		warn "File measure-pcr-prediction should be updated"
-		warn "Call sdbootutil update-predictions --measure-pcr"
-	fi
+	#
+	# For initial enrollments the LUKS2 key will be in the
+	# keyring, so no password will be asked.  Internally the
+	# function that ask for the volume key password will check
+	# arg_measure_pcr (--measure-pcr)
+	updated_crypttab || {
+		generate_tpm2_predictions_pcr_15
+		# shellcheck disable=SC2015
+		if ! updated_crypttab || [ ! -f "/var/lib/sdbootutil/measure-pcr-prediction" ]; then
+			warn "File measure-pcr-prediction should be updated"
+			warn "Call sdbootutil update-predictions --measure-pcr"
+		fi
+	}
 
 	# The user can remove measure-pcr-prediction file from the
 	# ESP, but generate_tpm2_predictions_pcr_15 will not be called
@@ -3448,7 +3456,7 @@ enroll()
 	# For predicting PCR 15 we need to sign a file.  Create the
 	# public and private key if missing.  This (as the
 	# /etc/crypttab change) can require a new initrd
-	if [ "$arg_method" = "tpm2" ] || [ "$arg_method" = "tpm2+pin" ]; then
+	if { [ "$arg_method" = "tpm2" ] || [ "$arg_method" = "tpm2+pin" ]; } && [ -z "$arg_no_measure_pcr" ]; then
 		local private="/var/lib/sdbootutil/measure-pcr-private.pem"
 		local public="/var/lib/sdbootutil/measure-pcr-public.pem"
 		[ -f "$private" ] || openssl genrsa -out "$private" 4096
@@ -3560,6 +3568,9 @@ unenroll_pcrlock()
 	rm -fr /var/lib/pcrlock.d
 	rm -f /var/lib/systemd/pcrlock.json
 	rm -f "${boot_root}${boot_dst}/pcrlock.json"
+	rm -f /var/lib/sdbootutil/crypttab.sha1
+	rm -f /var/lib/sdbootutil/measure-pcr-private.pem
+	rm -f /var/lib/sdbootutil/measure-pcr-public.pem
 	rm -f /var/lib/sdbootutil/measure-pcr-prediction
 	rm -f /var/lib/sdbootutil/measure-pcr-prediction.sha256
 	rm -f "${boot_root}${boot_dst}/measure-pcr-prediction"
