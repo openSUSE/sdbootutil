@@ -41,6 +41,7 @@ arg_signed_policy=
 arg_no_measure_pcr=
 arg_measure_pcr=
 arg_pcr=
+arg_force=
 have_snapshots=
 # for x in vmlinuz image vmlinux linux bzImage uImage Image zImage; do
 image=
@@ -134,6 +135,7 @@ helpandquit()
 		  --pcr			Comma seperated list of PCRs to enroll
 		  --devices		Comma separated list of devices to enroll or unenroll
 		                        By default all (not ignored) devices are [un]enrolled
+		  --force		Force certain operations inside a transaction
 		  -v, --verbose		More verbose output
 		  --start-trace-code	Create /var/log/sdbootutil.log to trace the code.
 		                        Verbose output is enabled
@@ -619,6 +621,11 @@ remove_kernel()
 	info "Removing kernel $kernel_version"
 	dbg_var "snapshot"
 
+	[ -z "$TRANSACTIONAL_UPDATE" ] || [ -n "$arg_force" ] || {
+		warn "Inside transactional-update. Removing kernels must be done outside the transaction"
+		return 0
+	}
+
 	settle_entry_token "${snapshot}"
 	local id
 	id="$(entry_conf_file "$kernel_version" "$snapshot")"
@@ -1020,6 +1027,11 @@ install_kernel()
 	info "Installing kernel $kernel_version"
 	dbg_var "snapshot"
 
+	[ -z "$TRANSACTIONAL_UPDATE" ] || [ -n "$arg_force" ] || {
+		warn "Inside transactional-update. Installing kernels must be done outside the transaction"
+		return 0
+	}
+
 	calc_chksum "$src"
 	settle_entry_token "${snapshot}"
 	local dst="/$entry_token/$kernel_version/linux-$chksum"
@@ -1156,6 +1168,11 @@ install_all_kernels()
 	dbg_var "snapshot"
 	dbg_var "arg_no_reuse_initrd"
 
+	[ -z "$TRANSACTIONAL_UPDATE" ] || [ -n "$arg_force" ] || {
+		warn "Inside transactional-update. Installing kernels / initrds must be done outside the transaction"
+		return 0
+	}
+
 	find_kernels "$snapshot"
 	for kv in "${!found_kernels[@]}"; do
 		install_kernel "${snapshot}" "$kv"
@@ -1169,6 +1186,11 @@ remove_all_kernels()
 	info "Removing all kernels"
 	dbg_var "snapshot"
 
+	[ -z "$TRANSACTIONAL_UPDATE" ] || [ -n "$arg_force" ] || {
+		warn "Inside transactional-update. Removing kernels must be done outside the transaction"
+		return 0
+	}
+
 	find_kernels "$snapshot"
 	for kv in "${!found_kernels[@]}"; do
 		remove_kernel "${snapshot}" "$kv"
@@ -1178,6 +1200,11 @@ remove_all_kernels()
 cleanup_entries()
 {
 	info "Cleaning up boot entries"
+
+	[ -z "$TRANSACTIONAL_UPDATE" ] || [ -n "$arg_force" ] || {
+		warn "Inside transactional-update. Cleaning up boot entries must be done outside the transaction"
+		return 0
+	}
 
 	if [ ! -s "$entryfile" ]; then
 		if [ -n "$1" ]; then
@@ -1318,6 +1345,12 @@ update_entry()
 	[ -f "$conf" ] || return 0
 
 	info "Updating boot entry $id"
+
+	[ -z "$TRANSACTIONAL_UPDATE" ] || [ -n "$arg_force" ] || {
+		warn "Inside transactional-update. Updating boot entries must be done outside the transaction"
+		return 0
+	}
+
 	update_entry_conf "$conf" "$snapshot"
 
 	# This action will require to update the PCR predictions
@@ -1327,6 +1360,13 @@ update_entry()
 update_all_entries()
 {
 	local snapshot="$1"
+
+	info "Updating all boot entries"
+
+	[ -z "$TRANSACTIONAL_UPDATE" ] || [ -n "$arg_force" ] || {
+		warn "Inside transactional-update. Updating boot entries must be done outside the transaction"
+		return 0
+	}
 
 	make_free_space "$snapshot" 1024
 
@@ -1601,6 +1641,11 @@ install_bootloader()
 	info "Installing bootloader"
 	dbg_var "$snapshot"
 
+	[ -z "$TRANSACTIONAL_UPDATE" ] || [ -n "$arg_force" ] || {
+		warn "Inside transactional-update. Installing bootloader must be done outside the transaction"
+		return 0
+	}
+
 	local bootloader bldr_name blkpart drive partno
 	settle_entry_token "${snapshot}"
 
@@ -1690,6 +1735,11 @@ bootloader_update()
 	local status=0
 
 	info "Updating bootloader"
+
+	[ -z "$TRANSACTIONAL_UPDATE" ] || [ -n "$arg_force" ] || {
+		warn "Inside transactional-update. Updating bootloader must be done outside the transaction"
+		return 0
+	}
 
 	bootloader_needs_update "${1:-$root_snapshot}" || status=$?
 	if [ $status -eq 0 ]; then
@@ -1809,6 +1859,11 @@ set_default_entry()
 	local id="${1:?}"
 
 	info "Setting default entry $id"
+
+	[ -z "$TRANSACTIONAL_UPDATE" ] || [ -n "$arg_force" ] || {
+		warn "Inside transactional-update. Setting default entries must be done outside the transaction"
+		return 0
+	}
 
 	if [ ! -f "${boot_root}/loader/entries/$id" ] && [ ! -f "${boot_root}/loader/entries/$id.conf" ]; then
 		update_entries
@@ -1940,6 +1995,11 @@ set_default_snapshot()
 	local configs
 
 	info "Setting default snapshot $num"
+
+	[ -z "$TRANSACTIONAL_UPDATE" ] || [ -n "$arg_force" ] || {
+		warn "Inside transactional-update. Setting default snapshots must be done outside the transaction"
+		return 0
+	}
 
 	update_entries_for_snapshot "$num"
 	mapfile configs < <(jq '.[]|[.id]|join(" ")' -r < "$entryfile")
@@ -2907,6 +2967,13 @@ generate_tpm2_predictions()
 	grep -q "tpm2-device" /etc/crypttab || return 0
 	! in_lockout || err "The TPM2 is in lockout. Use 'tpm2_dictionarylockout -c [ -p passwd ]' to clear the DA lockout and re-try the sdbootutil command"
 
+	info "Updating predictions"
+
+	[ -z "$TRANSACTIONAL_UPDATE" ] || [ -n "$arg_force" ] || {
+		warn "Inside transactional-update. Updating predictions must be done outside the transaction"
+		return 0
+	}
+
 	# The PCR list is used by both models (pcr-oracle,
 	# systemd-pcrlock).  The first one will try first to get the
 	# PCRs from the LUKS2 header, that will succeed in the normal
@@ -3683,6 +3750,7 @@ define_options() {
 		[measure-pcr]=""
 		[pcr]="_none"
 		[devices]="_devices"
+		[force]=""
 	)
 	opts_long=""
 	for opt in "${!options_with_arg[@]}"; do
@@ -3737,6 +3805,7 @@ while true ; do
 		--measure-pcr) arg_measure_pcr=1; shift ;;
 		--pcr) arg_pcr="$2"; shift 2 ;;
 		--devices) IFS=',' read -r -a tracked_devices <<<"$2"; shift 2 ;;
+		--force) arg_force=1; shift ;;
 		--) shift ; break ;;
 		*) echo "Internal error!" ; exit 1 ;;
 	esac
