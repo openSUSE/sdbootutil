@@ -778,6 +778,7 @@ mount_chroot()
 		[ "$TARGET" != "/" ] || continue
 		[ "$TARGET" = "/etc" ] && [ "$FSTYPE" = "btrfs" ] && continue
 		[[ "$TARGET" != /.snapshots* ]] || continue
+		[[ "$TARGET" != /run/media/* ]] || continue
 		mountpoint --quiet "$snapshot_dir$TARGET" || mount --bind "$TARGET" "$snapshot_dir$TARGET"
 	done < "$tmpdir/mounts"
 	rm "$tmpdir/mounts"
