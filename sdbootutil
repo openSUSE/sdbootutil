@@ -365,7 +365,7 @@ reset_rollback()
 
 is_transactional()
 {
-	findmnt --fstab / -O ro >/dev/null
+	findmnt --fstab / -O ro > /dev/null
 }
 
 keyctl_add_with_timeout()
@@ -650,7 +650,7 @@ install_with_rollback()
 	fi
 	rollback+=("$dst")
 	install -p -m 0644 "$src" "$dst" || return "$?"
-	chown root:root "$dst" 2>/dev/null || :
+	chown root:root "$dst" 2> /dev/null || :
 	info "Installed $dst"
 }
 
@@ -1615,7 +1615,7 @@ bootloader_needs_update()
 	nv="$(bootloader_version "$(find_bootloader "$snapshot")")"
 	[ -n "$nv" ] || return 1
 	info "System version $nv"
-	systemd-analyze compare-versions "$v" "$nv" 2>/dev/null
+	systemd-analyze compare-versions "$v" "$nv" 2> /dev/null
 	local status="$?"
 	bldr_name=$(bootloader_name "$snapshot")
 	if [ "$status" = "11" ]; then
@@ -2825,7 +2825,7 @@ get_volume_key()
 	local dev="$1"
 	local pw out
 	pw="$(get_volume_password "$dev")"
-	out="$(cryptsetup luksDump --batch-mode --dump-master-key "$dev" <<<"$pw")" || {
+	out="$(cryptsetup luksDump --batch-mode --dump-master-key "$dev" 2> /dev/null<<<"$pw")" || {
 		# If luksDump fails, remove the password from the
 		# keyring.  Can be that the password was wrong, and
 		# systemd-cryptenroll ask later for the password.
@@ -2836,7 +2836,8 @@ get_volume_key()
 
 		# Try one more time
 		pw="$(get_volume_password "$dev")"
-		out="$(cryptsetup luksDump --batch-mode --dump-master-key "$dev" <<<"$pw")" || return 1
+		# The error is signaled by an empty volume key
+		out="$(cryptsetup luksDump --batch-mode --dump-master-key "$dev" 2> /dev/null<<<"$pw")" || return 0
 	}
 	echo "$out" | sed -n '/MK dump:/,$p' | sed -E 's/MK dump:|[[:blank:]]+//g' | sed -z 's/\n//g'
 }
@@ -3047,12 +3048,12 @@ detect_tracked_devices()
 
 have_tpm2()
 {
-	[ -n "$(systemd-cryptenroll --tpm2-device=list 2>/dev/null)" ]
+	[ -n "$(systemd-cryptenroll --tpm2-device=list 2> /dev/null)" ]
 }
 
 have_fido2()
 {
-	[ -n "$(systemd-cryptenroll --fido2-device=list 2>/dev/null)" ]
+	[ -n "$(systemd-cryptenroll --fido2-device=list 2> /dev/null)" ]
 }
 
 have_slot()
@@ -3667,7 +3668,7 @@ eval_bootctl()
 {
 	# XXX: bootctl should have json output for that too
 	# shellcheck disable=SC2016
-	eval "$(bootctl 2>/dev/null | sed -ne 's/Firmware Arch: *\(\w\+\)/firmware_arch="\1"/p;s/ *token: *\(\w\+\)/entry_token="\1"/p')"
+	eval "$(bootctl 2> /dev/null | sed -ne 's/Firmware Arch: *\(\w\+\)/firmware_arch="\1"/p;s/ *token: *\(\w\+\)/entry_token="\1"/p')"
 	boot_root="$(bootctl --print-esp-path)"
 }
 
@@ -3848,7 +3849,7 @@ root_subvol=""
 subvol_prefix=""
 if [ "$(stat -f -c %T /)" = "btrfs" ] && [ -d /.snapshots ]; then
 	have_snapshots=1
-	root_subvol=$(btrfs subvol show / 2>/dev/null|head -1)
+	root_subvol=$(btrfs subvol show / 2> /dev/null | head -1)
 	subvol_prefix="${root_subvol%/.snapshots/*}"
 fi
 root_snapshot=""
