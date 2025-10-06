@@ -4,7 +4,7 @@
 check() {
     # Return 255 to only include the module, if another module
     # requires it.
-    return 0
+    [ -f "/var/lib/sdbootutil/measure-pcr-public.pem" ]
 }
 
 install() {
