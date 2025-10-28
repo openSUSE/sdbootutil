@@ -42,11 +42,8 @@ Requires:       qrencode
 Requires:       sed
 Requires:       (%{name}-snapper if (snapper and btrfsprogs))
 Requires:       (%{name}-tukit if read-only-root-fs)
-# While systemd-pcrlock is in experimental
-Requires:       systemd-experimental
-# something needs to require it. Can be us.
 Requires:       tpm2.0-tools
-# While bootctl is in udev
+# For bootctl and systemd-pcrlock
 Requires:       udev
 Supplements:    (grub2-x86_64-efi-bls and shim)
 Supplements:    (systemd-boot and shim)
