@@ -18,6 +18,7 @@ create_snapshot()
 	fs="$2"
 	num="$3"
 
+	[ "$path" = "/" ] || return 0
 	[ "$fs" = btrfs ] || return 1
 
 	/usr/bin/sdbootutil update --sync "$num" || :
@@ -40,6 +41,7 @@ delete_snapshot()
 	local fs="$2"
 	local num="$3"
 
+	[ "$path" = "/" ] || return 0
 	[ "$fs" = btrfs ] || return 1
 
 	/usr/bin/sdbootutil remove-all-kernels "$num" || :
@@ -52,6 +54,7 @@ set_default_snapshot()
 	local fs="$2"
 	local num="$3"
 
+	[ "$path" = "/" ] || return 0
 	[ "$fs" = btrfs ] || return 1
 
 	if is_transactional; then
