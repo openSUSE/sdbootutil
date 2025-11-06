@@ -833,12 +833,6 @@ add_version_to_title()
 	[ -n "$os_release_VERSION" ] || title="$title $os_release_VERSION_ID"
 }
 
-add_kernel_version_to_title()
-{
-	# grub2-bls does not show the `version` field
-	title="$title ($snapshot@$kernel_version)"
-}
-
 pending_kernel_size()
 {
 	echo $(($(stat -c %s "$1") / 1024 + 1))
@@ -1100,8 +1094,6 @@ install_kernel()
 	add_version_to_title
 	if ! is_transactional && subvol_is_ro "$subvol"; then
 		set_snapper_title_and_sortkey "$snapshot"
-	elif is_grub2_bls; then
-		add_kernel_version_to_title
 	fi
 
 	local entry_machine_id=
