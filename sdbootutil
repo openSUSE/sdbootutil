@@ -2783,7 +2783,7 @@ generate_tpm2_predictions_pcr_oracle()
 		}
 }
 
-get_volume_password()
+get_device_password()
 {
 	local dev="$1"
 	local pw keyid
@@ -2794,9 +2794,9 @@ get_volume_password()
 	keyid="$(keyctl id %user:sdbootutil 2> /dev/null)" || true
 	keyid_ce="$(keyctl id %user:cryptenroll 2> /dev/null)" || true
 	if [ -n "$PW" ]; then
-		key="$PW"
+		pw="$PW"
 	elif [ -n "$KEY" ]; then
-		key="$KEY"
+		pw="$KEY"
 	elif [ -n "$keyid_ce" ]; then
 		pw="$(keyctl pipe "$keyid_ce")"
 	elif [ -n "$keyid" ]; then
@@ -2817,7 +2817,7 @@ get_volume_key()
 {
 	local dev="$1"
 	local pw out
-	pw="$(get_volume_password "$dev")"
+	pw="$(get_device_password "$dev")"
 	out="$(cryptsetup luksDump --batch-mode --dump-master-key "$dev" 2> /dev/null<<<"$pw")" || {
 		# If luksDump fails, remove the password from the
 		# keyring.  Can be that the password was wrong, and
@@ -2828,7 +2828,7 @@ get_volume_key()
 		keyctl reap &> /dev/null || true
 
 		# Try one more time
-		pw="$(get_volume_password "$dev")"
+		pw="$(get_device_password "$dev")"
 		# The error is signaled by an empty volume key
 		out="$(cryptsetup luksDump --batch-mode --dump-master-key "$dev" 2> /dev/null<<<"$pw")" || return 0
 	}
