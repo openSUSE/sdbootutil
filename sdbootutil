@@ -2672,7 +2672,13 @@ generate_tpm2_predictions_pcrlock()
 	keyid="$(keyctl id %user:sdbootutil 2> /dev/null)" || true
 	keyid_int="$(keyctl id %user:sdbootutil-pin 2> /dev/null)" || true
 	if [ -n "$arg_ask_key_pin_or_pw" ]; then
-		ask_password "Recovery PIN" pin
+		# When enrolling, we should ask two times
+		if [ -n "$arg_method" ]; then
+			info "The recovery PIN is used when the TPM2 policy needs to be updated"
+			ask_new_password "recovery PIN" pin
+		else
+			ask_password "Recovery PIN" pin
+		fi
 		extra=("--recovery-pin=yes")
 	elif [ -n "$PIN" ]; then
 		pin="$PIN"
@@ -3533,25 +3539,21 @@ enroll()
 	local pin_or_pw keyid
 	if [ "$arg_method" = "tpm2+pin" ]; then
 		keyid="$(keyctl id %user:sdbootutil 2> /dev/null)" || true
-		if [ -n "$arg_ask_key_pin_or_pw" ]; then
-			ask_new_password "TPM2 PIN" pin_or_pw
-		elif [ -n "$PIN" ]; then
+		if [ -n "$PIN" ]; then
 			pin_or_pw="$PIN"
 		elif [ -n "$keyid" ]; then
 			pin_or_pw="$(keyctl pipe "$keyid")"
 		else
-			err "Use %u:sdbootutil, PIN or --ask-pin to provide the TPM2 PIN"
+			ask_new_password "TPM2 PIN" pin_or_pw
 		fi
 	elif [ "$arg_method" = "password" ]; then
 		keyid="$(keyctl id %user:sdbootutil 2> /dev/null)" || true
-		if [ -n "$arg_ask_key_pin_or_pw" ]; then
-			ask_new_password "password" pin_or_pw
-		elif [ -n "$PW" ]; then
+		if [ -n "$PW" ]; then
 			pin_or_pw="$PW"
 		elif [ -n "$keyid" ]; then
 			pin_or_pw="$(keyctl pipe "$keyid")"
 		else
-			err "Use %u:sdbootutil, PW or --ask-pw to provide the password"
+			ask_new_password "password" pin_or_pw
 		fi
 	fi
 
