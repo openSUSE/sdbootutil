@@ -2805,11 +2805,12 @@ get_device_password()
 		# Ask the password only as a last resort, and only if
 		# --measure-pcr is set
 		ask_password "Password for $dev" pw
-		# If the key was missing for all the keyrings put back
-		# into the cryptenroll keyring, as there is a chance
-		# that this is part or a re-enrollment
+	fi
+
+	if [ -n "$pw" ]; then
 		keyctl_add_with_timeout "cryptenroll" "$pw"
 	fi
+
 	echo "$pw"
 }
 
@@ -3195,6 +3196,10 @@ enroll_pcrlock()
 	if [ -n "$unlock_method" ]; then
 		extra_args+=("$unlock_method")
 	fi
+
+	# Make sure that the LUKS2 password is in cryptenroll.  If
+	# not, systemd-cryptenroll will ask one
+	get_device_password &> /dev/null
 
 	# Note that the PCRs are now not stored in the LUKS2 header
 	if NEWPIN="$tpm2_pin" systemd-cryptenroll \
