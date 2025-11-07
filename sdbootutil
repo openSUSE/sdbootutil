@@ -238,10 +238,10 @@ helpandquit()
 
 		Variables:
 		SYSTEMD_COLORS	Set 0 to disable colored output
-		KEY		Recovery key (initial enrollment; %u:sdbootutil)
-		PIN		TPM2 PIN (initial enrollment; %u:sdbootutil)
-		PIN		Recovery PIN (re-enrollment; %u:sdbootutil)
-		PW		Password / Recovery Key (initial enrollment; %u:sdbootutil)
+		KEY		Set / use recovery key (initial enrollment; %u:sdbootutil)
+		PW		Set / use password / recovery key (initial enrollment; %u:sdbootutil)
+		PIN		Set / use TPM2 PIN (initial enrollment; %u:sdbootutil)
+		PIN		Use recovery PIN (re-enrollment; %u:sdbootutil)
 		                (%u:cryptenroll for changes via systemd-cryptenroll)
 
 		Misc:
