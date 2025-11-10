@@ -165,6 +165,12 @@ install -D -m 644 jeos-firstboot-enroll %{buildroot}%{_datadir}/jeos-firstboot/m
 
 # Snapper
 install -D -m 755 10-%{name}.snapper %{buildroot}%{_prefix}/lib/snapper/plugins/10-%{name}.snapper
+install -D -m 644 snapper-override.conf \
+	%{buildroot}%{_prefix}/lib/systemd/system/snapperd.service.d/sdbootutil-override.conf
+for service in backup boot cleanup timeline; do
+	install -D -m 644 snapper-override.conf \
+		%{buildroot}%{_prefix}/lib/systemd/system/snapper-"$service".service.d/sdbootutil-override.conf
+done
 
 # Tukit
 install -D -m 755 10-%{name}.tukit %{buildroot}%{_prefix}/lib/tukit/plugins/10-%{name}.tukit
@@ -251,6 +257,16 @@ fi
 %dir %{_prefix}/lib/snapper
 %dir %{_prefix}/lib/snapper/plugins
 %{_prefix}/lib/snapper/plugins/*
+%dir %{_unitdir}/snapperd.service.d
+%{_unitdir}/snapperd.service.d/sdbootutil-override.conf
+%dir %{_unitdir}/snapper-backup.service.d
+%{_unitdir}/snapper-backup.service.d/sdbootutil-override.conf
+%dir %{_unitdir}/snapper-boot.service.d
+%{_unitdir}/snapper-boot.service.d/sdbootutil-override.conf
+%dir %{_unitdir}/snapper-cleanup.service.d
+%{_unitdir}/snapper-cleanup.service.d/sdbootutil-override.conf
+%dir %{_unitdir}/snapper-timeline.service.d
+%{_unitdir}/snapper-timeline.service.d/sdbootutil-override.conf
 
 %files tukit
 %dir %{_prefix}/lib/tukit
