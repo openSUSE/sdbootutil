@@ -3738,6 +3738,8 @@ define_options() {
 	declare -gA options_with_arg=(
 		[help]=""
 		[verbose]=""
+		[start-trace-code]=""
+		[stop-trace-code]=""
 		[esp-path]="_path"
 		[entry-token]="_path"
 		[arch]="_arch_name"
@@ -3794,7 +3796,7 @@ while true ; do
 		-h|--help) helpandquit ;;
 		-v|--verbose) verbose=$((++verbose)); shift ;;
 		--start-trace-code) shift ;;
-		--stio-trace-code) shift ;;
+		--stop-trace-code) shift ;;
 		--esp-path) arg_esp_path="$2"; shift 2 ;;
 		--arch) arg_arch="$2"; shift 2 ;;
 		--entry-token) arg_entry_token="$2"; shift 2 ;;
