@@ -20,7 +20,7 @@
 Name:           sdbootutil
 Version:        0
 Release:        0
-Summary:        bootctl wrapper for BLS boot loaders
+Summary:        Bootctl wrapper for BLS boot loaders
 License:        MIT
 URL:            https://github.com/openSUSE/sdbootutil
 Source:         %{name}-%{version}.tar
@@ -58,7 +58,7 @@ Implements also the life cycle of a full disk encryption installation,
 based on systemd.
 
 %package snapper
-Summary:        plugin script for snapper
+Summary:        Plugin script for snapper
 Requires:       %{name} = %{version}
 Requires:       btrfsprogs
 Requires:       snapper
@@ -68,7 +68,7 @@ BuildArch:      noarch
 Plugin scripts for snapper to handle BLS config files
 
 %package tukit
-Summary:        plugin script for tukit
+Summary:        Plugin script for tukit
 Requires:       %{name} = %{version}
 Requires:       tukit
 BuildArch:      noarch
