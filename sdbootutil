@@ -1143,8 +1143,10 @@ install_kernel()
 		# also doing this check so late give the chance of
 		# adding the kernel or initrd in case that the user
 		# removes them
-		loader_entry="$boot_root/loader/entries/$(entry_conf_file "$kernel_version" "$snapshot")"
-		if [ ! -f "$loader_entry" ]; then
+		local entry_name
+		entry_name="$(entry_conf_file "$kernel_version" "$snapshot")"
+		loader_entry="$(find "$boot_root/loader/entries" -maxdepth 1 -type f -name "${entry_name%.conf}+*" -print -quit)"
+		if [ -z "$loader_entry" ]; then
 			loader_entry="$boot_root/loader/entries/$(entry_conf_file "$kernel_version" "$snapshot" "$tries")"
 			install_with_rollback "$tmpdir/entry.conf" "$loader_entry" || failed="bootloader entry"
 		fi
