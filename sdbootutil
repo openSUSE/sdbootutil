@@ -738,8 +738,8 @@ reuse_initrd()
 	local find_conf_status=$?
 
 	if [ $find_conf_status -ne 0 ]; then
-		# check if we can reuse the initrd from the parent
-		# to avoid expensive regeneration
+		# Check if we can reuse the initrd from the parent to
+		# avoid expensive regeneration
 		detect_parent "$subvol"
 		if [ -n "$parent_subvol" ]; then
 			settle_entry_token "$parent_snapshot"
@@ -1138,8 +1138,16 @@ install_kernel()
 			tries=
 		fi
 
-		loader_entry="$boot_root/loader/entries/$(entry_conf_file "$kernel_version" "$snapshot" "$tries")"
-		install_with_rollback "$tmpdir/entry.conf" "$loader_entry" || failed="bootloader entry"
+		# If the version without "tries" suffix is present, do
+		# not create a new one.  This avoid duplication, but
+		# also doing this check so late give the chance of
+		# adding the kernel or initrd in case that the user
+		# removes them
+		loader_entry="$boot_root/loader/entries/$(entry_conf_file "$kernel_version" "$snapshot")"
+		if [ ! -f "$loader_entry" ]; then
+			loader_entry="$boot_root/loader/entries/$(entry_conf_file "$kernel_version" "$snapshot" "$tries")"
+			install_with_rollback "$tmpdir/entry.conf" "$loader_entry" || failed="bootloader entry"
+		fi
 		rm -f "$tmpdir/entry.conf"
 	fi
 	[ -z "$failed" ] || err "Failed to install $failed"
