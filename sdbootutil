@@ -4,6 +4,8 @@
 set -e
 shopt -s nullglob
 
+export LC_ALL=C
+
 DEBUG_LOG="/var/log/sdbootutil.log"
 verbose=
 
