@@ -126,21 +126,21 @@ helpandquit()
 		  --default-snapshot	[SNAPSHOT] refers to the default snapshot
 		  --ask-key		Ask recovery Key when initial enrollment
 		                        (or randomly generated)
-		  --ask-pin		Ask recovery PIN for re-enrollment
-		                        Ask TPM2 PIN when initial enrollment
+		  --ask-pin		Ask recovery PIN for re-enrollment or ask TPM2 PIN
+		                        when initial enrollment
 		  --ask-pw		Ask password when initial enrollment
 		  --method		"tpm2", "tpm2+pin", "fido2", "password", "recovery-key"
 		  --signed-policy	Use signed policy for TPM2 enrollment
 		  --no-measure-pcr	During enrollment, do not include PCR 15 protection
 		  --measure-pcr		Force update of PCR 15 prediction for LUKS2 volume key
-		                        Requires LUKS2 password to accessing the volume key
+		                        (requires LUKS2 password to accessing the volume key)
 		  --pcr			Comma seperated list of PCRs to enroll
 		  --devices		Comma separated list of devices to enroll or unenroll
-		                        By default all (not ignored) devices are [un]enrolled
+		                        (by default all (not ignored) devices are [un]enrolled)
 		  --force		Force certain operations inside a transaction
 		  -v, --verbose		More verbose output
 		  --start-trace-code	Create /var/log/sdbootutil.log to trace the code.
-		                        Verbose output is enabled
+		                        (verbose output is enabled)
 		  --stop-trace-code	Remove /var/log/sdbootutil.log to stop tracing the code
 		  -h, --help		This screen
 
@@ -262,7 +262,7 @@ helpandquit()
 dbg()
 {
 	[ "${verbose:-0}" -gt 1 ] || return 0
-	echo "DEBUG: $*" >&2
+	echo -e "DEBUG: $*" >&2
 }
 
 dbg_var()
@@ -281,17 +281,17 @@ dbg_cat()
 info()
 {
 	[ "${verbose:-0}" -gt 0 ] || return 0
-	echo "$@" >&2
+	echo -e "$@" >&2
 }
 
 warn()
 {
-	echo "WARNING: $*" >&2
+	echo -e "WARNING: $*" >&2
 }
 
 err()
 {
-	echo "ERROR: $*" >&2
+	echo -e "ERROR: $*" >&2
 	exit 1
 }
 
@@ -3440,7 +3440,13 @@ enroll_device()
 			;;
 
 		*)
-			err "Unexpected parameter for --method=: $arg_method"
+			local msg
+			if [ -n "$arg_method" ]; then
+				msg="Unexpected parameter for --method=: $arg_method"
+			else
+				msg="Missing value for parameter --method="
+			fi
+			err "$msg\nValid methods: tpm2,tpm2+pin,fido2,password,recovery-key"
 			;;
 	esac
 }
@@ -3633,7 +3639,27 @@ unenroll_device()
 			;;
 
 		*)
-			err "Unexpected parameter for --method=: $arg_method"
+			local msg
+			if [ -n "$arg_method" ]; then
+				msg="Unexpected parameter for --method=: $arg_method"
+			else
+				msg="Missing value for parameter --method="
+			fi
+
+			local methods=()
+			local line
+			while read -r line; do
+				[[ "$line" =~ [[:digit:]]+[[:space:]] ]] || continue
+				IFS=" " read -r -a s <<<"$line"
+				methods+=("${s[1]}")
+			done < <(systemd-cryptenroll "$dev")
+			if [ "${#methods[@]}" -eq 0 ]; then
+				err "$msg\nThe device $dev has no enrollment"
+			else
+				local methods
+				methods="$(IFS=','; echo "${methods[*]}")"
+				err "$msg\nMethods present in $dev: $methods"
+			fi
 			;;
 	esac
 }
