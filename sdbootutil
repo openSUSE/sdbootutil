@@ -3724,7 +3724,7 @@ bootloader_name()
 }
 
 set_image_name() {
-	[ -z "$image" ] || return
+	[ -z "$image" ] || return 0
 
 	declare -gA arch_image_map=(
 		[x64]="vmlinuz"
