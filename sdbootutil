@@ -634,6 +634,13 @@ remove_kernel()
 	info "Removing boot entry $id"
 	bootctl unlink "$id"
 
+	# If we remove the default entry, `bootctl` will mark a new
+	# default, but we still need to update the EFI var (or the
+	# grubenv value)
+	local default
+	default="$(get_default_bootctl)"
+	set_default_entry "$default"
+
 	# This action will require to update the PCR predictions
 	update_predictions=1
 }
@@ -1893,15 +1900,20 @@ set_default_entry()
 	update_predictions=1
 }
 
+get_default_bootctl()
+{
+	local val
+	update_entries_for_this_system
+	jq -r '.[] | select(.isDefault == true) | .id' < "$entryfile"
+	[ -z "$val" ] || echo "$val"
+}
+
 get_default_sdboot()
 {
 	local val
 	val="$(bli_efi_var_get "LoaderEntryDefault")"
 	[ -n "$val" ] || val="$(loader_conf_get "default")"
-	[ -n "$val" ] || {
-		update_entries_for_this_system
-		jq -r '.[] | select(.isDefault == true) | .id' < "$entryfile"
-	}
+	[ -n "$val" ] || val="$(get_default_bootctl)"
 	[ -z "$val" ] || echo "$val"
 }
 
@@ -1909,7 +1921,7 @@ get_default_grub2_bls()
 {
 	local val
 	val="$(grubenv_get "default")"
-	[ -n "$val" ] || val="$(get_default_sdboot "default")"
+	[ -n "$val" ] || val="$(get_default_sdboot)"
 	[ -z "$val" ] || echo "$val"
 }
 
