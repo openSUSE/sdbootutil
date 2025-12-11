@@ -2861,7 +2861,7 @@ extend_pcr()
 	local val="$3"
 	local digest
 
-	hash "${dgst}sum" || return
+	hash "${dgst}sum" || return 1
 	hex_to_binary "$pcr$val" > "$tmpdir/pcr"
 	read -r digest _ < <("${dgst}sum" "$tmpdir/pcr")
 	echo "$digest"
