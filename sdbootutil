@@ -102,6 +102,7 @@ entryfile="$tmpdir/entries.json"
 initialentryfile="$tmpdir/initial_entries.json"
 snapperfile="$tmpdir/snapper.json"
 tmpfile="$tmpdir/tmp"
+devicefile="$tmpdir/devices.json"
 
 helpandquit()
 {
@@ -1641,6 +1642,30 @@ bootloader_needs_update()
 	return 1
 }
 
+boot_root_drive_partno()
+{
+	local blkpart drive
+	blkpart="$(findmnt -nvo SOURCE "$boot_root")"
+	drive="${blkpart##*/}"
+	lsblk -o NAME,PKNAME,PARTN --json > "$devicefile"
+	# Read the json file with all the devices and, recursively,
+	# inspect the childrens looking for the partition that mounts
+	# /boot/efi.  Once it is found gets the partition number and
+	# the (kernel) name of the parent.
+	jq -r --arg name "$drive" \
+	   'first(
+	     .blockdevices[]
+	     | recurse(.children[]?)
+	     | select(.children? | arrays | map(.name == $name) | any)
+	     | {
+		 "partn": (.children[] | select(.name == $name).partn | tostring),
+		 "name": .name,
+		 "pkname": .pkname
+	       })
+	   | if .pkname then "/dev/" + .pkname + " " + .partn else "/dev/" + .name + " " + .partn end
+	   ' < "$devicefile"
+}
+
 install_bootloader()
 {
 	local snapshot=""
@@ -1658,7 +1683,7 @@ install_bootloader()
 		return 0
 	}
 
-	local bootloader bldr_name blkpart drive partno
+	local bootloader bldr_name
 	settle_entry_token "${snapshot}"
 
 	bootloader=$(find_bootloader "$snapshot")
@@ -1667,14 +1692,6 @@ install_bootloader()
 	dbg_var "bldr_name"
 
 	mkdir -p "$boot_root/loader/entries"
-
-	# The ESP presence was checked early
-	blkpart="$(findmnt -nvo SOURCE "$boot_root")"
-	[ -L "/sys/class/block/${blkpart##*/}" ] || err "$blkpart is not a partition"
-	drive="$(readlink -f "/sys/class/block/${blkpart##*/}")"
-	drive="${drive%/*}"
-	drive="/dev/${drive##*/}"
-	read -r partno < "/sys/class/block/${blkpart##*/}"/partition
 
 	if [ -n "$arg_secure_boot" ] && [ ! -e "$prefix$shimdir/shim.efi" ]; then
 		warn "A secure boot installation cannot be done. The shim package is not installed"
@@ -1721,6 +1738,8 @@ install_bootloader()
 	fi
 
 	# Create boot menu entry if it does not exist
+	local drive partno
+	read -r drive partno < <(boot_root_drive_partno)
 	local escaped_entry="${entry//\//\\\\}"
 	[ -n "$arg_no_variables" ] || [ -n "$arg_portable" ] || efibootmgr | grep -q "Boot.*${boot_manager}.*${escaped_entry}" || efibootmgr -q --create --disk "$drive" --part "$partno" --label "${boot_manager} ($bldr_name)" --loader "$entry" || true
 
@@ -2463,8 +2482,8 @@ pcrlock_grub2_bls()
 		pcrlock_grub2_bls_entry_files "0" "$tmpdir"
 	fi
 
-	blkpart="$(findmnt -nvo SOURCE "$boot_root")"
-	read -r partno < "/sys/class/block/${blkpart##*/}"/partition
+	local partno
+	read -r _ partno < <(boot_root_drive_partno)
 	# Once we are out of the BIOS / EFI, the numeration cannot be
 	# done without device.map.  It is safe to assume that the ESP
 	# is always the first disk (hd0)
