@@ -1102,7 +1102,9 @@ install_kernel()
 	sort_key="$os_release_ID"
 
 	add_version_to_title
-	if ! is_transactional && subvol_is_ro "$subvol"; then
+	if is_transactional && [ "$snapshot" = 1 ]; then
+		title="${title} (Initial Installation)"
+	elif ! is_transactional && subvol_is_ro "$subvol"; then
 		set_snapper_title_and_sortkey "$snapshot"
 	fi
 
