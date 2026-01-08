@@ -1,7 +1,7 @@
 #
 # spec file for package sdbootutil
 #
-# Copyright (c) 2025 SUSE LLC
+# Copyright (c) 2026 SUSE LLC
 #
 # All modifications and additions to the file contributed by third parties
 # remain the property of their copyright owners, unless otherwise agreed
@@ -188,11 +188,9 @@ install -D -m 755 measure-pcr-generator.sh %{buildroot}%{_prefix}/lib/dracut/mod
 install -D -m 755 measure-pcr-validator.sh %{buildroot}%{_prefix}/lib/dracut/modules.d/50measure-pcr/measure-pcr-validator.sh
 install -D -m 644 measure-pcr-validator.service %{buildroot}/%{_prefix}/lib/dracut/modules.d/50measure-pcr/measure-pcr-validator.service
 
-install -d -m 700 %{buildroot}%{_sharedstatedir}/%{name}
-
 # tmpfiles
-install -D -m 644 kernel-install-%{name}.conf \
-	%{buildroot}%{_prefix}/lib/tmpfiles.d/kernel-install-%{name}.conf
+install -Dpm 0644 %{name}.conf %{buildroot}%{_tmpfilesdir}/%{name}.conf
+install -Dpm 0644 kernel-install-%{name}.conf %{buildroot}%{_tmpfilesdir}/kernel-install-%{name}.conf
 
 %transfiletriggerin -- %{_prefix}/lib/systemd/boot/efi %{_datadir}/grub2/%{_build_arch}-efi %{_datadir}/efi/%{_build_arch}
 cat > /dev/null || :
@@ -220,6 +218,7 @@ fi
 
 %post
 %service_add_post %{name}-update-predictions.service
+%tmpfiles_create %{_tmpfilesdir}/%{name}.conf
 
 %preun enroll
 %service_del_preun %{name}-enroll.service
@@ -234,7 +233,7 @@ fi
 %service_add_post %{name}-enroll.service
 
 %posttrans kernel-install
-%tmpfiles_create kernel-install-%{name}.conf
+%tmpfiles_create %{_tmpfilesdir}/kernel-install-%{name}.conf
 
 %post dracut-measure-pcr
 %{?regenerate_initrd_post}
@@ -247,9 +246,9 @@ fi
 
 %files
 %license LICENSE
-%dir %{_sharedstatedir}/%{name}
 %{_bindir}/%{name}
 %{_unitdir}/%{name}-update-predictions.service
+%{_tmpfilesdir}/%{name}.conf
 %dir %{_libexecdir}/%{name}
 %{_libexecdir}/%{name}/uhmac
 
@@ -279,7 +278,7 @@ fi
 %dir %{_prefix}/lib/kernel
 %dir %{_prefix}/lib/kernel/install.d
 %{_prefix}/lib/kernel/install.d/*
-%{_prefix}/lib/tmpfiles.d/kernel-install-%{name}.conf
+%{_tmpfilesdir}/kernel-install-%{name}.conf
 
 %files enroll
 %{_bindir}/%{name}-enroll
