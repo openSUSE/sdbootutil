@@ -192,6 +192,12 @@ install -D -m 644 measure-pcr-validator.service %{buildroot}/%{_prefix}/lib/drac
 install -Dpm 0644 %{name}.conf %{buildroot}%{_tmpfilesdir}/%{name}.conf
 install -Dpm 0644 kernel-install-%{name}.conf %{buildroot}%{_tmpfilesdir}/kernel-install-%{name}.conf
 
+# tmpfiles_create macro is a noop, and the directories in /var/lib
+# will be present in the next reboot.  The problem is that when the
+# package is installed by YaST / Agama, this directory needs to be
+# present, as sdbootutil is called for enrollment
+install -d -m 700 %{buildroot}%{_sharedstatedir}/%{name}
+
 %transfiletriggerin -- %{_prefix}/lib/systemd/boot/efi %{_datadir}/grub2/%{_build_arch}-efi %{_datadir}/efi/%{_build_arch}
 cat > /dev/null || :
 [ "$YAST_IS_RUNNING" != 'instsys' ] || exit 0
@@ -218,7 +224,7 @@ fi
 
 %post
 %service_add_post %{name}-update-predictions.service
-%tmpfiles_create %{_tmpfilesdir}/%{name}.conf
+%tmpfiles_create %{name}.conf
 
 %preun enroll
 %service_del_preun %{name}-enroll.service
@@ -232,8 +238,8 @@ fi
 %post enroll
 %service_add_post %{name}-enroll.service
 
-%posttrans kernel-install
-%tmpfiles_create %{_tmpfilesdir}/kernel-install-%{name}.conf
+%post kernel-install
+%tmpfiles_create kernel-install-%{name}.conf
 
 %post dracut-measure-pcr
 %{?regenerate_initrd_post}
