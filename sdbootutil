@@ -1153,13 +1153,45 @@ install_kernel()
 		# also doing this check so late give the chance of
 		# adding the kernel or initrd in case that the user
 		# removes them
-		local entry_name
+		local entry_name target_name target_entry base_prefix existing
 		entry_name="$(entry_conf_file "$kernel_version" "$snapshot")"
-		loader_entry="$(find "$boot_root/loader/entries" -maxdepth 1 -type f -name "${entry_name%.conf}+*" -print -quit)"
-		if [ -z "$loader_entry" ]; then
-			loader_entry="$boot_root/loader/entries/$(entry_conf_file "$kernel_version" "$snapshot" "$tries")"
-			install_with_rollback "$tmpdir/entry.conf" "$loader_entry" || failed="bootloader entry"
+
+		if [ -n "$tries" ]; then
+			target_name="$(entry_conf_file "$kernel_version" "$snapshot" "$tries")"
+		else
+			target_name="$entry_name"
 		fi
+		target_entry="$boot_root/loader/entries/$target_name"
+
+		if [ -e "$target_entry" ]; then
+			local old_sum new_sum
+			calc_chksum "$target_entry"
+			old_sum="$chksum"
+			calc_chksum "$tmpdir/entry.conf"
+			new_sum="$chksum"
+			if [ "$old_sum" != "$new_sum" ]; then
+				install_with_rollback "$tmpdir/entry.conf" "$target_entry" || failed="bootloader entry"
+			else
+				dbg "Reusing $target_entry"
+			fi
+		else
+			install_with_rollback "$tmpdir/entry.conf" "$target_entry" || failed="bootloader entry"
+		fi
+
+		# Remove any other variant(s) (with or without boot counting)
+		if [ -z "$failed" ]; then
+			base_prefix="${entry_name%.conf}"
+			while IFS= read -r existing; do
+				[ -n "$existing" ] || continue
+				[ "$existing" = "$target_entry" ] && continue
+				rm -f -- "$existing"
+			done < <(
+				find "$boot_root/loader/entries" -maxdepth 1 -type f \
+					\( -name "${base_prefix}.conf" -o -name "${base_prefix}+*.conf" \) \
+					-print
+			)
+		fi
+
 		rm -f "$tmpdir/entry.conf"
 	fi
 	[ -z "$failed" ] || err "Failed to install $failed"
