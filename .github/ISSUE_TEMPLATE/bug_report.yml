@@ -27,7 +27,6 @@ body:
     attributes:
       label: Observed behavior
       description: What actually happens? Include exact error messages shown on screen or in logs.
-      render: text
     validations:
       required: true
   - type: textarea
@@ -35,7 +34,6 @@ body:
     attributes:
       label: Expected behavior
       description: What should have happened instead?
-      render: text
     validations:
       required: true
   - type: textarea
@@ -47,7 +45,6 @@ body:
         1. …
         2. …
         3. …
-      render: markdown
     validations:
       required: true
   - type: dropdown
@@ -139,6 +136,5 @@ body:
     attributes:
       label: Additional context
       description: Any other logs (journal excerpts), config, or details that help diagnose the issue.
-      render: text
     validations:
       required: false
