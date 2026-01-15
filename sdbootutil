@@ -13,9 +13,9 @@ verbose=
 [[ "$*" =~ "--stop-trace-code" ]] && rm -f "$DEBUG_LOG"
 if [ -f "$DEBUG_LOG" ]; then
 	verbose=3
-	echo "The trace of the code is being stored in $DEBUG_LOG"
-	echo "Remove the file or use --stop-trace-code to stop tracing the code"
-	echo "Audit the file before sharing, as secrets can be leaked"
+	echo "The trace of the code is being stored in $DEBUG_LOG" >&2
+	echo "Remove the file or use --stop-trace-code to stop tracing the code" >&2
+	echo "Audit the file before sharing, as secrets can be leaked" >&2
 	exec 3>>"$DEBUG_LOG"
 	export BASH_XTRACEFD=3
 	export PS4='+ \D{%F %T} ${BASH_SOURCE##*/}:${LINENO}:${FUNCNAME[0]:-main}: '
