@@ -1651,27 +1651,34 @@ bootloader_needs_update()
 	return 1
 }
 
-boot_root_drive_partno()
+boot_root_drive_partno_dseq()
 {
-	local blkpart drive
+	local blkpart drive disk_seq_min
 	blkpart="$(findmnt -nvo SOURCE "$boot_root")"
 	drive="${blkpart##*/}"
-	lsblk -o NAME,PKNAME,PARTN --json > "$devicefile"
+	lsblk -o NAME,PKNAME,PARTN,DISK-SEQ --json > "$devicefile"
 	# Read the json file with all the devices and, recursively,
 	# inspect the childrens looking for the partition that mounts
 	# /boot/efi.  Once it is found gets the partition number and
 	# the (kernel) name of the parent.
-	jq -r --arg name "$drive" \
+	#
+	# Use DISK-SEQ to guess the ordering of devices that GRUB2
+	# will see during boot (hdX,partY).  I saw that this value not
+	# always start with 0 for the kernel, but with 0 in GRUB2, so
+	# rebase it using the minimal found value.
+	disk_seq_min="$(jq -r '[.. | ."disk-seq"? | numbers] | min' < "$devicefile")"
+	jq -r --arg name "$drive" --arg base "$disk_seq_min" \
 	   'first(
 	     .blockdevices[]
 	     | recurse(.children[]?)
 	     | select(.children? | arrays | map(.name == $name) | any)
 	     | {
-		 "partn": (.children[] | select(.name == $name).partn | tostring),
+		 "partn": .children[] | select(.name == $name).partn | tostring,
 		 "name": .name,
-		 "pkname": .pkname
+		 "pkname": .pkname,
+		 "disk-seq": ."disk-seq" - ($base | tonumber) | tostring
 	       })
-	   | if .pkname then "/dev/" + .pkname + " " + .partn else "/dev/" + .name + " " + .partn end
+	   | if .pkname then "/dev/" + .pkname + " " + .partn + " " + ."disk-seq" else "/dev/" + .name + " " + .partn + " " + ."disk-seq" end
 	   ' < "$devicefile"
 }
 
@@ -1748,7 +1755,7 @@ install_bootloader()
 
 	# Create boot menu entry if it does not exist
 	local drive partno
-	read -r drive partno < <(boot_root_drive_partno)
+	read -r drive partno _ < <(boot_root_drive_partno_dseq)
 	local escaped_entry="${entry//\//\\\\}"
 	[ -n "$arg_no_variables" ] || [ -n "$arg_portable" ] || efibootmgr | grep -q "Boot.*${boot_manager}.*${escaped_entry}" || efibootmgr -q --create --disk "$drive" --part "$partno" --label "${boot_manager} ($bldr_name)" --loader "$entry" || true
 
@@ -2492,11 +2499,12 @@ pcrlock_grub2_bls()
 	fi
 
 	local partno
-	read -r _ partno < <(boot_root_drive_partno)
-	# Once we are out of the BIOS / EFI, the numeration cannot be
-	# done without device.map.  It is safe to assume that the ESP
-	# is always the first disk (hd0)
-	grub2_bls_drive="(hd0,gpt$partno)"
+	read -r _ partno dseq < <(boot_root_drive_partno_dseq)
+	# We are assuming that the disk sequence (that start with 1)
+	# is related with the disk sequence that GRUB2 see during boot
+	# time (that start with 0).  boot_root_drive_partno_dseq
+	# already set the correct start
+	grub2_bls_drive="(hd$dseq,gpt$partno)"
 
 	# Join linux, initrd and cmdline in a single pcrlock file
 	shift_component 650-grub2-bls-entry-cmdline
