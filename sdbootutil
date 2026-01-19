@@ -2290,7 +2290,7 @@ pcrlock_manual_raw()
 	echo ']}]}' >> "$pcrlock"
 }
 
-pcrlock_sdboot_cmdline_initrd()
+pcrlock_cmdline_initrd()
 {
 	local cmdline="$1"
 	local initrd="$2"
@@ -2298,11 +2298,21 @@ pcrlock_sdboot_cmdline_initrd()
 
 	# 710-kernel-cmdline-initrd-entry.pcrlock.d is not part of the
 	# pcrlock standards
-	echo "$cmdline" > "$tmpdir/cmdline"
-	pcrlock \
-		lock-kernel-cmdline \
-		--pcrlock="$tmpdir/cmdline.pcrlock" \
-		"$tmpdir/cmdline"
+	#
+	# When using systemd-boot, the cmdline is send to the kernel
+	# via UEFI with null termination (double \0, as is UTF-16
+	# enconding), but this is missing in GRUB2-BLS
+	echo -n "$cmdline" > "$tmpdir/cmdline"
+	if is_sdboot; then
+		pcrlock \
+			lock-kernel-cmdline \
+			--pcrlock="$tmpdir/cmdline.pcrlock" \
+			"$tmpdir/cmdline"
+	else
+		iconv -t UTF-16LE -o "$tmpdir/cmdline.utf16" "$tmpdir/cmdline"
+		pcrlock_manual_raw 9 "$tmpdir/cmdline.pcrlock" "$tmpdir/cmdline.utf16"
+		rm "$tmpdir/cmdline.utf16"
+	fi
 	pcrlock \
 		lock-kernel-initrd \
 		--pcrlock="$tmpdir/initrd.pcrlock" \
@@ -2318,14 +2328,16 @@ pcrlock_sdboot_cmdline_initrd()
 
 	# 710-kernel-cmdline-boot-loader.pcrlock.d is not part of the
 	# pcrlock standards
-	echo -ne "$cmdline\0" > "$tmpdir/cmdline"
-	iconv -t UTF-16LE -o "$tmpdir/cmdline.utf16" "$tmpdir/cmdline"
-	pcrlock \
-		lock-raw \
-		--pcr=12 \
-		--pcrlock="/var/lib/pcrlock.d/710-kernel-cmdline-boot-loader.pcrlock.d/cmdline-$suffix.pcrlock" \
-		"$tmpdir/cmdline.utf16"
-	rm "$tmpdir/cmdline.utf16"
+	if is_sdboot; then
+		echo -ne "$cmdline\0" > "$tmpdir/cmdline"
+		iconv -t UTF-16LE -o "$tmpdir/cmdline.utf16" "$tmpdir/cmdline"
+		pcrlock \
+			lock-raw \
+			--pcr=12 \
+			--pcrlock="/var/lib/pcrlock.d/710-kernel-cmdline-boot-loader.pcrlock.d/cmdline-$suffix.pcrlock" \
+			"$tmpdir/cmdline.utf16"
+		rm "$tmpdir/cmdline.utf16"
+	fi
 }
 
 pcrlock_grub2_bls_kernel_initrd()
@@ -2457,7 +2469,7 @@ pcrlock_sdboot()
 			info "More than 8 variations for 710-kernel-cmdline-initrd-entry"
 			continue
 		}
-		pcrlock_sdboot_cmdline_initrd "initrd=$cmdline" "${boot_root}$initrd" "$n"
+		pcrlock_cmdline_initrd "initrd=$cmdline" "${boot_root}$initrd" "$n"
 	done < <(jq --raw-output 'sort_by(.priority, (.kernel | map(-.))) | .[] | ([(.initrd[0] | sub("/"; "\\"; "g")), .options] | join(" ")), .initrd[0]' "$entryfile")
 
 	# Generate variation for 710-kernel-cmdline-initrd-entry
@@ -2471,7 +2483,7 @@ pcrlock_sdboot()
 		while read -r cmdline; do
 			read -r initrd
 			n=$((n+1))
-			pcrlock_sdboot_cmdline_initrd "initrd=$cmdline" "${tmpdir}$initrd" "0-$n"
+			pcrlock_cmdline_initrd "initrd=$cmdline" "${tmpdir}$initrd" "0-$n"
 		done < <(jq --raw-output '.[] | ([(.initrd[0] | sub("/"; "\\"; "g")), .options] | join(" ")), .initrd[0]' "$initialentryfile")
 	fi
 }
@@ -2597,6 +2609,41 @@ pcrlock_grub2_bls()
 			n=$((n+1))
 			pcrlock_grub2_bls_kernel_initrd "${tmpdir}$linux" "${tmpdir}$initrd" "0-$n"
 		done < <(jq --raw-output '.[] | .linux, .initrd[0]' "$initialentryfile")
+	fi
+
+	# Join the cmdline and the initrd in a single component
+	shift_component 710-kernel-cmdline-initrd-entry
+	shift_component 710-kernel-cmdline-boot-loader
+	n=0
+	while read -r cmdline; do
+		read -r linux
+		read -r initrd
+		[ -f "${boot_root}$linux" ] || {
+			info "Missing ${boot_root}$linux, ignoring entry for prediction"
+			continue
+		}
+		[ -f "${boot_root}$initrd" ] || {
+			info "Missing ${boot_root}$initrd, ignoring entry for prediction"
+			continue
+		}
+		n=$((n+1))
+		[ "$n" -le 8 ] || {
+			info "More than 8 variations for 710-kernel-cmdline-initrd-entry"
+			continue
+		}
+		pcrlock_cmdline_initrd "BOOT_IMAGE=${grub2_bls_drive}$linux $cmdline" "${boot_root}$initrd" "$n"
+	done < <(jq --raw-output 'sort_by(.priority, (.kernel | map(-.))) | .[] | (.options, .linux, .initrd[0])' "$entryfile")
+
+	# Generate variation for 710-kernel-cmdline-initrd-entry for
+	# the same reason than before
+	n=0
+	if [ "$SDB_ADD_INITIAL_COMPONENT" = "1" ]; then
+		while read -r cmdline; do
+			read -r linux
+			read -r initrd
+			n=$((n+1))
+			pcrlock_cmdline_initrd "BOOT_IMAGE=${grub2_bls_drive}$linux $cmdline" "${tmpdir}$initrd" "0-$n"
+		done < <(jq --raw-output '.[] | (.options, .linux, .initrd[0]' "$initialentryfile")
 	fi
 }
 
