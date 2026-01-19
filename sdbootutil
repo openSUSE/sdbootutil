@@ -1148,18 +1148,22 @@ install_kernel()
 			tries=
 		fi
 
-		# If the version without "tries" suffix is present, do
-		# not create a new one.  This avoid duplication, but
-		# also doing this check so late give the chance of
-		# adding the kernel or initrd in case that the user
-		# removes them
+		# `install_kernel` can be used when a new kernel gets
+		# installed, but also is used when a new initrd is
+		# generated for an already present kernel.  In this
+		# last case there exist a boot entry, that can have a
+		# boot counter or not.  To avoid duplication of boot
+		# entries (one with a counter an another without it),
+		# and to be sure that we reset the boot counter (there
+		# is no guarantee that the new `initrd` will boot the
+		# system), we replace the old boot entry.  Also doing
+		# this check this late give the chance of adding the
+		# kernel or initrd in case that the user removes them
 		local entry_name
 		entry_name="$(entry_conf_file "$kernel_version" "$snapshot")"
-		loader_entry="$(find "$boot_root/loader/entries" -maxdepth 1 -type f -name "${entry_name%.conf}+*" -print -quit)"
-		if [ -z "$loader_entry" ]; then
-			loader_entry="$boot_root/loader/entries/$(entry_conf_file "$kernel_version" "$snapshot" "$tries")"
-			install_with_rollback "$tmpdir/entry.conf" "$loader_entry" || failed="bootloader entry"
-		fi
+		rm -f "$boot_root/loader/entries/${entry_name}*.conf"
+		loader_entry="$boot_root/loader/entries/$(entry_conf_file "$kernel_version" "$snapshot" "$tries")"
+		install_with_rollback "$tmpdir/entry.conf" "$loader_entry" || failed="bootloader entry"
 		rm -f "$tmpdir/entry.conf"
 	fi
 	[ -z "$failed" ] || err "Failed to install $failed"
