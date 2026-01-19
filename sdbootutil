@@ -650,15 +650,20 @@ install_with_rollback()
 {
 	local src="${1:?}"
 	local dst="${2:?}"
+	local old="${3:-$dst}"
 
-	if [ -e "$dst" ]; then
-		if cmp -s "$src" "$dst"; then
-			info "$dst unchanged"
+	# Install `src` as `dst` if the file is new or different.  If
+	# the file is present with the `old` name, if will be kept if
+	# the file did not change, else it will be installed with the
+	# new name (`dst`)
+	if [ -e "$old" ]; then
+		if cmp -s "$src" "$old"; then
+			info "$old unchanged"
 			return 0
 		fi
-		mv "$dst" "$dst.bak" || return "$?"
+		mv "$old" "$old.bak" || return "$?"
 	fi
-	rollback+=("$dst")
+	rollback+=("$old")
 	install -p -m 0644 "$src" "$dst" || return "$?"
 	chown root:root "$dst" 2> /dev/null || :
 	info "Installed $dst"
@@ -1148,20 +1153,22 @@ install_kernel()
 			tries=
 		fi
 
-        # If a boot entry for this snapshot exists, do not create a new one,
-        # leaving the boot counting as it is. The only components that changes
-        # is the initramfs, which can also be untested. In case a boot entry
-        # marked as good has a newly generated initramfs that doesn't work,
-        # leave the handling to health-checker fail-safe. This avoids
-        # duplication, but also doing this check so late give the chance of
-        # adding the kernel or initrd in case that the user removes them
-		local entry_name
+		# The entry can be already present with or without
+		# boot counter.  In any case, if a new `initrd` was
+		# created with a different `sha1`, then this boot
+		# entry needs to be replaced, but under the new name
+		# (with the boot counter configured in
+		# `/etc/kernel/tries`)
+		#
+		# This replacement is done to avoid duplication.
+		# Hopefully doing this check this late give the chance
+		# of adding the kernel or initrd in case that the user
+		# removes them
+		local entry_name loader_entry loader_entry_current
 		entry_name="$(entry_conf_file "$kernel_version" "$snapshot")"
-		loader_entry="$(find "$boot_root/loader/entries" -maxdepth 1 -type f -name "${entry_name%.conf}*" -print -quit)"
-		if [ -z "$loader_entry" ]; then
-			loader_entry="$boot_root/loader/entries/$(entry_conf_file "$kernel_version" "$snapshot" "$tries")"
-			install_with_rollback "$tmpdir/entry.conf" "$loader_entry" || failed="bootloader entry"
-		fi
+		loader_entry="$boot_root/loader/entries/$(entry_conf_file "$kernel_version" "$snapshot" "$tries")"
+		loader_entry_current="$(find "$boot_root/loader/entries" -maxdepth 1 -type f -name "${entry_name%.conf}*" -print -quit)"
+		install_with_rollback "$tmpdir/entry.conf" "$loader_entry" "$loader_entry_current" || failed="bootloader entry"
 		rm -f "$tmpdir/entry.conf"
 	fi
 	[ -z "$failed" ] || err "Failed to install $failed"
