@@ -31,6 +31,7 @@ arg_all_entries=
 arg_entry_keys=()
 arg_no_variables=
 arg_no_reuse_initrd=
+arg_reset_counting=
 arg_no_random_seed=
 arg_portable=
 arg_secure_boot=
@@ -119,6 +120,7 @@ helpandquit()
 		  --entry-keys		Comma separated list of keys
 		  --no-variables	Do not update UEFI variables
 		  --no-reuse-initrd	Always regenerate initrd
+		  --reset-counting	Reset boot counting of all entries
 		  --sync		Synchronize (update, downgrade) the bootloader
 		  --portable		Handle bootloader on portable devices
 		                        (also --removable possible)
@@ -1165,10 +1167,10 @@ install_kernel()
 			# The old entry has the same content as the new one
 			# This will also be true if boot counting is active
 			# for the old entry, but disabled for the new one.
-			# We will not remove boot counters from existing
-			# entries.
-			if cmp -s "$tmpdir/entry.conf" "$existing"; then
-				info "Reusing $existing"
+			# We will not change the boot counter of existing
+			# entries, unless explicitely asked.
+			if [ -z "$arg_reset_counting" ] && cmp -s "$tmpdir/entry.conf" "$existing"; then
+				info "$existing unchanged"
 			else
 				# Write new entry
 				# New entry and old entry have the same name
@@ -3854,6 +3856,7 @@ define_options() {
 		[entry-keys]="_find_kernels"
 		[no-variables]=""
 		[no-reuse-initrd]=""
+		[reset-counting]=""
 		[no-random-seed]=""
 		[all]=""
 		[sync]=""
@@ -3911,6 +3914,7 @@ while true ; do
 		--entry-keys) IFS=',' read -r -a arg_entry_keys <<<"$2"; shift 2 ;;
 		--no-variables) arg_no_variables=1; shift ;;
 		--no-reuse-initrd) arg_no_reuse_initrd=1; shift ;;
+		--reset-counting) arg_reset_counting=1; shift ;;
 		--no-random-seed) arg_no_random_seed=1; shift ;;
 		--all) arg_all_entries=1; shift ;;
 		--sync) arg_sync=1; shift ;;
