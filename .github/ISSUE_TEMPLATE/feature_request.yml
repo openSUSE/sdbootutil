@@ -24,15 +24,13 @@ body:
     attributes:
       label: Problem / use case
       description: What problem does this solve? Who benefits?
-      render: text
     validations:
       required: true
   - type: textarea
     id: proposal
     attributes:
       label: Proposed solution / expected behavior
-      description: Describe how you expect it to work (CLI flags, UI, workflow...).
-      render: text
+      description: Describe how you expect it to work (CLI flags, workflow...).
     validations:
       required: true
   - type: textarea
@@ -40,21 +38,21 @@ body:
     attributes:
       label: Alternatives considered
       description: Other approaches you’ve tried or could work
-      render: text
     validations:
       required: false
   - type: input
     id: scope
     attributes:
       label: Affected component(s)
-      placeholder: e.g., sdbootutil, enrollment, predictions, installer, docs
+      placeholder: e.g. enrollment, predictions, installer, docs
     validations:
       required: false
   - type: input
     id: versions
     attributes:
-      label: Version(s) you’re using
-      placeholder: e.g., "sdbootutil 0.9.0 on Tumbleweed x86_64"
+      label: sdbootutil version
+      description: Output of `zypper info sdbootutil | grep Version`
+      placeholder: sdbootutil 1+git20250804.8dccab3-1.1
     validations:
       required: false
   - type: textarea
@@ -62,6 +60,5 @@ body:
     attributes:
       label: Additional context
       description: Mockups, links, related issues, prior art, etc.
-      render: text
     validations:
       required: false

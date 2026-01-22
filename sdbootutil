@@ -13,9 +13,9 @@ verbose=
 [[ "$*" =~ "--stop-trace-code" ]] && rm -f "$DEBUG_LOG"
 if [ -f "$DEBUG_LOG" ]; then
 	verbose=3
-	echo "The trace of the code is being stored in $DEBUG_LOG"
-	echo "Remove the file or use --stop-trace-code to stop tracing the code"
-	echo "Audit the file before sharing, as secrets can be leaked"
+	echo "The trace of the code is being stored in $DEBUG_LOG" >&2
+	echo "Remove the file or use --stop-trace-code to stop tracing the code" >&2
+	echo "Audit the file before sharing, as secrets can be leaked" >&2
 	exec 3>>"$DEBUG_LOG"
 	export BASH_XTRACEFD=3
 	export PS4='+ \D{%F %T} ${BASH_SOURCE##*/}:${LINENO}:${FUNCNAME[0]:-main}: '
@@ -3065,7 +3065,11 @@ generate_tpm2_predictions()
 	# situation but fail during the initial enrollment.  This is
 	# because we generate the prediction first and later we do the
 	# enrollment
-	is_config_file || err "/etc/sysconfig/fde-tools not found"
+	is_config_file || {
+		warn "/etc/sysconfig/fde-tools not found (manual enrollment?)"
+		warn "No TPM2 predictions generated"
+		return 0
+	}
 	load_config_file
 	[ -z "$arg_pcr" ] || FDE_SEAL_PCR_LIST="$arg_pcr"
 
@@ -3121,8 +3125,11 @@ detect_tracked_devices()
 	while read -r dev fstype uuid; do
 		[ "$fstype" = 'crypto_LUKS' ] || continue
 		cryptsetup isLuks --type luks2 "$dev" || continue
-		[ -e /etc/crypttab ] && grep -E -q "${dev}[[:space:]].*x-sdbootutil.ignore" /etc/crypttab && continue
-		[ -e /etc/crypttab ] && grep -E -q "${uuid}[[:space:]].*x-sdbootutil.ignore" /etc/crypttab && continue
+		if [ -e /etc/crypttab ]; then
+			grep -E -q "(${dev}|${uuid})" /etc/crypttab || continue
+			grep -E -q "${dev}[[:space:]].*x-sdbootutil.ignore" /etc/crypttab && continue
+			grep -E -q "${uuid}[[:space:]].*x-sdbootutil.ignore" /etc/crypttab && continue
+		fi
 		dbg "Tracking encrypted device $dev"
 		tracked_devices+=("$dev")
 	done < <(lsblk --noheadings -o PATH,FSTYPE,UUID)

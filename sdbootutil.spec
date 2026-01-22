@@ -1,7 +1,7 @@
 #
 # spec file for package sdbootutil
 #
-# Copyright (c) 2025 SUSE LLC
+# Copyright (c) 2026 SUSE LLC
 #
 # All modifications and additions to the file contributed by third parties
 # remain the property of their copyright owners, unless otherwise agreed
@@ -49,7 +49,7 @@ Supplements:    (grub2-x86_64-efi-bls and shim)
 Supplements:    (systemd-boot and shim)
 # Because uhmac it is not a noarch package
 # BuildArch:      noarch
-ExclusiveArch:  aarch64 riscv64 x86_64
+ExclusiveArch:  aarch64 %{arm} riscv64 x86_64
 %{?systemd_requires}
 
 %description
@@ -188,11 +188,15 @@ install -D -m 755 measure-pcr-generator.sh %{buildroot}%{_prefix}/lib/dracut/mod
 install -D -m 755 measure-pcr-validator.sh %{buildroot}%{_prefix}/lib/dracut/modules.d/50measure-pcr/measure-pcr-validator.sh
 install -D -m 644 measure-pcr-validator.service %{buildroot}/%{_prefix}/lib/dracut/modules.d/50measure-pcr/measure-pcr-validator.service
 
-install -d -m 700 %{buildroot}%{_sharedstatedir}/%{name}
-
 # tmpfiles
-install -D -m 644 kernel-install-%{name}.conf \
-	%{buildroot}%{_prefix}/lib/tmpfiles.d/kernel-install-%{name}.conf
+install -Dpm 0644 %{name}.conf %{buildroot}%{_tmpfilesdir}/%{name}.conf
+install -Dpm 0644 kernel-install-%{name}.conf %{buildroot}%{_tmpfilesdir}/kernel-install-%{name}.conf
+
+# tmpfiles_create macro is a noop, and the directories in /var/lib
+# will be present in the next reboot.  The problem is that when the
+# package is installed by YaST / Agama, this directory needs to be
+# present, as sdbootutil is called for enrollment
+install -d -m 700 %{buildroot}%{_sharedstatedir}/%{name}
 
 %transfiletriggerin -- %{_prefix}/lib/systemd/boot/efi %{_datadir}/grub2/%{_build_arch}-efi %{_datadir}/efi/%{_build_arch}
 cat > /dev/null || :
@@ -220,6 +224,7 @@ fi
 
 %post
 %service_add_post %{name}-update-predictions.service
+%tmpfiles_create %{name}.conf
 
 %preun enroll
 %service_del_preun %{name}-enroll.service
@@ -233,7 +238,7 @@ fi
 %post enroll
 %service_add_post %{name}-enroll.service
 
-%posttrans kernel-install
+%post kernel-install
 %tmpfiles_create kernel-install-%{name}.conf
 
 %post dracut-measure-pcr
@@ -247,9 +252,9 @@ fi
 
 %files
 %license LICENSE
-%dir %{_sharedstatedir}/%{name}
 %{_bindir}/%{name}
 %{_unitdir}/%{name}-update-predictions.service
+%{_tmpfilesdir}/%{name}.conf
 %dir %{_libexecdir}/%{name}
 %{_libexecdir}/%{name}/uhmac
 
@@ -279,7 +284,7 @@ fi
 %dir %{_prefix}/lib/kernel
 %dir %{_prefix}/lib/kernel/install.d
 %{_prefix}/lib/kernel/install.d/*
-%{_prefix}/lib/tmpfiles.d/kernel-install-%{name}.conf
+%{_tmpfilesdir}/kernel-install-%{name}.conf
 
 %files enroll
 %{_bindir}/%{name}-enroll
