@@ -31,6 +31,7 @@ arg_all_entries=
 arg_entry_keys=()
 arg_no_variables=
 arg_no_reuse_initrd=
+arg_reset_counting=
 arg_no_random_seed=
 arg_portable=
 arg_secure_boot=
@@ -119,6 +120,7 @@ helpandquit()
 		  --entry-keys		Comma separated list of keys
 		  --no-variables	Do not update UEFI variables
 		  --no-reuse-initrd	Always regenerate initrd
+		  --reset-counting	Reset boot counting of all entries
 		  --sync		Synchronize (update, downgrade) the bootloader
 		  --portable		Handle bootloader on portable devices
 		                        (also --removable possible)
@@ -1148,19 +1150,55 @@ install_kernel()
 			tries=
 		fi
 
-        # If a boot entry for this snapshot exists, do not create a new one,
-        # leaving the boot counting as it is. The only components that changes
-        # is the initramfs, which can also be untested. In case a boot entry
-        # marked as good has a newly generated initramfs that doesn't work,
-        # leave the handling to health-checker fail-safe. This avoids
-        # duplication, but also doing this check so late give the chance of
-        # adding the kernel or initrd in case that the user removes them
-		local entry_name
+		# If the version with or without "tries" suffix is present,
+		# do not create a new one.  This avoid duplication, but
+		# also doing this check so late give the chance of
+		# adding the kernel or initrd in case that the user
+		# removes them
+		local entry_name target_entry existing
 		entry_name="$(entry_conf_file "$kernel_version" "$snapshot")"
-		loader_entry="$(find "$boot_root/loader/entries" -maxdepth 1 -type f -name "${entry_name%.conf}*" -print -quit)"
-		if [ -z "$loader_entry" ]; then
-			loader_entry="$boot_root/loader/entries/$(entry_conf_file "$kernel_version" "$snapshot" "$tries")"
-			install_with_rollback "$tmpdir/entry.conf" "$loader_entry" || failed="bootloader entry"
+		target_entry="$boot_root/loader/entries/$(entry_conf_file "$kernel_version" "$snapshot" "$tries")"
+
+		# Detect a (possibly) existing entry
+		# We assume at max one exists so far
+		existing="$(find "$boot_root/loader/entries" -maxdepth 1 -type f -name "${entry_name%.conf}*.conf" -print -quit)"
+
+		if [ -e "$existing" ]; then
+			# The old entry has the same content as the new one
+			# This will also be true if boot counting is active
+			# for the old entry, but disabled for the new one.
+			# We will not change the boot counter of existing
+			# entries, unless explicitely asked.
+			if [ -z "$arg_reset_counting" ] && cmp -s "$tmpdir/entry.conf" "$existing"; then
+				info "$existing unchanged"
+			else
+				# Write new entry
+				# New entry and old entry have the same name
+				if [[ "$existing" == "$target_entry" ]]; then
+					install_with_rollback "$tmpdir/entry.conf" "$target_entry" || failed="bootloader entry"
+				else
+					# We can't use install_with_rollback since names differs
+					mv "$existing" "$existing.bak" || failed="bootloader entry"
+					if [ -z "$failed" ]; then
+						install -p -m 0644 "$tmpdir/entry.conf" "$target_entry" || failed="bootloader entry"
+						chown root:root "$target_entry" 2> /dev/null || :
+						info "Installed $target_entry"
+					fi
+					# We can't use the trap cleanup since names differ
+					if [ -z "$failed" ]; then
+						# This leftover file should not lead to a failed state
+						info "Removing $existing.bak"
+						rm -f "$existing.bak" || :
+					else
+						info "Restoring $existing.bak"
+						mv "$existing.bak" "$existing" || :
+						rm -f "$target_entry"
+					fi
+				fi
+			fi
+		else
+			# No existing entry: create the target entry
+			install_with_rollback "$tmpdir/entry.conf" "$target_entry" || failed="bootloader entry"
 		fi
 		rm -f "$tmpdir/entry.conf"
 	fi
@@ -3825,6 +3863,7 @@ define_options() {
 		[entry-keys]="_find_kernels"
 		[no-variables]=""
 		[no-reuse-initrd]=""
+		[reset-counting]=""
 		[no-random-seed]=""
 		[all]=""
 		[sync]=""
@@ -3882,6 +3921,7 @@ while true ; do
 		--entry-keys) IFS=',' read -r -a arg_entry_keys <<<"$2"; shift 2 ;;
 		--no-variables) arg_no_variables=1; shift ;;
 		--no-reuse-initrd) arg_no_reuse_initrd=1; shift ;;
+		--reset-counting) arg_reset_counting=1; shift ;;
 		--no-random-seed) arg_no_random_seed=1; shift ;;
 		--all) arg_all_entries=1; shift ;;
 		--sync) arg_sync=1; shift ;;
