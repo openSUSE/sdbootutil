@@ -2560,8 +2560,8 @@ pcrlock_grub2_bls()
 		done < <(jq --raw-output '.[] | .options, .linux, .initrd[0]' "$initialentryfile")
 	fi
 
-	# With secure boot, grub2-bls invokes shim to extend PCR4
-	if is_secure_boot; then
+	# If shim is installed, grub2-bls invokes shim to extend PCR4
+	if is_shim_installed || is_secure_boot; then
 		# 650-kernel-efi-application.pcrlock is not part of
 		# the pcrlock standards
 		# TODO: move to kernel-TYPE-pcrlock.rpm
@@ -2643,7 +2643,7 @@ pcrlock_grub2_bls()
 			read -r initrd
 			n=$((n+1))
 			pcrlock_cmdline_initrd "BOOT_IMAGE=${grub2_bls_drive}$linux $cmdline" "${tmpdir}$initrd" "0-$n"
-		done < <(jq --raw-output '.[] | (.options, .linux, .initrd[0]' "$initialentryfile")
+		done < <(jq --raw-output '.[] | (.options, .linux, .initrd[0])' "$initialentryfile")
 	fi
 }
 
