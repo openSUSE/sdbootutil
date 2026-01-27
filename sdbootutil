@@ -2271,25 +2271,6 @@ shift_component()
 	find /var/lib/pcrlock.d/"$component".pcrlock.d -name '*.pcrlock' ! -name 'shift-*.pcrlock' -delete
 }
 
-pcrlock_manual_raw()
-{
-	local pcr="$1"
-	local pcrlock="$2"
-	local element="$3"
-
-	echo -n '{"records":[{"pcr":'"$pcr"',"digests":[' > "$pcrlock"
-	local separator=0
-	local digest
-	for dgst in sha1 sha256 sha384 sha512; do
-		[ "$separator" = "0" ] || echo -n "," >> "$pcrlock"
-		separator=1
-		hash "${dgst}sum" || continue
-		read -r digest _ < <("${dgst}sum" "$element")
-		echo -n '{"hashAlg":"'"$dgst"'","digest":"'"$digest"'"}' >> "$pcrlock"
-	done
-	echo ']}]}' >> "$pcrlock"
-}
-
 pcrlock_cmdline_initrd()
 {
 	local cmdline="$1"
@@ -2310,13 +2291,17 @@ pcrlock_cmdline_initrd()
 			"$tmpdir/cmdline"
 	else
 		iconv -t UTF-16LE -o "$tmpdir/cmdline.utf16" "$tmpdir/cmdline"
-		pcrlock_manual_raw 9 "$tmpdir/cmdline.pcrlock" "$tmpdir/cmdline.utf16"
+		pcrlock \
+			lock-raw \
+			--pcr=9 \
+			--pcrlock="$tmpdir/cmdline.pcrlock" \
+			"$tmpdir/cmdline.utf16"
 		rm "$tmpdir/cmdline.utf16"
 	fi
 	pcrlock \
 		lock-kernel-initrd \
 		--pcrlock="$tmpdir/initrd.pcrlock" \
-		"$initrd" 2> /dev/null || pcrlock_manual_raw 9 "$tmpdir/initrd.pcrlock" "$initrd"
+		"$initrd" 2> /dev/null
 	mkdir -p /var/lib/pcrlock.d/710-kernel-cmdline-initrd-entry.pcrlock.d
 	jq --slurp '{"records": [.[].records[0]]}' \
 	   "$tmpdir/cmdline.pcrlock" \
@@ -2355,7 +2340,7 @@ pcrlock_grub2_bls_kernel_initrd()
 			lock-raw \
 			--pcr=9 \
 			--pcrlock "$tmpdir/element-$n.pcrlock" \
-			"$element" 2> /dev/null || pcrlock_manual_raw 9 "$tmpdir/element-$n.pcrlock" "$element"
+			"$element" 2> /dev/null
 		locks+=("$tmpdir/element-$n.pcrlock")
 	done
 	mkdir -p /var/lib/pcrlock.d/710-grub2-bls-kernel-initrd-entry.pcrlock.d
