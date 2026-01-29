@@ -1651,27 +1651,34 @@ bootloader_needs_update()
 	return 1
 }
 
-boot_root_drive_partno()
+boot_root_drive_partno_dseq()
 {
-	local blkpart drive
+	local blkpart drive disk_seq_min
 	blkpart="$(findmnt -nvo SOURCE "$boot_root")"
 	drive="${blkpart##*/}"
-	lsblk -o NAME,PKNAME,PARTN --json > "$devicefile"
+	lsblk -o NAME,PKNAME,PARTN,DISK-SEQ --json > "$devicefile"
 	# Read the json file with all the devices and, recursively,
 	# inspect the childrens looking for the partition that mounts
 	# /boot/efi.  Once it is found gets the partition number and
 	# the (kernel) name of the parent.
-	jq -r --arg name "$drive" \
+	#
+	# Use DISK-SEQ to guess the ordering of devices that GRUB2
+	# will see during boot (hdX,partY).  I saw that this value not
+	# always start with 0 for the kernel, but with 0 in GRUB2, so
+	# rebase it using the minimal found value.
+	disk_seq_min="$(jq -r '[.. | ."disk-seq"? | numbers] | min' < "$devicefile")"
+	jq -r --arg name "$drive" --arg base "$disk_seq_min" \
 	   'first(
 	     .blockdevices[]
 	     | recurse(.children[]?)
 	     | select(.children? | arrays | map(.name == $name) | any)
 	     | {
-		 "partn": (.children[] | select(.name == $name).partn | tostring),
+		 "partn": .children[] | select(.name == $name).partn | tostring,
 		 "name": .name,
-		 "pkname": .pkname
+		 "pkname": .pkname,
+		 "disk-seq": ."disk-seq" - ($base | tonumber) | tostring
 	       })
-	   | if .pkname then "/dev/" + .pkname + " " + .partn else "/dev/" + .name + " " + .partn end
+	   | if .pkname then "/dev/" + .pkname + " " + .partn + " " + ."disk-seq" else "/dev/" + .name + " " + .partn + " " + ."disk-seq" end
 	   ' < "$devicefile"
 }
 
@@ -1748,7 +1755,7 @@ install_bootloader()
 
 	# Create boot menu entry if it does not exist
 	local drive partno
-	read -r drive partno < <(boot_root_drive_partno)
+	read -r drive partno _ < <(boot_root_drive_partno_dseq)
 	local escaped_entry="${entry//\//\\\\}"
 	[ -n "$arg_no_variables" ] || [ -n "$arg_portable" ] || efibootmgr | grep -q "Boot.*${boot_manager}.*${escaped_entry}" || efibootmgr -q --create --disk "$drive" --part "$partno" --label "${boot_manager} ($bldr_name)" --loader "$entry" || true
 
@@ -2264,26 +2271,7 @@ shift_component()
 	find /var/lib/pcrlock.d/"$component".pcrlock.d -name '*.pcrlock' ! -name 'shift-*.pcrlock' -delete
 }
 
-pcrlock_manual_raw()
-{
-	local pcr="$1"
-	local pcrlock="$2"
-	local element="$3"
-
-	echo -n '{"records":[{"pcr":'"$pcr"',"digests":[' > "$pcrlock"
-	local separator=0
-	local digest
-	for dgst in sha1 sha256 sha384 sha512; do
-		[ "$separator" = "0" ] || echo -n "," >> "$pcrlock"
-		separator=1
-		hash "${dgst}sum" || continue
-		read -r digest _ < <("${dgst}sum" "$element")
-		echo -n '{"hashAlg":"'"$dgst"'","digest":"'"$digest"'"}' >> "$pcrlock"
-	done
-	echo ']}]}' >> "$pcrlock"
-}
-
-pcrlock_sdboot_cmdline_initrd()
+pcrlock_cmdline_initrd()
 {
 	local cmdline="$1"
 	local initrd="$2"
@@ -2291,15 +2279,38 @@ pcrlock_sdboot_cmdline_initrd()
 
 	# 710-kernel-cmdline-initrd-entry.pcrlock.d is not part of the
 	# pcrlock standards
-	echo "$cmdline" > "$tmpdir/cmdline"
-	pcrlock \
-		lock-kernel-cmdline \
-		--pcrlock="$tmpdir/cmdline.pcrlock" \
-		"$tmpdir/cmdline"
+	#
+	# When using systemd-boot or GRUB2-BLS >= 2.14, the cmdline is
+	# send to the kernel via UEFI with null termination (double
+	# \0, as is UTF-16 enconding), but this is missing in
+	# GRUB2-BLS <= 2.12
+	echo -n "$cmdline" > "$tmpdir/cmdline"
+	if is_sdboot; then
+		pcrlock \
+			lock-kernel-cmdline \
+			--pcrlock="$tmpdir/cmdline.pcrlock" \
+			"$tmpdir/cmdline"
+	else
+		if systemd-analyze compare-versions "2.12" ">=" "$(bootloader_version)"; then
+			iconv -t UTF-16LE -o "$tmpdir/cmdline.utf16" "$tmpdir/cmdline"
+			pcrlock \
+				lock-raw \
+				--pcr=9 \
+				--pcrlock="$tmpdir/cmdline.pcrlock" \
+				"$tmpdir/cmdline.utf16"
+			rm "$tmpdir/cmdline.utf16"
+		else
+			pcrlock \
+				lock-kernel-cmdline \
+				--pcr=9 \
+				--pcrlock="$tmpdir/cmdline.pcrlock" \
+				"$tmpdir/cmdline"
+		fi
+	fi
 	pcrlock \
 		lock-kernel-initrd \
 		--pcrlock="$tmpdir/initrd.pcrlock" \
-		"$initrd" 2> /dev/null || pcrlock_manual_raw 9 "$tmpdir/initrd.pcrlock" "$initrd"
+		"$initrd" 2> /dev/null
 	mkdir -p /var/lib/pcrlock.d/710-kernel-cmdline-initrd-entry.pcrlock.d
 	jq --slurp '{"records": [.[].records[0]]}' \
 	   "$tmpdir/cmdline.pcrlock" \
@@ -2311,14 +2322,13 @@ pcrlock_sdboot_cmdline_initrd()
 
 	# 710-kernel-cmdline-boot-loader.pcrlock.d is not part of the
 	# pcrlock standards
-	echo -ne "$cmdline\0" > "$tmpdir/cmdline"
-	iconv -t UTF-16LE -o "$tmpdir/cmdline.utf16" "$tmpdir/cmdline"
-	pcrlock \
-		lock-raw \
-		--pcr=12 \
-		--pcrlock="/var/lib/pcrlock.d/710-kernel-cmdline-boot-loader.pcrlock.d/cmdline-$suffix.pcrlock" \
-		"$tmpdir/cmdline.utf16"
-	rm "$tmpdir/cmdline.utf16"
+	if is_sdboot; then
+		pcrlock \
+			lock-kernel-cmdline \
+			--pcr=12 \
+			--pcrlock="/var/lib/pcrlock.d/710-kernel-cmdline-boot-loader.pcrlock.d/cmdline-$suffix.pcrlock" \
+			"$tmpdir/cmdline"
+	fi
 }
 
 pcrlock_grub2_bls_kernel_initrd()
@@ -2336,7 +2346,7 @@ pcrlock_grub2_bls_kernel_initrd()
 			lock-raw \
 			--pcr=9 \
 			--pcrlock "$tmpdir/element-$n.pcrlock" \
-			"$element" 2> /dev/null || pcrlock_manual_raw 9 "$tmpdir/element-$n.pcrlock" "$element"
+			"$element" 2> /dev/null
 		locks+=("$tmpdir/element-$n.pcrlock")
 	done
 	mkdir -p /var/lib/pcrlock.d/710-grub2-bls-kernel-initrd-entry.pcrlock.d
@@ -2405,9 +2415,10 @@ pcrlock_sdboot()
 	if [ -e "${boot_root}/loader/loader.conf" ]; then
 		shift_component 641-sdboot-loader-conf
 		pcrlock \
-			lock-raw "${boot_root}/loader/loader.conf" \
+			lock-raw \
 			--pcr=5 \
-			--pcrlock=/var/lib/pcrlock.d/641-sdboot-loader-conf.pcrlock.d/generated.pcrlock
+			--pcrlock=/var/lib/pcrlock.d/641-sdboot-loader-conf.pcrlock.d/generated.pcrlock \
+			"${boot_root}/loader/loader.conf"
 	fi
 
 	# 650-kernel-efi-application.pcrlock is not part of the
@@ -2431,7 +2442,7 @@ pcrlock_sdboot()
 		}
 		pcrlock \
 			lock-pe \
-			--pcrlock=/var/lib/pcrlock.d/650-kernel-efi-application.pcrlock.d/linux-"$n".pcrlock \
+			--pcrlock="/var/lib/pcrlock.d/650-kernel-efi-application.pcrlock.d/linux-$n.pcrlock" \
 			"${boot_root}/$linux"
 	done < <(jq --raw-output 'sort_by(.priority, (.kernel | map(-.))) | map(.linux) | .[]' "$entryfile")
 
@@ -2450,7 +2461,7 @@ pcrlock_sdboot()
 			info "More than 8 variations for 710-kernel-cmdline-initrd-entry"
 			continue
 		}
-		pcrlock_sdboot_cmdline_initrd "initrd=$cmdline" "${boot_root}$initrd" "$n"
+		pcrlock_cmdline_initrd "initrd=$cmdline" "${boot_root}$initrd" "$n"
 	done < <(jq --raw-output 'sort_by(.priority, (.kernel | map(-.))) | .[] | ([(.initrd[0] | sub("/"; "\\"; "g")), .options] | join(" ")), .initrd[0]' "$entryfile")
 
 	# Generate variation for 710-kernel-cmdline-initrd-entry
@@ -2464,7 +2475,7 @@ pcrlock_sdboot()
 		while read -r cmdline; do
 			read -r initrd
 			n=$((n+1))
-			pcrlock_sdboot_cmdline_initrd "initrd=$cmdline" "${tmpdir}$initrd" "0-$n"
+			pcrlock_cmdline_initrd "initrd=$cmdline" "${tmpdir}$initrd" "0-$n"
 		done < <(jq --raw-output '.[] | ([(.initrd[0] | sub("/"; "\\"; "g")), .options] | join(" ")), .initrd[0]' "$initialentryfile")
 	fi
 }
@@ -2478,9 +2489,10 @@ pcrlock_grub2_bls()
 	if [ -e "${boot_root}${boot_dst}/grubenv" ]; then
 		shift_component 641-grub2-bls-grubenv
 		pcrlock \
-			lock-raw "${boot_root}${boot_dst}/grubenv" \
+			lock-raw \
 			--pcr=9 \
-			--pcrlock=/var/lib/pcrlock.d/641-grub2-bls-grubenv.pcrlock.d/generated.pcrlock
+			--pcrlock=/var/lib/pcrlock.d/641-grub2-bls-grubenv.pcrlock.d/generated.pcrlock \
+			"${boot_root}${boot_dst}/grubenv"
 	fi
 
 	# 643-grub2-bls-entry-files.pcrlock is not part of the pcrlock
@@ -2491,12 +2503,20 @@ pcrlock_grub2_bls()
 		pcrlock_grub2_bls_entry_files "0" "$tmpdir"
 	fi
 
-	local partno
-	read -r _ partno < <(boot_root_drive_partno)
-	# Once we are out of the BIOS / EFI, the numeration cannot be
-	# done without device.map.  It is safe to assume that the ESP
-	# is always the first disk (hd0)
-	grub2_bls_drive="(hd0,gpt$partno)"
+	local grub2_bls_drive
+	if systemd-analyze compare-versions "2.12" ">=" "$(bootloader_version)"; then
+		local partno
+		read -r _ partno dseq < <(boot_root_drive_partno_dseq)
+		# We are assuming that the disk sequence (that start
+		# with 1) is related with the disk sequence that GRUB2
+		# see during boot time (that start with 0).
+		# boot_root_drive_partno_dseq already set the correct
+		# start
+		#
+		# Also if for GRUB2 >= 2.14 this section is not
+		# included
+		grub2_bls_drive="(hd$dseq,gpt$partno)"
+	fi
 
 	# Join linux, initrd and cmdline in a single pcrlock file
 	shift_component 650-grub2-bls-entry-cmdline
@@ -2540,8 +2560,8 @@ pcrlock_grub2_bls()
 		done < <(jq --raw-output '.[] | .options, .linux, .initrd[0]' "$initialentryfile")
 	fi
 
-	# With secure boot, grub2-bls invokes shim to extend PCR4
-	if is_secure_boot; then
+	# If shim is installed, grub2-bls invokes shim to extend PCR4
+	if is_shim_installed || is_secure_boot; then
 		# 650-kernel-efi-application.pcrlock is not part of
 		# the pcrlock standards
 		# TODO: move to kernel-TYPE-pcrlock.rpm
@@ -2563,7 +2583,7 @@ pcrlock_grub2_bls()
 			}
 			pcrlock \
 				lock-pe \
-				--pcrlock=/var/lib/pcrlock.d/650-kernel-efi-application.pcrlock.d/linux-"$n".pcrlock \
+				--pcrlock="/var/lib/pcrlock.d/650-kernel-efi-application.pcrlock.d/linux-$n.pcrlock" \
 				"${boot_root}/$linux"
 		done < <(jq --raw-output 'sort_by(.priority, (.kernel | map(-.))) | map(.linux) | .[]' "$entryfile")
 	fi
@@ -2589,6 +2609,41 @@ pcrlock_grub2_bls()
 			n=$((n+1))
 			pcrlock_grub2_bls_kernel_initrd "${tmpdir}$linux" "${tmpdir}$initrd" "0-$n"
 		done < <(jq --raw-output '.[] | .linux, .initrd[0]' "$initialentryfile")
+	fi
+
+	# Join the cmdline and the initrd in a single component
+	shift_component 710-kernel-cmdline-initrd-entry
+	shift_component 710-kernel-cmdline-boot-loader
+	n=0
+	while read -r cmdline; do
+		read -r linux
+		read -r initrd
+		[ -f "${boot_root}$linux" ] || {
+			info "Missing ${boot_root}$linux, ignoring entry for prediction"
+			continue
+		}
+		[ -f "${boot_root}$initrd" ] || {
+			info "Missing ${boot_root}$initrd, ignoring entry for prediction"
+			continue
+		}
+		n=$((n+1))
+		[ "$n" -le 8 ] || {
+			info "More than 8 variations for 710-kernel-cmdline-initrd-entry"
+			continue
+		}
+		pcrlock_cmdline_initrd "BOOT_IMAGE=${grub2_bls_drive}$linux $cmdline" "${boot_root}$initrd" "$n"
+	done < <(jq --raw-output 'sort_by(.priority, (.kernel | map(-.))) | .[] | (.options, .linux, .initrd[0])' "$entryfile")
+
+	# Generate variation for 710-kernel-cmdline-initrd-entry for
+	# the same reason than before
+	n=0
+	if [ "$SDB_ADD_INITIAL_COMPONENT" = "1" ]; then
+		while read -r cmdline; do
+			read -r linux
+			read -r initrd
+			n=$((n+1))
+			pcrlock_cmdline_initrd "BOOT_IMAGE=${grub2_bls_drive}$linux $cmdline" "${tmpdir}$initrd" "0-$n"
+		done < <(jq --raw-output '.[] | (.options, .linux, .initrd[0]' "$initialentryfile")
 	fi
 }
 
