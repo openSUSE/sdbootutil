@@ -422,7 +422,7 @@ ask_new_password()
 
 subvol_is_ro()
 {
-	[ -n "$have_snapshots" ] || return 0
+	[ -n "$have_snapshots" ] || return 1
 	local subvol="${1:?}"
 
 	while read -r line; do
