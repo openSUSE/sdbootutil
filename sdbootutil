@@ -2280,9 +2280,10 @@ pcrlock_cmdline_initrd()
 	# 710-kernel-cmdline-initrd-entry.pcrlock.d is not part of the
 	# pcrlock standards
 	#
-	# When using systemd-boot, the cmdline is send to the kernel
-	# via UEFI with null termination (double \0, as is UTF-16
-	# enconding), but this is missing in GRUB2-BLS
+	# When using systemd-boot or GRUB2-BLS >= 2.14, the cmdline is
+	# send to the kernel via UEFI with null termination (double
+	# \0, as is UTF-16 enconding), but this is missing in
+	# GRUB2-BLS <= 2.12
 	echo -n "$cmdline" > "$tmpdir/cmdline"
 	if is_sdboot; then
 		pcrlock \
@@ -2290,13 +2291,20 @@ pcrlock_cmdline_initrd()
 			--pcrlock="$tmpdir/cmdline.pcrlock" \
 			"$tmpdir/cmdline"
 	else
-		iconv -t UTF-16LE -o "$tmpdir/cmdline.utf16" "$tmpdir/cmdline"
-		pcrlock \
-			lock-raw \
-			--pcr=9 \
-			--pcrlock="$tmpdir/cmdline.pcrlock" \
-			"$tmpdir/cmdline.utf16"
-		rm "$tmpdir/cmdline.utf16"
+		if systemd-analyze compare-versions "$(bootloader_version)" "<" "2.13"; then
+			iconv -t UTF-16LE -o "$tmpdir/cmdline.utf16" "$tmpdir/cmdline"
+			pcrlock \
+				lock-raw \
+				--pcr=9 \
+				--pcrlock="$tmpdir/cmdline.pcrlock" \
+				"$tmpdir/cmdline.utf16"
+			rm "$tmpdir/cmdline.utf16"
+		else
+			pcrlock \
+				lock-kernel-cmdline \
+				--pcrlock="$tmpdir/cmdline.pcrlock" \
+				"$tmpdir/cmdline"
+		fi
 	fi
 	pcrlock \
 		lock-kernel-initrd \
@@ -2314,6 +2322,8 @@ pcrlock_cmdline_initrd()
 	# 710-kernel-cmdline-boot-loader.pcrlock.d is not part of the
 	# pcrlock standards
 	if is_sdboot; then
+		# We cannot use lock-kernel-cmdline, as it ignore
+		# --pcr=12, and assign PCR 9 in any case
 		echo -ne "$cmdline\0" > "$tmpdir/cmdline"
 		iconv -t UTF-16LE -o "$tmpdir/cmdline.utf16" "$tmpdir/cmdline"
 		pcrlock \
@@ -2322,6 +2332,7 @@ pcrlock_cmdline_initrd()
 			--pcrlock="/var/lib/pcrlock.d/710-kernel-cmdline-boot-loader.pcrlock.d/cmdline-$suffix.pcrlock" \
 			"$tmpdir/cmdline.utf16"
 		rm "$tmpdir/cmdline.utf16"
+		rm "$tmpdir/cmdline"
 	fi
 }
 
@@ -2409,9 +2420,10 @@ pcrlock_sdboot()
 	if [ -e "${boot_root}/loader/loader.conf" ]; then
 		shift_component 641-sdboot-loader-conf
 		pcrlock \
-			lock-raw "${boot_root}/loader/loader.conf" \
+			lock-raw \
 			--pcr=5 \
-			--pcrlock=/var/lib/pcrlock.d/641-sdboot-loader-conf.pcrlock.d/generated.pcrlock
+			--pcrlock=/var/lib/pcrlock.d/641-sdboot-loader-conf.pcrlock.d/generated.pcrlock \
+			"${boot_root}/loader/loader.conf"
 	fi
 
 	# 650-kernel-efi-application.pcrlock is not part of the
@@ -2435,7 +2447,7 @@ pcrlock_sdboot()
 		}
 		pcrlock \
 			lock-pe \
-			--pcrlock=/var/lib/pcrlock.d/650-kernel-efi-application.pcrlock.d/linux-"$n".pcrlock \
+			--pcrlock="/var/lib/pcrlock.d/650-kernel-efi-application.pcrlock.d/linux-$n.pcrlock" \
 			"${boot_root}/$linux"
 	done < <(jq --raw-output 'sort_by(.priority, (.kernel | map(-.))) | map(.linux) | .[]' "$entryfile")
 
@@ -2482,9 +2494,10 @@ pcrlock_grub2_bls()
 	if [ -e "${boot_root}${boot_dst}/grubenv" ]; then
 		shift_component 641-grub2-bls-grubenv
 		pcrlock \
-			lock-raw "${boot_root}${boot_dst}/grubenv" \
+			lock-raw \
 			--pcr=9 \
-			--pcrlock=/var/lib/pcrlock.d/641-grub2-bls-grubenv.pcrlock.d/generated.pcrlock
+			--pcrlock=/var/lib/pcrlock.d/641-grub2-bls-grubenv.pcrlock.d/generated.pcrlock \
+			"${boot_root}${boot_dst}/grubenv"
 	fi
 
 	# 643-grub2-bls-entry-files.pcrlock is not part of the pcrlock
@@ -2495,13 +2508,20 @@ pcrlock_grub2_bls()
 		pcrlock_grub2_bls_entry_files "0" "$tmpdir"
 	fi
 
-	local partno
-	read -r _ partno dseq < <(boot_root_drive_partno_dseq)
-	# We are assuming that the disk sequence (that start with 1)
-	# is related with the disk sequence that GRUB2 see during boot
-	# time (that start with 0).  boot_root_drive_partno_dseq
-	# already set the correct start
-	grub2_bls_drive="(hd$dseq,gpt$partno)"
+	local grub2_bls_drive
+	if systemd-analyze compare-versions "$(bootloader_version)" "<" "2.13"; then
+		local partno
+		read -r _ partno dseq < <(boot_root_drive_partno_dseq)
+		# We are assuming that the disk sequence (that start
+		# with 1) is related with the disk sequence that GRUB2
+		# see during boot time (that start with 0).
+		# boot_root_drive_partno_dseq already set the correct
+		# start
+		#
+		# Also if for GRUB2 >= 2.14 this section is not
+		# included
+		grub2_bls_drive="(hd$dseq,gpt$partno)"
+	fi
 
 	# Join linux, initrd and cmdline in a single pcrlock file
 	shift_component 650-grub2-bls-entry-cmdline
@@ -2568,7 +2588,7 @@ pcrlock_grub2_bls()
 			}
 			pcrlock \
 				lock-pe \
-				--pcrlock=/var/lib/pcrlock.d/650-kernel-efi-application.pcrlock.d/linux-"$n".pcrlock \
+				--pcrlock="/var/lib/pcrlock.d/650-kernel-efi-application.pcrlock.d/linux-$n.pcrlock" \
 				"${boot_root}/$linux"
 		done < <(jq --raw-output 'sort_by(.priority, (.kernel | map(-.))) | map(.linux) | .[]' "$entryfile")
 	fi
