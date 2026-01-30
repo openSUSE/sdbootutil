@@ -1757,7 +1757,7 @@ install_bootloader()
 	local drive partno
 	read -r drive partno _ < <(boot_root_drive_partno_dseq)
 	local escaped_entry="${entry//\//\\\\}"
-	[ -n "$arg_no_variables" ] || [ -n "$arg_portable" ] || efibootmgr | grep -q "Boot.*${boot_manager}.*${escaped_entry}" || efibootmgr -q --create --disk "$drive" --part "$partno" --label "${boot_manager} ($bldr_name)" --loader "$entry" || true
+	[ -n "$arg_no_variables" ] || [ -n "$arg_portable" ] || efibootmgr | grep -q "Boot.*${boot_manager}.*${escaped_entry}" || efibootmgr -q --create --disk "$drive" --part "$partno" --label "${boot_manager} ($bldr_name)" --loader "${entry^^}" || true
 
 	# Make it the first option
 	if [ -z "$arg_no_variables" ] && [ -z "$arg_portable" ]; then
