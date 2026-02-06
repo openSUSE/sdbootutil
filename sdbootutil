@@ -22,6 +22,9 @@ if [ -f "$DEBUG_LOG" ]; then
 	set -x
 fi
 
+exec {LOG_INFO}> >(systemd-cat -t "$(basename "$0")" -p info)
+exec {LOG_ERR}> >(systemd-cat -t "$(basename "$0")" -p err)
+
 nl=$'\n'
 shimdir="/usr/share/efi/$(uname -m)"
 arg_esp_path="$SYSTEMD_ESP_PATH"
@@ -63,6 +66,7 @@ if { [ -t 1 ] \
 	color_red="\e[31m"
 	color_green="\e[32m"
 	color_yellow="\e[33m"
+	color_blue='\e[34m'
 	color_bu="\e[1;4m" # bold underscore
 	color_end="\e[m"
 fi
@@ -95,6 +99,9 @@ cleanup()
 	rm -rf "$tmpdir"
 
 	[ -z "$chroot_dir" ] || umount_chroot "$chroot_dir"
+
+	exec {LOG_INFO}>&-
+	exec {LOG_ERR}>&-
 }
 trap cleanup EXIT
 
@@ -260,39 +267,100 @@ helpandquit()
 	exit 0
 }
 
+_log_trmnl()
+{
+	local level="$1"
+	shift
+
+	local color
+	case "$level" in
+		"err")
+			color="${color_red}"
+			;;
+		"warning")
+			color="${color_yellow}"
+			;;
+		"debug")
+			color="${color_blue}"
+			;;
+		"info")
+			color="${color_green}"
+			;;
+	esac
+
+	echo -e "${color}$*${color_end}" >&2
+}
+
+_log_jrnl()
+{
+	local level="$1"
+	shift
+
+	local fd
+	case "$level" in
+		"err")
+			fd="${LOG_ERR}"
+			;;
+		"warning")
+			fd="${LOG_ERR}"
+			;;
+		"debug")
+			fd="${LOG_INFO}"
+			;;
+		"info")
+			fd="${LOG_INFO}"
+			;;
+	esac
+
+	echo -e "$*" >"/dev/fd/$fd"
+}
+
+_log()
+{
+	local level="$1"
+	shift
+
+	_log_trmnl "$level" "$*"
+	_log_jrnl "$level" "$*"
+}
+
 dbg()
 {
 	[ "${verbose:-0}" -gt 1 ] || return 0
-	echo -e "DEBUG: $*" >&2
+	_log "debug" "DEBUG: $*"
 }
 
 dbg_var()
 {
 	[ "${verbose:-0}" -gt 1 ] || return 0
 	local v="${1:?}"
-	echo "DEBUG: $v: ${!v}" >&2
+	_log "debug" "DEBUG: $v: ${!v}"
 }
 
 dbg_cat()
 {
 	[ "${verbose:-0}" -gt 1 ] || return 0
-	[ ! -e "$1" ] || { echo "DEBUG: $1" >&2; cat "$1" >&2; }
+	[ ! -e "$1" ] || {
+		_log "debug" "DEBUG: Content of $1"
+		sed 's/^/    /' "$1" | tee "/dev/fd/${LOG_INFO}" >&2
+	}
 }
 
 info()
 {
+	_log_jrnl "info" "$*"
 	[ "${verbose:-0}" -gt 0 ] || return 0
-	echo -e "$@" >&2
+	_log_trmnl "info" "$*"
 }
 
 warn()
 {
-	echo -e "WARNING: $*" >&2
+	_log "warning" "WARNING: $*"
 }
 
 err()
 {
-	echo -e "ERROR: $*" >&2
+	_log "err" "ERROR: $*"
 	exit 1
 }
 
@@ -2593,15 +2661,63 @@ pcrlock_grub2_bls()
 		done < <(jq --raw-output 'sort_by(.priority, (.kernel | map(-.))) | map(.linux) | .[]' "$entryfile")
 	fi
 
+	# In MicroOS with GRUB2-BLS we can easily exceed to 8 arms
+	# limit for PolicyOR in PCR#9.  For each update:
+	#  - 641-grub2-bls-grubenv: `grubenv` change after the
+	#    `set-default` for the new boot entry
+	#  - 643-grub2-bls-entry-files: a new boot entry is added wrt
+	#    the current state
+	#  - 710-kernel-cmdline-initrd-entry: the new snapshot
+	#    requires a new cmdline (rootflags), so there is one per
+	#    snapshot
+	#  - 710-grub2-bls-kernel-initrd-entry: if the kernel or
+	#    initrd gets updated, a new entry with different hashes
+	#    will appear here
+	#
+	# If not kernel/initrd gets updated, the possible valies for
+	# PCR#9 are 2x2xn, but if a kernel gets update is 2x2xnx2
+	#
+	# Solutions:
+	#  - GRUB2-BLS use BLI and drops `grubenv`
+	#  - PolicyOR limit is resolved in systemd-pcrlock
+	#  - MicroOS uses only systemd-boot
+	#  - Make n=2 and predict only one kernel.
+	#
+	# This code select the last option.  One issue is that if a
+	# kernel is updated and a rollback is needed, the password
+	# will be asked.  To resolve this we can drop PCR#9 when there
+	# is a new kernel and allow the rollback without a password,
+	# and lock on PCR#9 during boot time, via the
+	# sdbootutil-update-predictions service
+	local limit=1
+	is_transactional || limit=3
+
+	# If the system is transactional, drop the shift variation.
+	# If there is a new kernel, only the newest one will be
+	# measured (sort_by) and the current one that is in the event
+	# log will not be present in any variation.  This will make
+	# pcrlock lost the track and drop the component.  But if there
+	# is not new kernel or initrd, then the only variation will be
+	# found in the event log
+
 	# Join the kernel and the initrd in a single component
-	shift_component 710-grub2-bls-kernel-initrd-entry
+	is_transactional || shift_component 710-grub2-bls-kernel-initrd-entry
 	n=0
 	while read -r linux; do
 		read -r initrd
-		[ -f "${boot_root}$linux" ] || continue
-		[ -f "${boot_root}$initrd" ] || continue
+		[ -f "${boot_root}$linux" ] || {
+			info "Missing ${boot_root}$linux, ignoring entry for prediction"
+			continue
+		}
+		[ -f "${boot_root}$initrd" ] || {
+			info "Missing ${boot_root}$initrd, ignoring entry for prediction"
+			continue
+		}
 		n=$((n+1))
-		[ "$n" -le 8 ] || continue
+		[ "$n" -le "$limit" ] || {
+			info "More than $limit variations for 710-grub2-bls-kernel-initrd-entry"
+			continue
+		}
 		pcrlock_grub2_bls_kernel_initrd "${boot_root}$linux" "${boot_root}$initrd" "$n"
 	done < <(jq --raw-output 'sort_by(.priority, (.kernel | map(-.))) | .[] | .linux, .initrd[0]' "$entryfile")
 
@@ -2616,24 +2732,21 @@ pcrlock_grub2_bls()
 		done < <(jq --raw-output '.[] | .linux, .initrd[0]' "$initialentryfile")
 	fi
 
+	local limit=2
+	is_transactional || limit=3
+
 	# Join the cmdline and the initrd in a single component
+	# TODO: If shim is not installed, should we drop this?
 	shift_component 710-kernel-cmdline-initrd-entry
-	shift_component 710-kernel-cmdline-boot-loader
 	n=0
 	while read -r cmdline; do
 		read -r linux
 		read -r initrd
-		[ -f "${boot_root}$linux" ] || {
-			info "Missing ${boot_root}$linux, ignoring entry for prediction"
-			continue
-		}
-		[ -f "${boot_root}$initrd" ] || {
-			info "Missing ${boot_root}$initrd, ignoring entry for prediction"
-			continue
-		}
+		[ -f "${boot_root}$linux" ] || continue
+		[ -f "${boot_root}$initrd" ] || continue
 		n=$((n+1))
-		[ "$n" -le 8 ] || {
-			info "More than 8 variations for 710-kernel-cmdline-initrd-entry"
+		[ "$n" -le "$limit" ] || {
+			info "More than $limit variations for 710-kernel-cmdline-initrd-entry"
 			continue
 		}
 		pcrlock_cmdline_initrd "BOOT_IMAGE=${grub2_bls_drive}$linux $cmdline" "${boot_root}$initrd" "$n"
@@ -2812,7 +2925,8 @@ generate_tpm2_predictions_pcrlock()
 	local pcrlock_status=$?
 
 	if [ $pcrlock_status -ne 0 ]; then
-		echo "Error creating the systemd-pcrlock policy!"
+		warn "Error creating the systemd-pcrlock policy!"
+		# Do not exit, as this function can be re-tried
 		return 1
 	elif echo "$output" | grep -q "recovery PIN"; then
 		local split
@@ -2837,7 +2951,7 @@ generate_tpm2_predictions_pcrlock()
 	# dracut-pcr-signature
 	[ -e /var/lib/systemd/pcrlock.json ] && \
 		cp /var/lib/systemd/pcrlock.json "${boot_root}${boot_dst}" && {
-			echo "NVIndex policy created"
+			info "NVIndex policy created"
 		}
 }
 
@@ -2897,7 +3011,7 @@ generate_tpm2_predictions_pcr_oracle()
 	cp /etc/systemd/tpm2-pcr-public-key.pem "${boot_root}${boot_dst}"
 	[ -e /etc/systemd/tpm2-pcr-signature.json ] && \
 		cp /etc/systemd/tpm2-pcr-signature.json "${boot_root}${boot_dst}" && {
-			echo "Signed policy created"
+			info "Signed policy created"
 		}
 }
 
@@ -3645,8 +3759,8 @@ enroll()
 			# are trying with systemd-pcrlock, we try
 			# again with pcr-oracle
 			if ! is_pcr_oracle; then
-				echo "Predictions with systemd-pcrlock failed"
-				echo "Re-trying with pcr-oracle"
+				warn "Predictions with systemd-pcrlock failed"
+				warn "Re-trying with pcr-oracle"
 				unenroll_pcrlock
 				# This function generates
 				# /etc/systemd/tpm2-pcr-public-key.pem
@@ -3966,7 +4080,7 @@ while true ; do
 		--devices) IFS=',' read -r -a tracked_devices <<<"$2"; shift 2 ;;
 		--force) arg_force=1; shift ;;
 		--) shift ; break ;;
-		*) echo "Internal error!" ; exit 1 ;;
+		*) err "Internal error!" ;;
 	esac
 done
 
