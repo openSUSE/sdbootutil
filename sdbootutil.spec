@@ -254,6 +254,7 @@ fi
 %license LICENSE
 %{_bindir}/%{name}
 %{_unitdir}/%{name}-update-predictions.service
+%dir %{_sharedstatedir}/%{name}
 %{_tmpfilesdir}/%{name}.conf
 %dir %{_libexecdir}/%{name}
 %{_libexecdir}/%{name}/uhmac
