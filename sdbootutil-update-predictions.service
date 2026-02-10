@@ -6,7 +6,16 @@ ConditionSecurity=tpm2
 Type=oneshot
 RemainAfterExit=yes
 KeyringMode=shared
-ExecStart=/usr/bin/sdbootutil update-predictions
+PrivateTmp=no
+ExecStartPre=/usr/bin/sh -c 'cp -a /var/lib/pcrlock.d /tmp/pcrlock.d.bak'
+ExecStart=/usr/bin/sdbootutil -v update-predictions
+ExecStopPost=/usr/bin/sh -c '\
+    if [ "$EXIT_STATUS" != "0" ]; then \
+        echo "Command failed (Status: $EXIT_STATUS). Restoring backup..."; \
+        rm -rf /var/lib/pcrlock.d/*; \
+        cp -a /tmp/pcrlock.d.bak/. /var/lib/pcrlock.d/; \
+    fi; \
+    rm -rf /tmp/pcrlock.d.bak'
 ImportCredential=sdbootutil-update-predictions.*
 
 [Install]
