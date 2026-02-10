@@ -31,7 +31,6 @@ BuildRequires:  cargo-packaging
 BuildRequires:  libopenssl-devel
 BuildRequires:  systemd-rpm-macros
 Requires:       %{name}-dracut-measure-pcr
-Requires:       dialog
 Requires:       dracut-pcr-signature
 Requires:       efibootmgr
 Requires:       jq
