@@ -712,7 +712,11 @@ remove_kernel()
 	# grubenv value)
 	local default
 	default="$(get_default_bootctl)"
-	set_default_entry "$default"
+	if [ -z "$default" ]; then
+		warn "Can't determine the new default entry"
+	else
+		set_default_entry "$default"
+	fi
 
 	# This action will require to update the PCR predictions
 	update_predictions=1
