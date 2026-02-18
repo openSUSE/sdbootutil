@@ -43,6 +43,8 @@ arg_signed_policy=
 arg_no_measure_pcr=
 arg_measure_pcr=
 arg_pcr=
+arg_rootfs=
+arg_rootfs_data=
 arg_force=
 have_snapshots=
 # for x in vmlinuz image vmlinux linux bzImage uImage Image zImage; do
@@ -138,6 +140,10 @@ helpandquit()
 		  --pcr			Comma seperated list of PCRs to enroll
 		  --devices		Comma separated list of devices to enroll or unenroll
 		                        (by default all (not ignored) devices are [un]enrolled)
+		  --rootfs		During bootloader installation, select the kind of 'root'
+		                        valid selectors
+		                        (uuid, partuuid, label, partlabel, device)
+		  --rootfs-data		Extra data when --rootfs is used
 		  --force		Force certain operations inside a transaction
 		  -v, --verbose		More verbose output
 		  --start-trace-code	Create /var/log/sdbootutil.log to trace the code.
@@ -458,14 +464,75 @@ detect_parent()
 	dbg_var "parent_snapshot"
 }
 
+get_rootfs()
+{
+	local cmdline rootfs rootfs_data
+
+	cmdline="$(</proc/cmdline)"
+	case "$cmdline" in
+		*root=UUID=*) rootfs="${arg_rootfs:-uuid}" ;;
+		*root=LABEL=*) rootfs="${arg_rootfs:-label}" ;;
+		*root=PARTUUID=*) rootfs="${arg_rootfs:-partuuid}" ;;
+		*root=PARTLABEL=*) rootfs="${arg_rootfs:-partlabel}" ;;
+		*root=*) rootfs="${arg_rootfs:-device}" ;;
+		*) rootfs="${arg_rootfs:-uuid}" ;;
+	esac
+
+	case "$rootfs" in
+		uuid) read -r rootfs_data < <(findmnt / -v -r -n -o UUID 2> /dev/null) ;;
+		label) read -r rootfs_data < <(findmnt / -v -r -n -o LABEL 2> /dev/null) ;;
+		partuuid) read -r rootfs_data < <(findmnt / -v -r -n -o PARTUUID 2> /dev/null) ;;
+		partlabel) read -r rootfs_data < <(findmnt / -v -r -n -o PARTLABEL 2> /dev/null) ;;
+		*) read -r rootfs_data < <(findmnt / -v -r -n -o SOURCE 2> /dev/null) ;;
+	esac
+	rootfs_data="${arg_rootfs_data:-$rootfs_data}"
+	[ -n "$rootfs_data" ] || {
+		warn "Can't determine rootfs ($rootfs). Using device name"
+		rootfs="device"
+		read -r rootfs_data < <(findmnt / -v -r -n -o SOURCE 2> /dev/null)
+	}
+
+	if [ "$rootfs" = "device" ]; then
+		rootfs="$rootfs_data"
+	else
+		rootfs="${rootfs^^}=$rootfs_data"
+	fi
+	echo "$rootfs"
+}
+
+get_all_rootfs()
+{
+	local rootfs rootfs_data
+
+	read -r rootfs_data < <(findmnt / -v -r -n -o SOURCE)
+	rootfs="$rootfs_data"
+
+	read -r rootfs_data < <(findmnt / -v -r -n -o UUID)
+	[ -z "$rootfs_data" ] || rootfs="$rootfs|UUID=$rootfs_data"
+
+	read -r rootfs_data < <(findmnt / -v -r -n -o LABEL)
+	[ -z "$rootfs_data" ] || rootfs="$rootfs|LABEL=$rootfs_data"
+
+	read -r rootfs_data < <(findmnt / -v -r -n -o PARTUUID)
+	[ -z "$rootfs_data" ] || rootfs="$rootfs|PARTUUID=$rootfs_data"
+
+	read -r rootfs_data < <(findmnt / -v -r -n -o PARTLABEL)
+	[ -z "$rootfs_data" ] || rootfs="$rootfs|PARTLABEL=$rootfs_data"
+
+	echo "$rootfs"
+}
+
 sedrootflags()
 {
 	local subvol="$1"
+	local root_param
+	root_param="$(get_rootfs)"
+
 	# - Delete everything before BOOT_IMAGE= and initrd=
 	#   (see https://github.com/openSUSE/sdbootutil/issues/182)
 	# - Delete BOOT_IMAGE= and initrd=
-	# - Replace or add root= to refers to UUID or mapped device
-	#   (if encrypted)
+	# - Replace or add root= to refers to [PART]{UUID, LABEL}, or
+	#   mapped device
 	# - Replace or add rootflags to point at correct subvolume
 	# - Replace or add systemd.machine-id to match current
 	#   machine-id
@@ -481,8 +548,6 @@ sedrootflags()
 	# already there). Since we always operate on the same line,
 	# "empty" t jumps are used to reset the condition after very
 	# s///.
-	local root_param="UUID=$root_uuid"
-	[ -z "$root_device_is_crypt" ] || root_param="$root_device"
 	local sed_arguments=("-e s/[ \t]\+/ /g"
 		"-e s/^.*\(initrd=[^ ]*\|BOOT_IMAGE=[^ ]*\)\s*/\1 /"
 		"-e s/\<\(BOOT_IMAGE\|initrd\)=[^ ]* \?//"
@@ -492,6 +557,7 @@ sedrootflags()
 	[ -z "$machine_id" ] || sed_arguments+=("-e s,\<systemd.machine_id=[^ ]*,systemd.machine_id=$machine_id,;tf;s,\$, systemd.machine_id=$machine_id,;tg;:g;:f")
 	sed "${sed_arguments[@]}"
 }
+
 
 entry_filter=("cat")
 update_entries()
@@ -507,8 +573,11 @@ update_entries_for_subvol()
 	local subvol="$1"
 	local ext="${2:-}"
 
+	local root
+	root="$(get_all_rootfs)"
+
 	[ -z "$ext" ] || ext="|$ext"
-	update_entries jq "[.[]|select(has(\"options\"))|select(.options|test(\"root=(?:UUID=$root_uuid|$root_device) .*rootflags=subvol=$subvol\")$ext)]"
+	update_entries jq "[.[]|select(has(\"options\"))|select(.options|test(\"root=(?:$root) .*rootflags=subvol=$subvol\")$ext)]"
 }
 
 update_entries_for_snapshot()
@@ -525,7 +594,10 @@ update_entries_for_snapshot_invert()
 
 update_entries_for_this_system()
 {
-	update_entries jq "[.[]|select(has(\"options\"))|select(.options|test(\"root=(?:UUID=$root_uuid|$root_device)\"))]"
+	local root
+	root="$(get_all_rootfs)"
+
+	update_entries jq "[.[]|select(has(\"options\"))|select(.options|test(\"root=(?:$root)\"))]"
 }
 
 entry_conf_file()
@@ -1754,13 +1826,14 @@ install_bootloader()
 	fi
 
 	# Create boot menu entry if it does not exist
-	local drive partno
-	read -r drive partno _ < <(boot_root_drive_partno_dseq)
-	local escaped_entry="${entry//\//\\\\}"
-	[ -n "$arg_no_variables" ] || [ -n "$arg_portable" ] || efibootmgr | grep -q "Boot.*${boot_manager}.*${escaped_entry}" || efibootmgr -q --create --disk "$drive" --part "$partno" --label "${boot_manager} ($bldr_name)" --loader "$entry" || true
+	if [ -z "$arg_no_variables" ] && [ -z "$arg_portable" ] && mountpoint -q "$boot_root"; then
+		local drive partno
+		read -r drive partno _ < <(boot_root_drive_partno_dseq)
 
-	# Make it the first option
-	if [ -z "$arg_no_variables" ] && [ -z "$arg_portable" ]; then
+		local escaped_entry="${entry//\//\\\\}"
+		efibootmgr | grep -q "Boot.*${boot_manager}.*${escaped_entry}" || efibootmgr -q --create --disk "$drive" --part "$partno" --label "${boot_manager} ($bldr_name)" --loader "$entry" || true
+
+		# Make it the first option
 		local boot_order
 		boot_order="$(efibootmgr | grep BootOrder)"
 		boot_order="${boot_order#BootOrder: }"
@@ -3954,6 +4027,8 @@ define_options() {
 		[measure-pcr]=""
 		[pcr]="_none"
 		[devices]="_devices"
+		[rootfs]="_rootfs"
+		[rootfs-data]="_rootfs_data"
 		[force]=""
 	)
 	opts_long=""
@@ -4009,6 +4084,8 @@ while true ; do
 		--measure-pcr) arg_measure_pcr=1; shift ;;
 		--pcr) arg_pcr="$2"; shift 2 ;;
 		--devices) IFS=',' read -r -a tracked_devices <<<"$2"; shift 2 ;;
+		--rootfs) arg_rootfs="$2"; shift 2 ;;
+		--rootfs-data) arg_rootfs_data="$2"; shift 2 ;;
 		--force) arg_force=1; shift ;;
 		--) shift ; break ;;
 		*) echo "Internal error!" ; exit 1 ;;
@@ -4034,9 +4111,7 @@ fi
 [ -n "$arg_esp_path" ] && export SYSTEMD_ESP_PATH="$arg_esp_path"
 
 eval_bootctl
-read -r root_uuid root_device < <(findmnt / -v -r -n -o UUID,SOURCE)
-root_device_is_crypt=
-[ "$(lsblk --noheadings -o TYPE "$root_device")" = "crypt" ] && root_device_is_crypt=1
+
 root_subvol=""
 subvol_prefix=""
 if [ "$(stat -f -c %T /)" = "btrfs" ] && [ -d /.snapshots ]; then
@@ -4061,13 +4136,11 @@ fi
 [ -n "$arg_arch" ] && firmware_arch="$arg_arch"
 
 [ -n "$boot_root" ] || err "No ESP detected. Legacy system?"
-[ -n "$root_uuid" ] || err "Can't determine root UUID"
 [ -n "$root_subvol" ] || [ -z "$have_snapshots" ] || err "Can't determine root subvolume"
-[ -n "$root_device" ] || err "Can't determine root device"
 [ -n "$firmware_arch" ] || err "Can't determine firmware arch"
 set_image_name
 
-mountpoint -q "$boot_root" || err "$boot_root is not a valid mountpoint"
+mountpoint -q "$boot_root" || warn "$boot_root is not a valid mountpoint"
 
 dbg_var "root_snapshot"
 dbg_var "boot_root"
