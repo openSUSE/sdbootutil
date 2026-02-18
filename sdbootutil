@@ -368,7 +368,7 @@ reset_rollback()
 
 is_transactional()
 {
-	findmnt --fstab / -O ro > /dev/null
+	findmnt --fstab / -O ro &> /dev/null
 }
 
 keyctl_add_with_timeout()
