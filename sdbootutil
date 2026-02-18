@@ -1892,6 +1892,11 @@ update_random_seed()
 	mv "$boot_root/loader/random-seed.new" "$boot_root/loader/random-seed"
 }
 
+has_efivars()
+{
+	[ -d /sys/firmware/efi/efivars ]
+}
+
 bli_efi_var_get()
 {
 	# BLI uses this vendor UUID
@@ -1960,7 +1965,10 @@ grubenv_get()
 set_default_sdboot()
 {
 	local id="${1:?}"
-	if ! bootctl set-default "$id" > "$tmpfile" 2>&1; then
+
+	if [ -n "$arg_no_variables" ]; then
+		loader_conf_set "default" "$id"
+	elif ! bootctl set-default "$id" > "$tmpfile" 2>&1; then
 		if grep -q "Failed to update EFI variable" "$tmpfile" ||
 				grep -q "Not booted with a supported boot loader" "$tmpfile" ||
 				grep -q "Not booted with UEFI" "$tmpfile"; then
@@ -1975,7 +1983,9 @@ set_default_grub2_bls()
 {
 	local id="${1:?}"
 	set_default_sdboot "$id"
-	grubenv_set "default" "$id"
+	if systemd-analyze compare-versions "$(bootloader_version)" "<" "2.13" || ! has_efivars || [ -n "$arg_no_variables" ]; then
+		grubenv_set "default" "$id"
+	fi
 }
 
 set_default_entry()
@@ -2052,7 +2062,10 @@ set_timeout_sdboot()
 {
 	local timeout="${1:?}"
 	[ "$timeout" = "-1" ] && timeout="menu-force"
-	if ! bootctl set-timeout "$timeout" > "$tmpfile" 2>&1; then
+
+	if [ -n "$arg_no_variables" ]; then
+		loader_conf_set "timeout" "$timeout"
+	elif ! bootctl set-timeout "$timeout" > "$tmpfile" 2>&1; then
 		if grep -q "Failed to update EFI variable" "$tmpfile" ||
 				grep -q "Not booted with a supported boot loader" "$tmpfile" ||
 				grep -q "Not booted with UEFI" "$tmpfile"; then
@@ -2067,9 +2080,11 @@ set_timeout_grub2_bls()
 {
 	local timeout="${1:?}"
 	set_timeout_sdboot "$timeout"
-	[ "$timeout" = "menu-disabled" ] || [ "$timeout" = "menu-hidden" ] && timeout=0
-	[ "$timeout" = "menu-force" ] && timeout=-1
-	grubenv_set "timeout" "$timeout"
+	if systemd-analyze compare-versions "$(bootloader_version)" "<" "2.13" || ! has_efivars || [ -n "$arg_no_variables" ]; then
+		[ "$timeout" = "menu-disabled" ] || [ "$timeout" = "menu-hidden" ] && timeout=0
+		[ "$timeout" = "menu-force" ] && timeout=-1
+		grubenv_set "timeout" "$timeout"
+	fi
 }
 
 set_timeout()
