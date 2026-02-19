@@ -464,6 +464,13 @@ detect_parent()
 	dbg_var "parent_snapshot"
 }
 
+is_rootfs_crypt()
+{
+	local device
+	read -r device < <(findmnt / -v -r -n -o SOURCE 2> /dev/null)
+	[ -n "$device" ] && [ "$(lsblk --noheadings -o TYPE "$device")" = "crypt" ]
+}
+
 get_rootfs()
 {
 	local cmdline rootfs rootfs_data
@@ -478,19 +485,36 @@ get_rootfs()
 		*) rootfs="${arg_rootfs:-uuid}" ;;
 	esac
 
+	if is_rootfs_crypt; then
+		# `measure-pcr-validator` (PRC15) protect from
+		# impostor LUKS2 volumes, as it measures the volume
+		# key.  But if there is a volume in a non-encrypted
+		# device (USB, for example) that has the same metadata
+		# (referenced by /etc/fstab) as the internal volume in
+		# the encrypted root device, then there is a chance
+		# that this will get mounted in /sysroot.  systemd can
+		# measure elements from the file system (like UUID or
+		# /etc/machine-id) via systemd-validatefs@.service,
+		# but this data is public and can be replicated
+		#
+		# See bsc#1229934 for more details
+		[ "$arg_rootfs" = "device" ] || warn "Forcing rootfs to device, as the root device is encrypted"
+		rootfs="device"
+	fi
+
 	case "$rootfs" in
 		uuid) read -r rootfs_data < <(findmnt / -v -r -n -o UUID 2> /dev/null) ;;
 		label) read -r rootfs_data < <(findmnt / -v -r -n -o LABEL 2> /dev/null) ;;
 		partuuid) read -r rootfs_data < <(findmnt / -v -r -n -o PARTUUID 2> /dev/null) ;;
 		partlabel) read -r rootfs_data < <(findmnt / -v -r -n -o PARTLABEL 2> /dev/null) ;;
-		*) read -r rootfs_data < <(findmnt / -v -r -n -o SOURCE 2> /dev/null) ;;
+		device) read -r rootfs_data < <(findmnt / -v -r -n -o SOURCE 2> /dev/null) ;;
+		*)
+			warn "Can't determine rootfs ($rootfs). Using UUID as default"
+			rootfs="uuid"
+			read -r rootfs_data < <(findmnt / -v -r -n -o UUID 2> /dev/null)
+			;;
 	esac
 	rootfs_data="${arg_rootfs_data:-$rootfs_data}"
-	[ -n "$rootfs_data" ] || {
-		warn "Can't determine rootfs ($rootfs). Using device name"
-		rootfs="device"
-		read -r rootfs_data < <(findmnt / -v -r -n -o SOURCE 2> /dev/null)
-	}
 
 	if [ "$rootfs" = "device" ]; then
 		rootfs="$rootfs_data"
