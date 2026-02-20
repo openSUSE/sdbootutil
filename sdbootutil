@@ -2874,7 +2874,7 @@ generate_tpm2_predictions_pcrlock()
 		if is_sdboot; then
 			bootloader_filename="systemd-boot${firmware_arch,,}.efi"
 		elif is_grub2_bls; then
-			bootloader_filename="grub.efi"
+			bootloader_filename="grubbls.efi"
 		fi
 		if [ -n "$arg_portable" ]; then
 			bootloader_path="${boot_root}/EFI/BOOT/${bootloader_filename}"
