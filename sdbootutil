@@ -304,16 +304,82 @@ err()
 
 is_config_file()
 {
-	[ -e /usr/etc/default/fde-tools ] ||
+	[ -e /usr/etc/default/sdbootutil ] ||
+		[ -e /etc/default/sdbootutil ] ||
+		[ -e /usr/etc/default/fde-tools ] ||
 		[ -e /etc/default/fde-tools ] ||
 		[ -e /etc/sysconfig/fde-tools ]
+}
+
+set_default_config_values()
+{
+	FDE_SEAL_PCR_LIST="$arg_pcr"
+	if is_installed && [ -z "${FDE_SEAL_PCR_LIST}" ]; then
+		if systemd-detect-virt -q; then
+			info "Virtualized systemd detected ($(systemd-detect-virt)). Dropping PCR0 and PCR2"
+			FDE_SEAL_PCR_LIST=""
+		else
+			FDE_SEAL_PCR_LIST="0,2,"
+		fi
+		if is_sdboot; then
+			FDE_SEAL_PCR_LIST+="4,7,9"
+		elif is_grub2_bls; then
+			FDE_SEAL_PCR_LIST+="4,7,8,9"
+		else
+			err "Bootloader not detected"
+		fi
+	fi
+
+	if is_rootfs_crypt; then
+		# `measure-pcr-validator` (PRC15) protect from
+		# impostor LUKS2 volumes, as it measures the volume
+		# key.  But if there is a volume in a non-encrypted
+		# device (USB, for example) that has the same metadata
+		# (referenced by /etc/fstab) as the internal volume in
+		# the encrypted root device, then there is a chance
+		# that this will get mounted in /sysroot.  systemd can
+		# measure elements from the file system (like UUID or
+		# /etc/machine-id) via systemd-validatefs@.service,
+		# but this data is public and can be replicated
+		#
+		# See bsc#1229934 for more details
+		ROOTFS="device"
+	else
+		ROOTFS="uuid"
+	fi
+	ROOTFS="${arg_rootfs:-$ROOTFS}"
+}
+
+create_default_config_file()
+{
+	! is_config_file || return 0
+
+	set_default_config_values
+	cat <<-EOF > /etc/default/sdbootutil
+	# Default sdbootutil configuration file generated automatically
+
+	# List of PCRs.  For VMs PCRs 0 and 2 are dropped
+	FDE_SEAL_PCR_LIST="$FDE_SEAL_PCR_LIST"
+
+	# Parameter used in the cmdline to find the root (device, [part]uuid, [part]label)
+	# For encrypted devices it is forced "device"
+	ROOTFS="$ROOTFS"
+	EOF
 }
 
 load_config_file()
 {
 	local f
-	# Some old installations have /etc/sysconfig/fde-tools
-	for f in /usr/etc/default/fde-tools /etc/default/fde-tools /etc/sysconfig/fde-tools; do
+
+	set_default_config_values
+
+	# Prioritize sdbootutil configuration file, and use fde-tools
+	# as a fallback
+	for f in /usr/etc/default/sdbootutil \
+			 /etc/default/sdbootutil \
+			 /usr/etc/default/fde-tools \
+			 /etc/default/fde-tools \
+			 /etc/sysconfig/fde-tools; do
 		[ ! -e "$f" ] || {
 			# shellcheck disable=SC1090
 			. "$f"
@@ -321,6 +387,16 @@ load_config_file()
 			dbg_cat "$f"
 		}
 	done
+
+	# Force back "device" for ROOTFS if is encrypted
+	if is_rootfs_crypt; then
+		[ "$ROOTFS" = "device" ] || warn "Fix the /etc/default/sdbootutil to set ROOTFS as 'device'"
+		ROOTFS="device"
+	fi
+
+	# If arguments are passed, use them
+	FDE_SEAL_PCR_LIST="${arg_pcr:-$FDE_SEAL_PCR_LIST}"
+	ROOTFS="${arg_rootfs:-$ROOTFS}"
 }
 
 is_secure_boot()
@@ -473,55 +549,27 @@ is_rootfs_crypt()
 
 get_rootfs()
 {
-	local cmdline rootfs rootfs_data
+	local rootfs_data
 
-	cmdline="$(</proc/cmdline)"
-	case "$cmdline" in
-		*root=UUID=*) rootfs="${arg_rootfs:-uuid}" ;;
-		*root=LABEL=*) rootfs="${arg_rootfs:-label}" ;;
-		*root=PARTUUID=*) rootfs="${arg_rootfs:-partuuid}" ;;
-		*root=PARTLABEL=*) rootfs="${arg_rootfs:-partlabel}" ;;
-		*root=*) rootfs="${arg_rootfs:-device}" ;;
-		*) rootfs="${arg_rootfs:-uuid}" ;;
-	esac
-
-	if is_rootfs_crypt; then
-		# `measure-pcr-validator` (PRC15) protect from
-		# impostor LUKS2 volumes, as it measures the volume
-		# key.  But if there is a volume in a non-encrypted
-		# device (USB, for example) that has the same metadata
-		# (referenced by /etc/fstab) as the internal volume in
-		# the encrypted root device, then there is a chance
-		# that this will get mounted in /sysroot.  systemd can
-		# measure elements from the file system (like UUID or
-		# /etc/machine-id) via systemd-validatefs@.service,
-		# but this data is public and can be replicated
-		#
-		# See bsc#1229934 for more details
-		[ "$arg_rootfs" = "device" ] || warn "Forcing rootfs to device, as the root device is encrypted"
-		rootfs="device"
-	fi
-
-	case "$rootfs" in
+	case "$ROOTFS" in
 		uuid) read -r rootfs_data < <(findmnt / -v -r -n -o UUID 2> /dev/null) ;;
 		label) read -r rootfs_data < <(findmnt / -v -r -n -o LABEL 2> /dev/null) ;;
 		partuuid) read -r rootfs_data < <(findmnt / -v -r -n -o PARTUUID 2> /dev/null) ;;
 		partlabel) read -r rootfs_data < <(findmnt / -v -r -n -o PARTLABEL 2> /dev/null) ;;
 		device) read -r rootfs_data < <(findmnt / -v -r -n -o SOURCE 2> /dev/null) ;;
 		*)
-			warn "Can't determine rootfs ($rootfs). Using UUID as default"
-			rootfs="uuid"
+			warn "Can't determine rootfs ($ROOTFS). Using UUID as default"
+			ROOTFS="uuid"
 			read -r rootfs_data < <(findmnt / -v -r -n -o UUID 2> /dev/null)
 			;;
 	esac
 	rootfs_data="${arg_rootfs_data:-$rootfs_data}"
 
-	if [ "$rootfs" = "device" ]; then
-		rootfs="$rootfs_data"
+	if [ "$ROOTFS" = "device" ]; then
+		echo "$rootfs_data"
 	else
-		rootfs="${rootfs^^}=$rootfs_data"
+		echo "${ROOTFS^^}=$rootfs_data"
 	fi
-	echo "$rootfs"
 }
 
 get_all_rootfs()
@@ -3257,13 +3305,11 @@ generate_tpm2_predictions()
 	# situation but fail during the initial enrollment.  This is
 	# because we generate the prediction first and later we do the
 	# enrollment
-	is_config_file || {
-		warn "/etc/sysconfig/fde-tools not found (manual enrollment?)"
+	[ -n "$FDE_SEAL_PCR_LIST" ] || {
+		warn "FDE_SEAL_PCR_LIST no found in /etc/default/sdbootutil (manual enrollment?)"
 		warn "No TPM2 predictions generated"
 		return 0
 	}
-	load_config_file
-	[ -z "$arg_pcr" ] || FDE_SEAL_PCR_LIST="$arg_pcr"
 
 	if is_pcr_oracle; then
 		generate_tpm2_predictions_pcr_oracle
@@ -3772,27 +3818,6 @@ enroll()
 	# early.  Also we need to set the PCRs used to assest the
 	# system status
 	if [ "$arg_method" = "tpm2" ] || [ "$arg_method" = "tpm2+pin" ]; then
-		load_config_file
-		[ -z "$arg_pcr" ] || FDE_SEAL_PCR_LIST="$arg_pcr"
-
-		if [ -z "${FDE_SEAL_PCR_LIST}" ]; then
-			if systemd-detect-virt -q; then
-				info "Virtualized systemd detected ($(systemd-detect-virt)). Dropping PCR0 and PCR2"
-				FDE_SEAL_PCR_LIST=""
-			else
-				FDE_SEAL_PCR_LIST="0,2,"
-			fi
-			if is_sdboot; then
-				FDE_SEAL_PCR_LIST+="4,7,9"
-			elif is_grub2_bls; then
-				FDE_SEAL_PCR_LIST+="4,7,8,9"
-			else
-				err "Bootloader not detected"
-			fi
-		fi
-
-		is_config_file || echo "FDE_SEAL_PCR_LIST=${FDE_SEAL_PCR_LIST}" >> /etc/default/fde-tools
-
 		if { ! have_pcrlock || [ -n "$arg_signed_policy" ]; } && have_pcr_oracle; then
 			# Once the RSA key is present, then
 			# is_pcr_oracle is true
@@ -4234,6 +4259,17 @@ if [ "$UPDATE_NVRAM" = "no" ]; then
 	arg_no_variables=1
 fi
 
+# If there is a config file, load it.  If not, but the bootloader was
+# installed, create a default one (using the CLI arguments).  If not,
+# use some default values.
+if is_config_file; then
+	load_config_file
+elif is_installed; then
+	create_default_config_file
+else
+	set_default_config_values
+fi
+
 # Keep initial components before they are replaced by some actions
 # (new initrd, new entry, etc)
 if [ "$SDB_ADD_INITIAL_COMPONENT" = "1" ]; then
@@ -4242,7 +4278,8 @@ fi
 
 case "$1" in
 	install)
-		install_bootloader "${2:-$root_snapshot}" ;;
+		install_bootloader "${2:-$root_snapshot}"
+		create_default_config_file ;;
 	needs-update)
 		bootloader_needs_update "${2:-$root_snapshot}" ;;
 	update)
