@@ -2790,16 +2790,8 @@ pcrlock_grub2_bls()
 	local limit=1
 	is_transactional || limit=3
 
-	# If the system is transactional, drop the shift variation.
-	# If there is a new kernel, only the newest one will be
-	# measured (sort_by) and the current one that is in the event
-	# log will not be present in any variation.  This will make
-	# pcrlock lost the track and drop the component.  But if there
-	# is not new kernel or initrd, then the only variation will be
-	# found in the event log
-
 	# Join the kernel and the initrd in a single component
-	is_transactional || shift_component 710-grub2-bls-kernel-initrd-entry
+	shift_component 710-grub2-bls-kernel-initrd-entry
 	n=0
 	while read -r linux; do
 		read -r initrd
