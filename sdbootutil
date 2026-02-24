@@ -1688,6 +1688,8 @@ bootloader_version()
 	if [ -z "$1" ]; then
 		if [ -e "$shimdir/shim.efi" ]; then
 			fn="$boot_root$boot_dst/grub.efi"
+		elif [ -n "$arg_portable" ]; then
+			fn="$boot_root/EFI/BOOT/BOOT${firmware_arch^^}.EFI"
 		else
 			local bootloader
 			bootloader="$(find_bootloader)"
@@ -3027,7 +3029,7 @@ generate_tpm2_predictions_pcrlock()
 			bootloader_filename="grubbls.efi"
 		fi
 		if [ -n "$arg_portable" ]; then
-			bootloader_path="${boot_root}/EFI/BOOT/${bootloader_filename}"
+			bootloader_path="${boot_root}/EFI/BOOT/BOOT${firmware_arch^^}.EFI"
 		else
 			bootloader_path="${boot_root}${boot_dst}/${bootloader_filename}"
 		fi
