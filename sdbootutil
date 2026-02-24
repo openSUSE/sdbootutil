@@ -410,38 +410,37 @@ is_secure_boot()
 	grep -q $'\x01' /sys/firmware/efi/efivars/SecureBoot-8be4df61-93ca-11d2-aa0d-00e098032b8c 2> /dev/null
 }
 
-is_sdboot()
+bootloader_type()
 {
+	# If LOADER_TYPE is set, use that
+	if [ -n "$LOADER_TYPE" ]; then
+		echo "$LOADER_TYPE"
+		return
+	fi
+
 	local sdboot grub2_bls
 
 	sdboot="$(find_sdboot "${1-$root_snapshot}")"
 	grub2_bls="$(find_grub2_bls "${1-$root_snapshot}")"
 
-	# If boot loader is not found, then we check LOADER_TYPE, but
-	# if is not present and systemd-boot and grub2-bls are
-	# co-installed, we favor grub2-bls in the detection
-	if [ ! -e "$sdboot" ] && [ ! -e "$grub2_bls" ]; then
-		[ -z "$LOADER_TYPE" ] || [ "$LOADER_TYPE" = "systemd-boot" ]
-	else
-		[ -e "$sdboot" ] && [ ! -e "$grub2_bls" ]
+	# If LOADER_TYPE is unset and only systemd-boot is installed, use that
+	if [ -e "$sdboot" ] && ! [ -e "$grub2_bls" ]; then
+		echo "systemd-boot"
+		return
 	fi
+
+	# Otherwise, use grub2-bls
+	echo "grub2-bls"
+}
+
+is_sdboot()
+{
+	[ "$(bootloader_type "${1-$root_snapshot}")" = "systemd-boot" ]
 }
 
 is_grub2_bls()
 {
-	local sdboot grub2_bls
-
-	sdboot="$(find_sdboot "${1-$root_snapshot}")"
-	grub2_bls="$(find_grub2_bls "${1-$root_snapshot}")"
-
-	# If boot loader is not found, then we check LOADER_TYPE, but
-	# if is not present and systemd-boot and grub2-bls are
-	# co-installed, we favor grub2-bls in the detection
-	if [ ! -e "$sdboot" ] && [ ! -e "$grub2_bls" ]; then
-		[ -z "$LOADER_TYPE" ] || [ "$LOADER_TYPE" = "grub2-bls" ]
-	else
-		[ -e "$grub2_bls" ]
-	fi
+	[ "$(bootloader_type "${1-$root_snapshot}")" = "grub2-bls" ]
 }
 
 reset_rollback()
