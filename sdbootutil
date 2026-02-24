@@ -78,7 +78,7 @@ tracked_devices=()
 
 rollback=()
 
-declare -g -A eventlog
+declare -A eventlog
 
 tmpdir=$(mktemp -d -t sdbootutil.XXXXXX)
 cleanup()
@@ -390,7 +390,7 @@ load_config_file()
 
 	# Force back "device" for ROOTFS if is encrypted
 	if is_rootfs_crypt; then
-		[ "$ROOTFS" = "device" ] || warn "Fix the /etc/default/sdbootutil to set ROOTFS as 'device'"
+		[ "$ROOTFS" = "device" ] || info "Fix the /etc/default/sdbootutil to set ROOTFS as 'device'"
 		ROOTFS="device"
 	fi
 
@@ -558,7 +558,7 @@ get_rootfs()
 		partlabel) read -r rootfs_data < <(findmnt / -v -r -n -o PARTLABEL 2> /dev/null) ;;
 		device) read -r rootfs_data < <(findmnt / -v -r -n -o SOURCE 2> /dev/null) ;;
 		*)
-			warn "Can't determine rootfs ($ROOTFS). Using UUID as default"
+			info "Can't determine rootfs ($ROOTFS). Using UUID as default"
 			ROOTFS="uuid"
 			read -r rootfs_data < <(findmnt / -v -r -n -o UUID 2> /dev/null)
 			;;
@@ -1027,7 +1027,7 @@ regex_snapshot_ids_for_free_space()
 	# one extra snapshot if it is passed as a parameter, that
 	# refers to the snapshot from where we are installing the
 	# kernel
-	declare -A snapshots
+	local -A snapshots
 	[ -z "$snapshot" ] || snapshots["$snapshot"]=1
 	[ -z "$root_snapshot" ] || snapshots["$root_snapshot"]=1
 	local id
@@ -2786,7 +2786,11 @@ pcrlock_grub2_bls()
 	# will be asked.  To resolve this we can drop PCR#9 when there
 	# is a new kernel and allow the rollback without a password,
 	# and lock on PCR#9 during boot time, via the
-	# sdbootutil-update-predictions service
+	# sdbootutil-update-predictions service.
+	#
+	# As systemd-pcrlock does not drop a PCR that exceed the
+	# PolicyPR limit, we need to first create a prediction and
+	# count the values
 	local limit=1
 	is_transactional || limit=3
 
@@ -2884,6 +2888,51 @@ clean_pcrlock_d()
 	if [ "$(find /var/lib/pcrlock.d -type f -name '*-7.pcrlock' | wc -l)" -gt 0 ]; then
 		rm -fr /var/lib/pcrlock.d
 	fi
+}
+
+get_final_pcrs()
+{
+	local pcrs="$1"
+
+	# Generate a JSON prediction, to get the final PCRs that will
+	# participate in the policy.  To avoid the PolicyOR limit, we
+	# filter the PCRs with more that 8 values
+	local output
+	output="$(pcrlock --pcr="$pcrs" --json=short predict 2>"$tmpfile")"
+	local pcrlock_status=$?
+
+	if [ "$pcrlock_status" -ne 0 ]; then
+		err "Error creating the systemd-pcrlock prediction!\n$(cat "$tmpfile")"
+	fi
+
+	# PCRs that participate in the policy
+	local pcrs_policy
+	pcrs_policy="$(jq -r '[.sha256[] | select(.values | length <= 8) | .pcr] | join(",")' <<<"$output")"
+
+	# PCRs dropped because they have more than 8 values
+	local pcrs_policyor
+	pcrs_policyor="$(jq -r '[.sha256[] | select(.values | length > 8) | .pcr] | join(",")' <<<"$output")"
+
+	local i
+	local -A pcrs_policy_table
+	while read -r -d ',' i; do
+		pcrs_policy_table[$i]=1
+	done <<<"$pcrs_policy"
+
+	local -A pcrs_policy_missing_table
+	while read -r -d ',' i; do
+		if [ -z "${pcrs_policy_table[$i]}" ]; then
+			pcrs_policy_missing_table[$i]=1
+		fi
+	done <<<"$pcrs"
+
+	local pcrs_policy_missing
+	pcrs_policy_missing="$(IFS=","; echo "${!pcrs_policy_missing_table[*]}")"
+	[ -z "$pcrs_policy_missing" ] || info "PCRs $pcrs_policy_missing dropped from the policy (component mapping)"
+	[ -z "$pcrs_policyor" ] || info "PCRs $pcrs_policyor dropped from the policy (PolicyOR)"
+	[ "$pcrs" = "$pcrs_policy" ] || info "Final PCRs list ($pcrs -> $pcrs_policy)"
+
+	echo "$pcrs_policy"
 }
 
 generate_tpm2_predictions_pcrlock()
@@ -3010,12 +3059,16 @@ generate_tpm2_predictions_pcrlock()
 		extra=("--recovery-pin=show")
 	fi
 
+	local final_pcrs
+	final_pcrs="$(get_final_pcrs "$pcrs")"
+	[ -n "$final_pcrs" ] || return 1
+
 	local output
-	output="$(PIN="$pin" pcrlock --pcr="$pcrs" "${extra[@]}" make-policy)"
+	output="$(PIN="$pin" pcrlock --pcr="$final_pcrs" "${extra[@]}" make-policy 2>"$tmpfile")"
 	local pcrlock_status=$?
 
-	if [ $pcrlock_status -ne 0 ]; then
-		echo "Error creating the systemd-pcrlock policy!"
+	if [ "$pcrlock_status" -ne 0 ]; then
+		warn "Error creating the systemd-pcrlock policy!\n$(cat "$tmpfile")"
 		return 1
 	elif echo "$output" | grep -q "recovery PIN"; then
 		local split
