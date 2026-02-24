@@ -335,11 +335,10 @@ is_sdboot()
 	sdboot="$(find_sdboot "${1-$root_snapshot}")"
 	grub2_bls="$(find_grub2_bls "${1-$root_snapshot}")"
 
-	# If boot loader is not found, then we check LOADER_TYPE, but
-	# if is not present and systemd-boot and grub2-bls are
-	# co-installed, we favor grub2-bls in the detection
-	if [ ! -e "$sdboot" ] && [ ! -e "$grub2_bls" ]; then
-		[ -z "$LOADER_TYPE" ] || [ "$LOADER_TYPE" = "systemd-boot" ]
+	# If both BLS boot loaders are installed, check LOADER_TYPE.
+	# If that's not set, favor grub2-bls.
+	if [ -e "$sdboot" ] && [ -e "$grub2_bls" ]; then
+		[ "$LOADER_TYPE" = "systemd-boot" ]
 	else
 		[ -e "$sdboot" ] && [ ! -e "$grub2_bls" ]
 	fi
@@ -352,10 +351,9 @@ is_grub2_bls()
 	sdboot="$(find_sdboot "${1-$root_snapshot}")"
 	grub2_bls="$(find_grub2_bls "${1-$root_snapshot}")"
 
-	# If boot loader is not found, then we check LOADER_TYPE, but
-	# if is not present and systemd-boot and grub2-bls are
-	# co-installed, we favor grub2-bls in the detection
-	if [ ! -e "$sdboot" ] && [ ! -e "$grub2_bls" ]; then
+	# If both BLS boot loaders are installed, check LOADER_TYPE.
+	# If that's not set, favor grub2-bls.
+	if [ -e "$sdboot" ] && [ -e "$grub2_bls" ]; then
 		[ -z "$LOADER_TYPE" ] || [ "$LOADER_TYPE" = "grub2-bls" ]
 	else
 		[ -e "$grub2_bls" ]
