@@ -1973,9 +1973,18 @@ bli_efi_var_get()
 {
 	# BLI uses this vendor UUID
 	local efi_var="/sys/firmware/efi/efivars/${1:?}-4a67b082-0a4c-41cf-b6c7-440b29bb8c4f"
-	if [ -e "$efi_var" ]; then
-		dd "if=$efi_var" bs=2 skip=2 conv=lcase status=none | tr -d '\0'
-	fi
+	[ ! -e "$efi_var" ] || dd "if=$efi_var" bs=2 skip=2 conv=lcase status=none | tr -d '\0'
+}
+
+bli_efi_var_set()
+{
+	# BLI uses this vendor UUID
+	local efi_var="/sys/firmware/efi/efivars/${1:?}-4a67b082-0a4c-41cf-b6c7-440b29bb8c4f"
+	local value="${2:?}"
+	has_efivars || return 1
+	[ -e "$efi_var" ] && chattr -i "$efi_var"
+	echo -ne "\x07\x00${value}\x00" | iconv -t UTF-16LE > "$efi_var"
+	chattr +i "$efi_var"
 }
 
 loader_conf_set()
@@ -2038,24 +2047,21 @@ set_default_sdboot()
 {
 	local id="${1:?}"
 
-	if [ -n "$arg_no_variables" ]; then
+	if ! has_efivars || [ -n "$arg_no_variables" ]; then
 		loader_conf_set "default" "$id"
-	elif ! bootctl set-default "$id" > "$tmpfile" 2>&1; then
-		if grep -q "Failed to update EFI variable" "$tmpfile" ||
-				grep -q "Not booted with a supported boot loader" "$tmpfile" ||
-				grep -q "Not booted with UEFI" "$tmpfile"; then
-			loader_conf_set "default" "$id"
-		else
-			err "$(cat "$tmpfile")"
-		fi
+	elif ! bli_efi_var_set "LoaderEntryDefault" "$id"; then
+		warn "EFI variable LoaderEntryDefault cannot be set.  Falling back to configuration file"
+		loader_conf_set "default" "$id"
 	fi
 }
 
 set_default_grub2_bls()
 {
 	local id="${1:?}"
-	set_default_sdboot "$id"
 	if systemd-analyze compare-versions "$(bootloader_version)" "<" "2.13" || ! has_efivars || [ -n "$arg_no_variables" ]; then
+		grubenv_set "default" "$id"
+	elif ! bli_efi_var_set "LoaderEntryDefault" "$id"; then
+		warn "EFI variable LoaderEntryDefault cannot be set.  Falling back to configuration file"
 		grubenv_set "default" "$id"
 	fi
 }
@@ -2114,8 +2120,9 @@ get_default_sdboot()
 get_default_grub2_bls()
 {
 	local val
-	val="$(grubenv_get "default")"
-	[ -n "$val" ] || val="$(get_default_sdboot)"
+	val="$(bli_efi_var_get "LoaderEntryDefault")"
+	[ -n "$val" ] || val="$(grubenv_get "default")"
+	[ -n "$val" ] || val="$(get_default_bootctl)"
 	[ -z "$val" ] || echo "$val"
 }
 
@@ -2133,26 +2140,47 @@ get_default_entry()
 set_timeout_sdboot()
 {
 	local timeout="${1:?}"
+	# `bootctl set-timeout menu-hidden` writes "0", and
+	# "menu-disabled" write the full text.  In both cases the menu
+	# is hidden.
+	#
+	# `bootctl set-timeout menu-force` writes 2^32-1 in the EFI
+	# variable (fix needs to be backported) (bsc#1258944)
+	[ "$timeout" = "0" ] && timeout="menu-disabled"
 	[ "$timeout" = "-1" ] && timeout="menu-force"
 
-	if [ -n "$arg_no_variables" ]; then
+	# `bootctl set-timeout menu-force` writes 2^32-1 in the EFI
+	# variable (fix needs to be backported) (bsc#1258944)
+	if ! has_efivars || [ -n "$arg_no_variables" ]; then
 		loader_conf_set "timeout" "$timeout"
-	elif ! bootctl set-timeout "$timeout" > "$tmpfile" 2>&1; then
-		if grep -q "Failed to update EFI variable" "$tmpfile" ||
-				grep -q "Not booted with a supported boot loader" "$tmpfile" ||
-				grep -q "Not booted with UEFI" "$tmpfile"; then
-			loader_conf_set "timeout" "$timeout"
-		else
-			err "$(cat "$tmpfile")"
-		fi
+	elif ! bli_efi_var_set "LoaderConfigTimeout" "$timeout"; then
+		warn "EFI variable LoaderConfigTimeout cannot be set.  Falling back to configuration file"
+		loader_conf_set "timeout" "$timeout"
 	fi
 }
 
 set_timeout_grub2_bls()
 {
 	local timeout="${1:?}"
-	set_timeout_sdboot "$timeout"
+	# `bootctl set-timeout menu-hidden` writes "0", and
+	# "menu-disabled" write the full text.  In both cases the menu
+	# is hidden.
+	#
+	# `bootctl set-timeout menu-force` writes 2^32-1 in the EFI
+	# variable (fix needs to be backported) (bsc#1258944)
+	#
+	# We map the same string that works in grub2-bls with the
+	# downstream patch
+	[ "$timeout" = "menu-disabled" ] && timeout="menu-hidden"
+	[ "$timeout" = "0" ] && timeout="menu-hidden"
+	[ "$timeout" = "-1" ] && timeout="menu-force"
+
 	if systemd-analyze compare-versions "$(bootloader_version)" "<" "2.13" || ! has_efivars || [ -n "$arg_no_variables" ]; then
+		[ "$timeout" = "menu-disabled" ] || [ "$timeout" = "menu-hidden" ] && timeout=0
+		[ "$timeout" = "menu-force" ] && timeout=-1
+		grubenv_set "timeout" "$timeout"
+	elif ! bli_efi_var_set "LoaderConfigTimeout" "$timeout"; then
+		warn "EFI variable LoaderConfigTimeout cannot be set.  Falling back to configuration file"
 		[ "$timeout" = "menu-disabled" ] || [ "$timeout" = "menu-hidden" ] && timeout=0
 		[ "$timeout" = "menu-force" ] && timeout=-1
 		grubenv_set "timeout" "$timeout"
@@ -2180,16 +2208,18 @@ get_timeout_sdboot()
 	local val
 	val="$(bli_efi_var_get "LoaderConfigTimeout")"
 	[ -n "$val" ] || val="$(loader_conf_get "timeout")"
-	if [ "$val" = 4294967295 ]; then
-		val=-1
-	fi
+	[ "$val" = "menu-disabled" ] || [ "$val" = "menu-hidden" ] && val=0
+	[ "$val" = 4294967295 ] || [ "$val" = "menu-force" ] && val=-1
 	[ -z "$val" ] || echo "$val"
 }
 
 get_timeout_grub2_bls()
 {
 	local val
-	val="$(grubenv_get "timeout")"
+	val="$(bli_efi_var_get "LoaderConfigTimeout")"
+	[ -n "$val" ] || val="$(grubenv_get "timeout")"
+	[ "$val" = "menu-disabled" ] || [ "$val" = "menu-hidden" ] && val=0
+	[ "$val" = 4294967295 ] || [ "$val" = "menu-force" ] && val=-1
 	[ -z "$val" ] || echo "$val"
 }
 
@@ -2446,7 +2476,7 @@ pcrlock_cmdline_initrd()
 	#
 	# When using systemd-boot or GRUB2-BLS >= 2.14, the cmdline is
 	# send to the kernel via UEFI with null termination (double
-	# \0, as is UTF-16 enconding), but this is missing in
+	# \x00, as is UTF-16 enconding), but this is missing in
 	# GRUB2-BLS <= 2.12
 	echo -n "$cmdline" > "$tmpdir/cmdline"
 	if is_sdboot; then
@@ -2488,7 +2518,7 @@ pcrlock_cmdline_initrd()
 	if is_sdboot; then
 		# We cannot use lock-kernel-cmdline, as it ignore
 		# --pcr=12, and assign PCR 9 in any case
-		echo -ne "$cmdline\0" > "$tmpdir/cmdline"
+		echo -ne "$cmdline\x00" > "$tmpdir/cmdline"
 		iconv -t UTF-16LE -o "$tmpdir/cmdline.utf16" "$tmpdir/cmdline"
 		pcrlock \
 			lock-raw \
