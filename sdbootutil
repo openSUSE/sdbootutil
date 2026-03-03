@@ -2935,6 +2935,13 @@ get_final_pcrs()
 		err "Error creating the systemd-pcrlock prediction!\n$(cat "$tmpfile")"
 	fi
 
+	# If no PCRs are included, we are starting from a very
+	# misaligned event log (initial installation, for example)
+	[ ! "$output" = "{}" ] || {
+		echo "$pcrs"
+		return 0
+	}
+
 	# PCRs that participate in the policy
 	local pcrs_policy
 	pcrs_policy="$(jq -r '[.sha256[] | select(.values | length <= 8) | .pcr] | join(",")' <<<"$output")"
@@ -3091,7 +3098,6 @@ generate_tpm2_predictions_pcrlock()
 
 	local final_pcrs
 	final_pcrs="$(get_final_pcrs "$pcrs")"
-	[ -n "$final_pcrs" ] || return 1
 
 	local output
 	output="$(PIN="$pin" pcrlock --pcr="$final_pcrs" "${extra[@]}" make-policy 2>"$tmpfile")"
