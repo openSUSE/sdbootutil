@@ -3478,16 +3478,31 @@ in_lockout()
 	tpm2_getcap properties-variable | grep -q 'inLockout: *1'
 }
 
+is_same_device()
+{
+	local dev1="$1"
+	local dev2="$2"
+
+	# If the device name is UUID=, convert as a real device name
+	[[ "$dev1" = "UUID="* ]] && dev1="$(blkid --uuid "${dev1#"UUID="}")"
+	[[ "$dev2" = "UUID="* ]] && dev2="$(blkid --uuid "${dev2#"UUID="}")"
+
+	dev1="$(readlink -f "$dev1")"
+	dev2="$(readlink -f "$dev2")"
+
+	local id1 id2
+	id1="$(stat -c "%t:%T" "$dev1")"
+	id2="$(stat -c "%t:%T" "$dev2")"
+
+	[ "$id1" = "$id2" ]
+}
+
 add_crypttab_option()
 {
-	# This version will share the same options for all crypto_LUKS
-	# devices.  This imply that all of them will be unlocked by
-	# the same TPM2, or the same FIDO2 key.
-	#
-	# The ones ignored will be untouched.
-	local option="$1"
+	local dev="$1"
+	local option="$2"
 
-	dbg "Adding \"$option\" to /etc/crypttab"
+	dbg "Adding \"$option\" for \"$dev\" to /etc/crypttab"
 	dbg_cat "/etc/crypttab"
 
 	local crypttab
@@ -3501,7 +3516,7 @@ add_crypttab_option()
 	local opts
 	while read -r name device key opts; do
 		[[ "$name" = \#* ]] && continue
-		if [[ "$opts" != *"x-sdbootutil.ignore"* ]] && [[ "$opts" != *"$option"* ]]; then
+		if is_same_device "$dev" "$device" && [[ "$opts" != *"x-sdbootutil.ignore"* ]] && [[ "$opts" != *"$option"* ]]; then
 			[ -z "$opts" ] && opts="$option" || opts="$opts,$option"
 			# crypttab has changed so initrd needs to be
 			# updated
@@ -3513,19 +3528,16 @@ add_crypttab_option()
 	mv -Z "$crypttab" /etc/crypttab
 	chmod 644 /etc/crypttab
 
-	dbg "Added \"$option\" to /etc/crypttab"
+	dbg "Added \"$option\" for \"$dev\" to /etc/crypttab"
 	dbg_cat "/etc/crypttab"
 }
 
 remove_crypttab_option()
 {
-	# Similar to add_crypttab_option, the option will be removed
-	# from all the entries.
-	#
-	# The ones ignored will be untouched.
-	local option="$1"
+	local dev="$1"
+	local option="$2"
 
-	dbg "Removing \"$option\" to /etc/crypttab"
+	dbg "Removing \"$option\" for \"$dev\" to /etc/crypttab"
 	dbg_cat "/etc/crypttab"
 
 	local crypttab
@@ -3539,7 +3551,7 @@ remove_crypttab_option()
 	local opts
 	while read -r name device key opts; do
 		[[ "$name" = \#* ]] && continue
-		if [[ "$opts" != *"x-sdbootutil.ignore"* ]] && [[ "$opts" = *"$option"* ]]; then
+		if is_same_device "$dev" "$device" && [[ "$opts" != *"x-sdbootutil.ignore"* ]] && [[ "$opts" = *"$option"* ]]; then
 			opts="${opts#"$option",}"
 			opts="${opts//,"$option"}"
 			opts="${opts//"$option"}"
@@ -3863,13 +3875,17 @@ enroll()
 		"tpm2"|"tpm2+pin")
 			have_tpm2 || err "No TPM2 found found"
 			! in_lockout || err "The TPM2 is in lockout. Use 'tpm2_dictionarylockout -c [ -p passwd ]' to continue"
-			add_crypttab_option 'tpm2-device=auto'
-			[ -n "$arg_no_measure_pcr" ] || add_crypttab_option 'tpm2-measure-pcr=yes'
+			for dev in "${tracked_devices[@]}"; do
+				add_crypttab_option "$dev" 'tpm2-device=auto'
+				[ -n "$arg_no_measure_pcr" ] || add_crypttab_option "$dev" 'tpm2-measure-pcr=yes'
+			done
 			;;
 
 		"fido2")
 			have_fido2 || err "No FIDO2 key found"
-			add_crypttab_option 'fido2-device=auto'
+			for dev in "${tracked_devices[@]}"; do
+				add_crypttab_option "$dev" 'fido2-device=auto'
+			done
 			;;
 	esac
 
@@ -4052,13 +4068,17 @@ unenroll()
 	case "$arg_method" in
 		"tpm2"|"tpm2+pin")
 			have_tpm2 || err "No TPM2 found found"
-			remove_crypttab_option 'tpm2-device=auto'
-			remove_crypttab_option 'tpm2-measure-pcr=yes'
+			for dev in "${tracked_devices[@]}"; do
+				remove_crypttab_option "$dev" 'tpm2-device=auto'
+				remove_crypttab_option "$dev" 'tpm2-measure-pcr=yes'
+			done
 			;;
 
 		"fido2")
 			have_fido2 || err "No FIDO2 key found"
-			remove_crypttab_option 'fido2-device=auto'
+			for dev in "${tracked_devices[@]}"; do
+				remove_crypttab_option "$dev" 'fido2-device=auto'
+			done
 			;;
 	esac
 	if [ "$arg_no_reuse_initrd" = "1" ]; then
