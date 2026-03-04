@@ -1739,7 +1739,7 @@ bootloader_version()
 		# Useless as it reports mayor.minor, so append the
 		# last update time until the minutes, as the FAT store
 		# dates differently than other filesystems
-		read -r _ _ _ v _ < <(grep -aoP 'GNU GRUB  version %s\x00[^\x00]+\x00' "$fn")
+		read -r _ _ _ v _ < <(grep -aoP 'GNU GRUB  version %s\x00+[^\x00]+\x00' "$fn")
 		v="${v:2}-$(date -r "$fn" +'%Y%m%d%H%M')"
 	fi
 	[ -n "$v" ] || return 1
