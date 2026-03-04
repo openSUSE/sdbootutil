@@ -36,7 +36,6 @@ Requires:       efibootmgr
 Requires:       jq
 Requires:       keyutils
 Requires:       openssl
-Requires:       pcr-oracle
 Requires:       qrencode
 Requires:       sed
 Requires:       (%{name}-snapper if (snapper and btrfsprogs))
