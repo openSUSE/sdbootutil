@@ -3805,7 +3805,7 @@ enroll()
 	done
 }
 
-unenroll_pcrlock()
+unenroll_all_pcrlock()
 {
 	systemctl --quiet disable sdbootutil-update-predictions.service || true
 	pcrlock remove-policy &> /dev/null || true
@@ -3821,7 +3821,7 @@ unenroll_pcrlock()
 	rm -f "${boot_root}${boot_dst}/measure-pcr-prediction.sha256"
 }
 
-unenroll_pcr_oracle()
+unenroll_all_pcr_oracle()
 {
 	rm -f /etc/systemd/tpm2-pcr-private-key.pem
 	rm -f /etc/systemd/tpm2-pcr-public-key.pem
@@ -3921,14 +3921,29 @@ unenroll()
 		update_predictions=
 	fi
 
-	if [ "$arg_method" = "tpm2" ] || [ "$arg_method" = "tpm2+pin" ]; then
-		unenroll_pcrlock
-		unenroll_pcr_oracle
-	fi
-
 	for dev in "${tracked_devices[@]}"; do
 		unenroll_device "$dev"
 	done
+
+	# We can have a partial unenroll, so we drop the policy and
+	# the assets only if there is no device left with a "tpm2"
+	# slot.  Multiple devices shares the same NVIndex.
+	if [ "$arg_method" = "tpm2" ] || [ "$arg_method" = "tpm2+pin" ]; then
+		local unenroll_all=1
+		# Reset the detected devices
+		tracked_devices=()
+		detect_tracked_devices
+		for dev in "${tracked_devices[@]}"; do
+			if have_slot "$dev" "tpm2"; then
+				unenroll_all=0
+				break
+			fi
+		done
+		if [ "$unenroll_all" = 1 ]; then
+			unenroll_all_pcrlock
+			unenroll_all_pcr_oracle
+		fi
+	fi
 }
 
 eval_bootctl()
