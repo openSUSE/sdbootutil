@@ -2477,27 +2477,10 @@ pcrlock_cmdline_initrd()
 	# \x00, as is UTF-16 enconding), but this is missing in
 	# GRUB2-BLS <= 2.12
 	echo -n "$cmdline" > "$tmpdir/cmdline"
-	if is_sdboot; then
-		pcrlock \
-			lock-kernel-cmdline \
-			--pcrlock="$tmpdir/cmdline.pcrlock" \
-			"$tmpdir/cmdline"
-	else
-		if systemd-analyze compare-versions "$(bootloader_version)" "<" "2.13"; then
-			iconv -t UTF-16LE -o "$tmpdir/cmdline.utf16" "$tmpdir/cmdline"
-			pcrlock \
-				lock-raw \
-				--pcr=9 \
-				--pcrlock="$tmpdir/cmdline.pcrlock" \
-				"$tmpdir/cmdline.utf16"
-			rm "$tmpdir/cmdline.utf16"
-		else
-			pcrlock \
-				lock-kernel-cmdline \
-				--pcrlock="$tmpdir/cmdline.pcrlock" \
-				"$tmpdir/cmdline"
-		fi
-	fi
+	pcrlock \
+		lock-kernel-cmdline \
+		--pcrlock="$tmpdir/cmdline.pcrlock" \
+		"$tmpdir/cmdline"
 	pcrlock \
 		lock-kernel-initrd \
 		--pcrlock="$tmpdir/initrd.pcrlock" \
@@ -2513,26 +2496,26 @@ pcrlock_cmdline_initrd()
 
 	# 710-kernel-cmdline-boot-loader.pcrlock.d is not part of the
 	# pcrlock standards
-	if is_sdboot; then
-		# We cannot use lock-kernel-cmdline, as it ignore
-		# --pcr=12, and assign PCR 9 in any case
-		echo -ne "$cmdline\x00" > "$tmpdir/cmdline"
-		iconv -t UTF-16LE -o "$tmpdir/cmdline.utf16" "$tmpdir/cmdline"
-		pcrlock \
-			lock-raw \
-			--pcr=12 \
-			--pcrlock="/var/lib/pcrlock.d/710-kernel-cmdline-boot-loader.pcrlock.d/cmdline-$suffix.pcrlock" \
-			"$tmpdir/cmdline.utf16"
-		rm "$tmpdir/cmdline.utf16"
-		rm "$tmpdir/cmdline"
-	fi
+
+	# We cannot use lock-kernel-cmdline, as it ignore --pcr=12,
+	# and assign PCR 9 in any case
+	echo -ne "$cmdline\x00" > "$tmpdir/cmdline"
+	iconv -t UTF-16LE -o "$tmpdir/cmdline.utf16" "$tmpdir/cmdline"
+	pcrlock \
+		lock-raw \
+		--pcr=12 \
+		--pcrlock="/var/lib/pcrlock.d/710-kernel-cmdline-boot-loader.pcrlock.d/cmdline-$suffix.pcrlock" \
+		"$tmpdir/cmdline.utf16"
+	rm "$tmpdir/cmdline.utf16"
+	rm "$tmpdir/cmdline"
 }
 
-pcrlock_grub2_bls_kernel_initrd()
+pcrlock_grub2_bls_kernel_initrd_cmdline_initrd()
 {
 	local linux="$1"
 	local initrd="$2"
-	local suffix="$3"
+	local cmdline="$3"
+	local suffix="$4"
 
 	local elements=("$linux" "$initrd")
 	local locks=()
@@ -2546,10 +2529,41 @@ pcrlock_grub2_bls_kernel_initrd()
 			"$element" 2> /dev/null
 		locks+=("$tmpdir/element-$n.pcrlock")
 	done
-	mkdir -p /var/lib/pcrlock.d/710-grub2-bls-kernel-initrd-entry.pcrlock.d
+
+	# When using systemd-boot or GRUB2-BLS >= 2.14, the cmdline is
+	# send to the kernel via UEFI with null termination (double
+	# \x00, as is UTF-16 enconding), but this is missing in
+	# GRUB2-BLS <= 2.12
+	echo -n "$cmdline" > "$tmpdir/cmdline"
+	n=$((n+1))
+	if systemd-analyze compare-versions "$(bootloader_version)" "<" "2.13"; then
+		iconv -t UTF-16LE -o "$tmpdir/cmdline.utf16" "$tmpdir/cmdline"
+		pcrlock \
+			lock-raw \
+			--pcr=9 \
+			--pcrlock="$tmpdir/element-$n.pcrlock" \
+			"$tmpdir/cmdline.utf16"
+		rm "$tmpdir/cmdline.utf16"
+	else
+		pcrlock \
+			lock-kernel-cmdline \
+			--pcrlock="$tmpdir/element-$n.pcrlock" \
+			"$tmpdir/cmdline"
+	fi
+	locks+=("$tmpdir/element-$n.pcrlock")
+	rm "$tmpdir/cmdline"
+
+	n=$((n+1))
+	pcrlock \
+		lock-kernel-initrd \
+		--pcrlock="$tmpdir/element-$n.pcrlock" \
+		"$initrd" 2> /dev/null
+	locks+=("$tmpdir/element-$n.pcrlock")
+
+	mkdir -p /var/lib/pcrlock.d/710-grub2-bls-kernel-initrd-kernel-cmdline-initrd-entry.pcrlock.d
 	jq --slurp '{"records": [.[].records[0]]}' \
 	   "${locks[@]}" \
-	   > "/var/lib/pcrlock.d/710-grub2-bls-kernel-initrd-entry.pcrlock.d/kernel-initrd-$suffix.pcrlock"
+	   > "/var/lib/pcrlock.d/710-grub2-bls-kernel-initrd-kernel-cmdline-initrd-entry.pcrlock.d/kernel-initrd-cmdline-initrd-$suffix.pcrlock"
 	rm "${locks[@]}"
 }
 
@@ -2800,32 +2814,41 @@ pcrlock_grub2_bls()
 	#    initrd gets updated, a new entry with different hashes
 	#    will appear here
 	#
-	# If not kernel/initrd gets updated, the possible valies for
-	# PCR#9 are 2x2xn, but if a kernel gets update is 2x2xnx2
+	# If not kernel/initrd gets updated, the possible values for
+	# PCR#9 are 2 for 641 (the shift and the next one that
+	# includes the new grubenv), 2 for 643 (again, the shift and
+	# the variation that includes the hash of the new entry), n
+	# for 710-kernel (one per snapshot), and 2 for 710-grub2 (only
+	# if there is a new kernel or initrd): [2x]2xn[x2]
 	#
 	# Solutions:
 	#  - GRUB2-BLS use BLI and drops `grubenv`
-	#  - PolicyOR limit is resolved in systemd-pcrlock
 	#  - MicroOS uses only systemd-boot
-	#  - Make n=2 and predict only one kernel.
+	#  - PolicyOR limit is resolved in systemd-pcrlock
+	#  - Merge both 710 components, to decrease the variations
+	#  - Make n=2 (710-kernel-cmdline-initrd-entry)
 	#
-	# This code select the last option.  One issue is that if a
-	# kernel is updated and a rollback is needed, the password
-	# will be asked.  To resolve this we can drop PCR#9 when there
-	# is a new kernel and allow the rollback without a password,
-	# and lock on PCR#9 during boot time, via the
-	# sdbootutil-update-predictions service.
+	# For GRUB2 2.14 we drop grubenv with the BLI patches.
 	#
-	# As systemd-pcrlock does not drop a PCR that exceed the
-	# PolicyPR limit, we need to first create a prediction and
-	# count the values
-	local limit=1
-	is_transactional || limit=3
+	# The merge solution makes sense.  The order would be:
+	#  - GRUB2: full sha256 of the kernel
+	#  - GRUB2: sha256 of the initrd
+	#  - Kernel: sha256 of the cmdline
+	#  - Kernel: sha256 of the initrd (rep)
+	#
+	# The kernel is again measured a-la pesign in PCR#4 via
+	# 650-kernel-efi-application (by UEFI/shim)
 
-	# Join the kernel and the initrd in a single component
-	shift_component 710-grub2-bls-kernel-initrd-entry
+	# Remove old components before the merge
+	rm -fr /var/lib/pcrlock.d/710-grub2-bls-kernel-initrd-entry.pcrlock.d
+	rm -fr /var/lib/pcrlock.d/710-kernel-cmdline-initrd-entry.pcrlock.d
+
+	# Join the kernel, initrd (GRUB2) and cmdline, initrd (kernel)
+	# in a single component
+	shift_component 710-grub2-bls-kernel-initrd-kernel-cmdline-initrd-entry
 	n=0
-	while read -r linux; do
+	while read -r cmdline; do
+		read -r linux
 		read -r initrd
 		[ -f "${boot_root}$linux" ] || {
 			info "Missing ${boot_root}$linux, ignoring entry for prediction"
@@ -2836,54 +2859,24 @@ pcrlock_grub2_bls()
 			continue
 		}
 		n=$((n+1))
-		[ "$n" -le "$limit" ] || {
-			info "More than $limit variations for 710-grub2-bls-kernel-initrd-entry"
+		[ "$n" -le 4 ] || {
+			info "More than 4 variations for 710-grub2-bls-kernel-initrd-entry"
 			continue
 		}
-		pcrlock_grub2_bls_kernel_initrd "${boot_root}$linux" "${boot_root}$initrd" "$n"
-	done < <(jq --raw-output 'sort_by(.priority, (.kernel | map(-.))) | .[] | .linux, .initrd[0]' "$entryfile")
+		pcrlock_grub2_bls_kernel_initrd_cmdline_initrd "${boot_root}$linux" "${boot_root}$initrd" "BOOT_IMAGE=${grub2_bls_drive}$linux $cmdline" "$n"
+	done < <(jq --raw-output 'sort_by(.priority, (.kernel | map(-.))) | .[] | .options, .linux, .initrd[0]' "$entryfile")
 
-	# Generate variation for 710-grub2-bls-kernel-initrd-entry for the
-	# same reason than before.
-	n=0
-	if [ "$SDB_ADD_INITIAL_COMPONENT" = "1" ]; then
-		while read -r linux; do
-			read -r initrd
-			n=$((n+1))
-			pcrlock_grub2_bls_kernel_initrd "${tmpdir}$linux" "${tmpdir}$initrd" "0-$n"
-		done < <(jq --raw-output '.[] | .linux, .initrd[0]' "$initialentryfile")
-	fi
-
-	local limit=2
-	is_transactional || limit=3
-
-	# Join the cmdline and the initrd in a single component
-	# TODO: If shim is not installed, should we drop this?
-	shift_component 710-kernel-cmdline-initrd-entry
-	n=0
-	while read -r cmdline; do
-		read -r linux
-		read -r initrd
-		[ -f "${boot_root}$linux" ] || continue
-		[ -f "${boot_root}$initrd" ] || continue
-		n=$((n+1))
-		[ "$n" -le "$limit" ] || {
-			info "More than $limit variations for 710-kernel-cmdline-initrd-entry"
-			continue
-		}
-		pcrlock_cmdline_initrd "BOOT_IMAGE=${grub2_bls_drive}$linux $cmdline" "${boot_root}$initrd" "$n"
-	done < <(jq --raw-output 'sort_by(.priority, (.kernel | map(-.))) | .[] | (.options, .linux, .initrd[0])' "$entryfile")
-
-	# Generate variation for 710-kernel-cmdline-initrd-entry for
-	# the same reason than before
+	# Generate variation for
+	# 710-grub2-bls-kernel-initrd-kernel-cmdline-initrd-entry for
+	# the same reason than before.
 	n=0
 	if [ "$SDB_ADD_INITIAL_COMPONENT" = "1" ]; then
 		while read -r cmdline; do
 			read -r linux
 			read -r initrd
 			n=$((n+1))
-			pcrlock_cmdline_initrd "BOOT_IMAGE=${grub2_bls_drive}$linux $cmdline" "${tmpdir}$initrd" "0-$n"
-		done < <(jq --raw-output '.[] | (.options, .linux, .initrd[0])' "$initialentryfile")
+			pcrlock_grub2_bls_kernel_initrd_cmdline_initrd "${tmpdir}$linux" "${tmpdir}$initrd" "BOOT_IMAGE=${grub2_bls_drive}$linux $cmdline" "0-$n"
+		done < <(jq --raw-output '.[] | .options, .linux, .initrd[0]' "$initialentryfile")
 	fi
 }
 
