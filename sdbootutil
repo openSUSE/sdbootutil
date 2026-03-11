@@ -44,6 +44,7 @@ arg_measure_pcr=
 arg_pcr=
 arg_rootfs=
 arg_rootfs_data=
+arg_esp_free_space=
 arg_force=
 have_snapshots=
 # for x in vmlinuz image vmlinux linux bzImage uImage Image zImage; do
@@ -142,6 +143,7 @@ helpandquit()
 		                        valid selectors
 		                        (uuid, partuuid, label, partlabel, device)
 		  --rootfs-data		Extra data when --rootfs is used
+		  --esp-free-space	Percentage of free space in the ESP
 		  --force		Force certain operations inside a transaction
 		  -v, --verbose		More verbose output
 		  --start-trace-code	Create /var/log/sdbootutil.log to trace the code.
@@ -346,6 +348,8 @@ set_default_config_values()
 		ROOTFS="uuid"
 	fi
 	ROOTFS="${arg_rootfs:-$ROOTFS}"
+
+	ESP_FREE_SPACE="${arg_esp_free_space:-10}"
 }
 
 create_default_config_file()
@@ -362,6 +366,9 @@ create_default_config_file()
 	# Parameter used in the cmdline to find the root (device, [part]uuid, [part]label)
 	# For encrypted devices it is forced "device"
 	ROOTFS="$ROOTFS"
+
+	# Percentage (%) of free space in the ESP that sdbootutil should guarantee
+	ESP_FREE_SPACE="$ESP_FREE_SPACE"
 	EOF
 }
 
@@ -395,6 +402,7 @@ load_config_file()
 	# If arguments are passed, use them
 	FDE_SEAL_PCR_LIST="${arg_pcr:-$FDE_SEAL_PCR_LIST}"
 	ROOTFS="${arg_rootfs:-$ROOTFS}"
+	ESP_FREE_SPACE="${arg_esp_free_space:-$ESP_FREE_SPACE}"
 }
 
 is_secure_boot()
@@ -1010,9 +1018,14 @@ pending_initrds_size()
 	echo $((size / 1024 + 1))
 }
 
+boot_space()
+{
+	echo $(($(findmnt --noheadings --bytes -o SIZE --target "$boot_root" | head -n 1) / 1024))
+}
+
 boot_free_space()
 {
-	echo $(($(findmnt -n -b -o AVAIL --target "$boot_root" | head -n 1) / 1024))
+	echo $(($(findmnt --noheadings --bytes -o AVAIL --target "$boot_root" | head -n 1) / 1024))
 }
 
 regex_snapshot_ids_for_free_space()
@@ -1115,9 +1128,15 @@ make_free_space()
 	local snapshot="$1"
 	local required_size="$2"
 
-	info "Required free space in ESP: $required_size KB"
+	local required_size_extra
+	required_size_extra=$(("$(boot_space)" * $ESP_FREE_SPACE / 100))
+
+	info "Required free space in ESP: ${required_size}KB + ${required_size_extra}KB (${ESP_FREE_SPACE}% ESP size)"
+
+	required_size=$(($required_size + $required_size_extra))
 
 	# If there is already free space, shortcut the code
+	local free_space
 	free_space="$(boot_free_space)"
 	[ "$required_size" -gt "$free_space" ] || return 0
 
@@ -1397,6 +1416,9 @@ cleanup_entries()
 
 	dbg "Calling bootctl cleanup"
 	bootctl -q cleanup 2> /dev/null
+
+	# Guarantee ESP_FREE_SPACE
+	make_free_space "${1:-$root_snapshot}" "0"
 }
 
 list_entries()
@@ -4043,6 +4065,7 @@ define_options() {
 		[devices]="_devices"
 		[rootfs]="_rootfs"
 		[rootfs-data]="_rootfs_data"
+		[esp-free-space]="_esp_free_space"
 		[force]=""
 	)
 	opts_long=""
@@ -4099,6 +4122,7 @@ while true ; do
 		--devices) IFS=',' read -r -a tracked_devices <<<"$2"; shift 2 ;;
 		--rootfs) arg_rootfs="$2"; shift 2 ;;
 		--rootfs-data) arg_rootfs_data="$2"; shift 2 ;;
+		--esp-free-space) arg_esp_free_space="$2"; shift 2 ;;
 		--force) arg_force=1; shift ;;
 		--) shift ; break ;;
 		*) echo "Internal error!" ; exit 1 ;;
