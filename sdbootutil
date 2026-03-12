@@ -2934,6 +2934,11 @@ clean_pcrlock_d()
 	fi
 }
 
+get_predicted_hashes()
+{
+	find /var/lib/pcrlock.d/ -name "*.pcrlock" -type f -exec jq -r '.records[].digests[] | select(.hashAlg == "sha256") | .digest' {} + | sort -u
+}
+
 get_final_pcrs()
 {
 	local pcrs="$1"
@@ -2996,6 +3001,14 @@ generate_tpm2_predictions_pcrlock()
 	select_entries_for_prediction
 
 	clean_pcrlock_d
+
+	# Get the list of hashes that can participate in the policy.
+	# We will compare them with the generated for the next
+	# prediction.  If there are no new hashes, a new policy will
+	# include all the PCR values form the current one, and we can
+	# skip the update
+	local pre_hashes
+	pre_hashes="$(get_predicted_hashes)"
 
 	shift_component 250-firmware-code-early
 	shift_component 550-firmware-code-late
@@ -3109,6 +3122,11 @@ generate_tpm2_predictions_pcrlock()
 		# one
 		extra=("--recovery-pin=show")
 	fi
+
+	local post_hashes
+	post_hashes="$(get_predicted_hashes)"
+
+	[ -n "$(comm -13 <(echo "$pre_hashes") <(echo "$post_hashes"))" ] || return 0
 
 	local final_pcrs
 	final_pcrs="$(get_final_pcrs "$pcrs")"
