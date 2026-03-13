@@ -1128,11 +1128,11 @@ make_free_space()
 	local required_size="$2"
 
 	local required_size_extra
-	required_size_extra=$(("$(boot_space)" * $ESP_FREE_SPACE / 100))
+	required_size_extra=$(("$(boot_space)" * ESP_FREE_SPACE / 100))
 
 	info "Required free space in ESP: ${required_size}KB + ${required_size_extra}KB (${ESP_FREE_SPACE}% ESP size)"
 
-	required_size=$(($required_size + $required_size_extra))
+	required_size=$((required_size + required_size_extra))
 
 	# If there is already free space, shortcut the code
 	local free_space
@@ -1176,13 +1176,29 @@ make_free_space_for_kernel()
 
 create_boot_options() {
 	local subvol="$1"
-	local boot_options=
+	local cmdline
+	local boot_options
 	for i in "${subvol:1}/etc/kernel/cmdline" "${subvol:1}/usr/lib/kernel/cmdline" /proc/cmdline; do
 		[ -f "$i" ] || continue
 		dbg_cat "$i"
-		boot_options="$(sedrootflags "$subvol" < "$i")"
+		cmdline="$(<"$i")"
 		break
 	done
+
+	for i in "${subvol:1}"/usr/kernel/cmdline.d/*; do
+		[ -e "${subvol:1}/etc/kernel/cmdline.d/$(basename "$i")" ] && continue
+		dbg_cat "$i"
+		[ -s "$i" ] || continue
+		cmdline="${cmdline:+$cmdline }$(<"$i")"
+	done
+
+	for i in "${subvol:1}"/etc/kernel/cmdline.d/*; do
+		dbg_cat "$i"
+		[ -s "$i" ] || continue
+		cmdline="${cmdline:+$cmdline }$(<"$i")"
+	done
+
+	[ -z "$cmdline" ] || boot_options="$(echo "$cmdline" | sedrootflags "$subvol")"
 	echo "$boot_options"
 }
 
@@ -1524,6 +1540,7 @@ update_entry()
 {
 	local snapshot="$1"
 	local kernel_version="$2"
+	[ -n "$kernel_version" ] || err "Missing kernel version"
 
 	settle_entry_token "${snapshot}"
 	local id
