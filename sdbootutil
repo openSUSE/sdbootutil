@@ -548,7 +548,7 @@ detect_parent()
 is_rootfs_crypt()
 {
 	local device
-	read -r device < <(findmnt / -v -r -n -o SOURCE 2> /dev/null)
+	read -r device < <(findmnt / -v -n -o SOURCE 2> /dev/null)
 	[ -n "$device" ] && [ "$(lsblk --noheadings -o TYPE "$device")" = "crypt" ]
 }
 
@@ -557,15 +557,15 @@ get_rootfs()
 	local rootfs_data
 
 	case "$ROOTFS" in
-		uuid) read -r rootfs_data < <(findmnt / -v -r -n -o UUID 2> /dev/null) ;;
-		label) read -r rootfs_data < <(findmnt / -v -r -n -o LABEL 2> /dev/null) ;;
-		partuuid) read -r rootfs_data < <(findmnt / -v -r -n -o PARTUUID 2> /dev/null) ;;
-		partlabel) read -r rootfs_data < <(findmnt / -v -r -n -o PARTLABEL 2> /dev/null) ;;
-		device) read -r rootfs_data < <(findmnt / -v -r -n -o SOURCE 2> /dev/null) ;;
+		uuid) read -r rootfs_data < <(findmnt / -v -n -o UUID 2> /dev/null) ;;
+		label) read -r rootfs_data < <(findmnt / -v -n -o LABEL 2> /dev/null) ;;
+		partuuid) read -r rootfs_data < <(findmnt / -v -n -o PARTUUID 2> /dev/null) ;;
+		partlabel) read -r rootfs_data < <(findmnt / -v -n -o PARTLABEL 2> /dev/null) ;;
+		device) read -r rootfs_data < <(findmnt / -v -n -o SOURCE 2> /dev/null) ;;
 		*)
 			info "Can't determine rootfs ($ROOTFS). Using UUID as default"
 			ROOTFS="uuid"
-			read -r rootfs_data < <(findmnt / -v -r -n -o UUID 2> /dev/null)
+			read -r rootfs_data < <(findmnt / -v -n -o UUID 2> /dev/null)
 			;;
 	esac
 	rootfs_data="${arg_rootfs_data:-$rootfs_data}"
@@ -581,19 +581,19 @@ get_all_rootfs()
 {
 	local rootfs rootfs_data
 
-	read -r rootfs_data < <(findmnt / -v -r -n -o SOURCE)
+	read -r rootfs_data < <(findmnt / -v -n -o SOURCE)
 	rootfs="$rootfs_data"
 
-	read -r rootfs_data < <(findmnt / -v -r -n -o UUID)
+	read -r rootfs_data < <(findmnt / -v -n -o UUID)
 	[ -z "$rootfs_data" ] || rootfs="$rootfs|UUID=$rootfs_data"
 
-	read -r rootfs_data < <(findmnt / -v -r -n -o LABEL)
+	read -r rootfs_data < <(findmnt / -v -n -o LABEL)
 	[ -z "$rootfs_data" ] || rootfs="$rootfs|LABEL=$rootfs_data"
 
-	read -r rootfs_data < <(findmnt / -v -r -n -o PARTUUID)
+	read -r rootfs_data < <(findmnt / -v -n -o PARTUUID)
 	[ -z "$rootfs_data" ] || rootfs="$rootfs|PARTUUID=$rootfs_data"
 
-	read -r rootfs_data < <(findmnt / -v -r -n -o PARTLABEL)
+	read -r rootfs_data < <(findmnt / -v -n -o PARTLABEL)
 	[ -z "$rootfs_data" ] || rootfs="$rootfs|PARTLABEL=$rootfs_data"
 
 	echo "$rootfs"
