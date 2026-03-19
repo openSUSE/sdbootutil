@@ -2140,10 +2140,8 @@ set_default_entry()
 
 get_default_bootctl()
 {
-	local val
 	update_entries_for_this_system
 	jq -r '.[] | select(.isDefault == true) | .id' < "$entryfile"
-	[ -z "$val" ] || echo "$val"
 }
 
 get_default_sdboot()
