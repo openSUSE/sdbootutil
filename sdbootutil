@@ -2147,7 +2147,9 @@ get_default_bootctl()
 get_default_sdboot()
 {
 	local val
-	val="$(bli_efi_var_get "LoaderEntryDefault")"
+	if has_efivars && [ -z "$arg_no_variables" ]; then
+		val="$(bli_efi_var_get "LoaderEntryDefault")"
+	fi
 	[ -n "$val" ] || val="$(loader_conf_get "default")"
 	[ -n "$val" ] || val="$(get_default_bootctl)"
 	[ -z "$val" ] || echo "$val"
@@ -2156,7 +2158,9 @@ get_default_sdboot()
 get_default_grub2_bls()
 {
 	local val
-	val="$(bli_efi_var_get "LoaderEntryDefault")"
+	if has_efivars && [ -z "$arg_no_variables" ]; then
+		val="$(bli_efi_var_get "LoaderEntryDefault")"
+	fi
 	[ -n "$val" ] || val="$(grubenv_get "default")"
 	[ -n "$val" ] || val="$(get_default_bootctl)"
 	[ -z "$val" ] || echo "$val"
@@ -2242,7 +2246,9 @@ set_timeout()
 get_timeout_sdboot()
 {
 	local val
-	val="$(bli_efi_var_get "LoaderConfigTimeout")"
+	if has_efivars && [ -z "$arg_no_variables" ]; then
+		val="$(bli_efi_var_get "LoaderConfigTimeout")"
+	fi
 	[ -n "$val" ] || val="$(loader_conf_get "timeout")"
 	[ "$val" = "menu-disabled" ] || [ "$val" = "menu-hidden" ] && val=0
 	[ "$val" = 4294967295 ] || [ "$val" = "menu-force" ] && val=-1
@@ -2252,7 +2258,9 @@ get_timeout_sdboot()
 get_timeout_grub2_bls()
 {
 	local val
-	val="$(bli_efi_var_get "LoaderConfigTimeout")"
+	if has_efivars && [ -z "$arg_no_variables" ]; then
+		val="$(bli_efi_var_get "LoaderConfigTimeout")"
+	fi
 	[ -n "$val" ] || val="$(grubenv_get "timeout")"
 	[ "$val" = "menu-disabled" ] || [ "$val" = "menu-hidden" ] && val=0
 	[ "$val" = 4294967295 ] || [ "$val" = "menu-force" ] && val=-1
@@ -4257,6 +4265,9 @@ if [ "$SECURE_BOOT" = "yes" ] || is_shim_installed; then
 fi
 
 if [ "$UPDATE_NVRAM" = "no" ]; then
+	if has_efivars; then
+		warn 'The system have EFI variables but UPDATE_NVRAM is set to "no"'
+	fi
 	arg_no_variables=1
 fi
 
