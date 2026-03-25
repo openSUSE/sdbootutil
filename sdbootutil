@@ -1411,7 +1411,7 @@ cleanup_entries()
 		read -r path
 		read -r snapshot
 		read -r kernel_version
-		subvol="${subvol_prefix}/.snapshots/${snapshot}/snapshot"
+		[ -z "$snapshot" ] || subvol="${subvol_prefix}/.snapshots/${snapshot}/snapshot"
 		src="${subvol#"${subvol_prefix}"}/lib/modules/$kernel_version/$image"
 		[ -e "$src" ] || {
 			info "Cleaning boot entry $id"
