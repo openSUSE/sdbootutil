@@ -549,7 +549,7 @@ is_rootfs_crypt()
 {
 	local device
 	read -r device < <(findmnt / -v -n -o SOURCE 2> /dev/null)
-	[ -n "$device" ] && [ "$(lsblk --noheadings -o TYPE "$device")" = "crypt" ]
+	[ -n "$device" ] && [ "$(lsblk --noheadings -o TYPE "$device" 2> /dev/null)" = "crypt" ]
 }
 
 get_rootfs()
