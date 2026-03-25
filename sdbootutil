@@ -1232,7 +1232,6 @@ install_kernel()
 	if [ -e "$initrd" ]; then
 		ln -s "$initrd" "$tmpdir/initrd-0"
 	elif ! reuse_initrd "$snapshot" "$subvol" "$kernel_version"; then
-		local snapshot_dir="/.snapshots/$snapshot/snapshot"
 		local dracut_args=(
 			'--reproducible'
 			'--force'
@@ -1244,16 +1243,16 @@ install_kernel()
 
 		info "Generating new initrd"
 
-		if [ "$subvol" != "$root_subvol" ] && [ -n "$have_snapshots" ]; then
-			mount_chroot "${snapshot_dir}"
+		if [ -n "$have_snapshots" ] && [ "$subvol" != "$root_subvol" ]; then
+			mount_chroot "${subvol#"${subvol_prefix}"}"
 			# In MicroOS we need to be sure to have the same /etc
 			# inside the snapshot.  For example, /etc/crypttab can
 			# have modifications in the overlay that will be
 			# visible once the snapshot is active, but the version
 			# in /.snapshots is still the unmodified base
-			is_transactional && mount_etc "${snapshot_dir}"
-			chroot "${snapshot_dir}" dracut "${dracut_args[@]}" "$tmpdir/initrd-0" "$kernel_version"
-			umount_chroot "${snapshot_dir}"
+			is_transactional && mount_etc "${subvol#"${subvol_prefix}"}"
+			chroot "${subvol#"${subvol_prefix}"}" dracut "${dracut_args[@]}" "$tmpdir/initrd-0" "$kernel_version"
+			umount_chroot "${subvol#"${subvol_prefix}"}"
 		else
 			dracut "${dracut_args[@]}" "$tmpdir/initrd-0" "$kernel_version"
 		fi
