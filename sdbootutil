@@ -1178,21 +1178,21 @@ create_boot_options() {
 	local subvol="$1"
 	local cmdline
 	local boot_options
-	for i in "${subvol:1}/etc/kernel/cmdline" "${subvol:1}/usr/lib/kernel/cmdline" /proc/cmdline; do
+	for i in "${subvol:1}/etc/kernel/cmdline" "${subvol:1}/usr/lib/kernel/cmdline" /etc/kernel/cmdline /usr/lib/kernel/cmdline /proc/cmdline; do
 		[ -f "$i" ] || continue
 		dbg_cat "$i"
 		cmdline="$(<"$i")"
 		break
 	done
 
-	for i in "${subvol:1}"/usr/kernel/cmdline.d/*; do
+	for i in "${subvol:1}"/usr/kernel/cmdline.d/* /usr/kernel/cmdline.d/*; do
 		[ -e "${subvol:1}/etc/kernel/cmdline.d/$(basename "$i")" ] && continue
 		dbg_cat "$i"
 		[ -s "$i" ] || continue
 		cmdline="${cmdline:+$cmdline }$(<"$i")"
 	done
 
-	for i in "${subvol:1}"/etc/kernel/cmdline.d/*; do
+	for i in "${subvol:1}"/etc/kernel/cmdline.d/* /etc/kernel/cmdline.d/*; do
 		dbg_cat "$i"
 		[ -s "$i" ] || continue
 		cmdline="${cmdline:+$cmdline }$(<"$i")"
