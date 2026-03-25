@@ -1210,7 +1210,6 @@ install_kernel()
 	local kernel_version="$2"
 	local dstinitrd=()
 	local src="${subvol#"${subvol_prefix}"}/lib/modules/$kernel_version/$image"
-	local initrddir="${subvol#"${subvol_prefix}"}/usr/lib/initrd"
 	[ -n "$kernel_version" ] || err "Missing kernel version"
 	[ -e "$src" ] || err "Can't find $src"
 
@@ -1232,14 +1231,6 @@ install_kernel()
 
 	if [ -e "$initrd" ]; then
 		ln -s "$initrd" "$tmpdir/initrd-0"
-	elif [ -d "$initrddir" ] && [ -x "/usr/bin/mkmoduleinitrd" ]; then
-		local f i
-		i=0
-		for f in "$initrddir"/*; do
-			ln -s "$f" "$tmpdir/initrd-$i"
-			((++i))
-		done
-		/usr/bin/mkmoduleinitrd "${subvol#"${subvol_prefix}"}" "$kernel_version" "$tmpdir/initrd-$i"
 	elif ! reuse_initrd "$snapshot" "$subvol" "$kernel_version"; then
 		local snapshot_dir="/.snapshots/$snapshot/snapshot"
 		local dracut_args=(
