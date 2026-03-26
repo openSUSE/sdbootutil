@@ -711,7 +711,11 @@ find_conf_file()
 	local id
 	id="$(entry_conf_file "$kernel_version" "$snapshot")"
 
-	update_entries_for_snapshot "$snapshot"
+	if [ -n "$snapshot" ]; then
+		update_entries_for_snapshot "$snapshot"
+	else
+		update_entries_for_this_system
+	fi
 
 	while IFS= read -r path; do
 		if [ -f "$path" ]; then
@@ -1393,6 +1397,8 @@ remove_all_kernels()
 
 cleanup_entries()
 {
+	local snapshot="$1"
+
 	info "Cleaning up boot entries"
 
 	[ -z "$TRANSACTIONAL_UPDATE" ] || [ -n "$arg_force" ] || {
@@ -1401,8 +1407,8 @@ cleanup_entries()
 	}
 
 	if [ ! -s "$entryfile" ]; then
-		if [ -n "$1" ]; then
-			update_entries_for_snapshot "$1"
+		if [ -n "$snapshot" ]; then
+			update_entries_for_snapshot "$snapshot"
 		else
 			update_entries_for_this_system
 		fi
@@ -1433,11 +1439,13 @@ cleanup_entries()
 
 list_entries()
 {
+	local snapshot="$1"
+
 	info "Listing boot entries"
 
 	if [ ! -s "$entryfile" ]; then
-		if [ -n "$1" ]; then
-			update_entries_for_snapshot "$1"
+		if [ -n "$snapshot" ]; then
+			update_entries_for_snapshot "$snapshot"
 		elif [ -n "$arg_all_entries" ]; then
 			update_entries
 		else
@@ -1573,7 +1581,12 @@ update_all_entries()
 
 	make_free_space "$snapshot" 1024
 
-	update_entries_for_snapshot "$1"
+	if [ -n "$snapshot" ]; then
+		update_entries_for_snapshot "$snapshot"
+	else
+		update_entries_for_this_system
+	fi
+
 	while read -r conf; do
 		update_entry_conf "$conf" "$snapshot"
 	done < <(jq -r '.[]|.path' < "$entryfile")
@@ -2278,27 +2291,27 @@ get_timeout()
 set_default_snapshot()
 {
 	[ -n "$have_snapshots" ] || { info "System does not support snapshots."; return 0; }
-	local num="${1:?}"
+	local snapshot="${1:?}"
 	local configs
 
-	info "Setting default snapshot $num"
+	info "Setting default snapshot $snapshot"
 
 	[ -z "$TRANSACTIONAL_UPDATE" ] || [ -n "$arg_force" ] || {
 		warn "Inside transactional-update. Setting default snapshots must be done outside the transaction"
 		return 0
 	}
 
-	update_entries_for_snapshot "$num"
+	update_entries_for_snapshot "$snapshot"
 	mapfile configs < <(jq '.[]|[.id]|join(" ")' -r < "$entryfile")
 	configs=("${configs[@]%$nl}")
 	if [ -z "${configs[0]}" ]; then
-		info "Snapshot $num has no configs, trying to create them..."
-		install_all_kernels "$num"
-		update_entries_for_snapshot "$num"
+		info "Snapshot $snapshot has no configs, trying to create them..."
+		install_all_kernels "$snapshot"
+		update_entries_for_snapshot "$snapshot"
 		mapfile configs < <(jq '.[]|[.id]|join(" ")' -r < "$entryfile")
 		configs=("${configs[@]%$nl}")
 		if [ -z "${configs[0]}" ]; then
-			err "snapshot $num has no kernels"
+			err "snapshot $snapshot has no kernels"
 		fi
 	fi
 
@@ -2310,7 +2323,7 @@ set_default_snapshot()
 	# We do not use snapper, to avoid recursion and do not trigger
 	# any plugin
 	local subvolume_id
-	read -r _ subvolume_id _ < <(btrfs subvolume list -o /.snapshots | grep "${subvol_prefix}/.snapshots/$num/snapshot")
+	read -r _ subvolume_id _ < <(btrfs subvolume list -o /.snapshots | grep "${subvol_prefix}/.snapshots/$snapshot/snapshot")
 	btrfs subvolume set-default "${subvolume_id}" /.snapshots
 	rm -f "$snapperfile"
 
