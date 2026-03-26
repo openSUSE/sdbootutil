@@ -1289,7 +1289,7 @@ install_kernel()
 	cat > "$tmpdir/entry.conf" <<-EOF
 	# Boot Loader Specification type#1 entry
 	title      $title
-	version    $snapshot@$kernel_version${entry_machine_id:+${nl}machine-id $entry_machine_id}${sort_key:+${nl}sort-key   $sort_key}
+	version    ${snapshot:+$snapshot@}$kernel_version${entry_machine_id:+${nl}machine-id $entry_machine_id}${sort_key:+${nl}sort-key   $sort_key}
 	options    $boot_options
 	linux      $dst
 	EOF
@@ -1413,13 +1413,16 @@ cleanup_entries()
 		read -r path
 		read -r snapshot
 		read -r kernel_version
-		[ -z "$snapshot" ] || subvol="${subvol_prefix}/.snapshots/${snapshot}/snapshot"
+		subvol=
+		if [ -n "$snapshot" ] && [ "$snapshot" != "null" ]; then
+			subvol="${subvol_prefix}/.snapshots/${snapshot}/snapshot"
+		fi
 		src="${subvol#"${subvol_prefix}"}/lib/modules/$kernel_version/$image"
 		[ -e "$src" ] || {
 			info "Cleaning boot entry $id"
 			rm "$path"
 		}
-	done < <(jq -r '.[] | .id, .path, (.version | scan("(.*)@(.*)") | .[])' "$entryfile")
+	done < <(jq -r '.[] | .id, .path, (.version | capture("((?<snapshot>[0-9]*)@)?(?<kernel>.*)")) as $v | $v.snapshot, $v.kernel' "$entryfile")
 
 	dbg "Calling bootctl cleanup"
 	bootctl -q cleanup 2> /dev/null
