@@ -2014,7 +2014,7 @@ update_random_seed()
 
 has_efivars()
 {
-	[ -d /sys/firmware/efi/efivars ]
+	[ -w /sys/firmware/efi/efivars ]
 }
 
 bli_efi_var_get()
@@ -4286,7 +4286,7 @@ fi
 
 if [ "$UPDATE_NVRAM" = "no" ]; then
 	if has_efivars; then
-		warn 'The system have EFI variables but UPDATE_NVRAM is set to "no"'
+		warn 'The system has EFI variables but UPDATE_NVRAM is set to "no"'
 	fi
 	arg_no_variables=1
 fi
