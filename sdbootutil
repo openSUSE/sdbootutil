@@ -1732,7 +1732,7 @@ bootloader_version()
 {
 	local fn="$1"
 	if [ -z "$1" ]; then
-		if [ -e "$shimdir/shim.efi" ]; then
+		if is_shim_installed; then
 			fn="$boot_root$boot_dst/grub.efi"
 		elif [ -n "$arg_portable" ]; then
 			fn="$boot_root/EFI/BOOT/BOOT${firmware_arch^^}.EFI"
