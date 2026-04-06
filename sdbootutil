@@ -2114,9 +2114,39 @@ set_default_grub2_bls()
 	fi
 }
 
+get_top_entry_id()
+{
+	local snapshot="$1"
+
+	if [ -n "$snapshot" ]; then
+		update_entries_for_snapshot "$snapshot"
+	else
+		update_entries_for_this_system
+	fi
+
+	mapfile -t ids < <(jq -r '.[]|.id' < "$entryfile")
+	if [ -z "${ids[0]}" ]; then
+		info "No boot entries found, trying to create them..."
+		install_all_kernels "$snapshot"
+		if [ -n "$snapshot" ]; then
+			update_entries_for_snapshot "$snapshot"
+		else
+			update_entries_for_this_system
+		fi
+
+		mapfile -t ids < <(jq -r '.[]|.id' < "$entryfile")
+		if [ -z "${ids[0]}" ]; then
+			err "snapshot $snapshot has no kernels"
+		fi
+	fi
+
+	echo "${ids[0]}"
+}
+
 set_default_entry()
 {
-	local id="${1:?}"
+	local id="$1"
+	[ -n "$1" ] || id=$(get_top_entry_id "$root_snapshot")
 
 	info "Setting default entry $id"
 
@@ -2290,9 +2320,18 @@ get_timeout()
 
 set_default_snapshot()
 {
-	[ -n "$have_snapshots" ] || { info "System does not support snapshots."; return 0; }
+	[ -n "$have_snapshots" ] || {
+		info "System does not support snapshots."
+		# suse-module-tools is calling `sdbootutil
+		# set-default-snapshot` to set the top entry as the
+		# default entry.  If the system does not support
+		# snapshots we set the top entry as default and exit
+		# early
+		set_default_entry
+		return 0
+	}
 	local snapshot="${1:?}"
-	local configs
+	local id
 
 	info "Setting default snapshot $snapshot"
 
@@ -2301,19 +2340,8 @@ set_default_snapshot()
 		return 0
 	}
 
-	update_entries_for_snapshot "$snapshot"
-	mapfile configs < <(jq '.[]|[.id]|join(" ")' -r < "$entryfile")
-	configs=("${configs[@]%$nl}")
-	if [ -z "${configs[0]}" ]; then
-		info "Snapshot $snapshot has no configs, trying to create them..."
-		install_all_kernels "$snapshot"
-		update_entries_for_snapshot "$snapshot"
-		mapfile configs < <(jq '.[]|[.id]|join(" ")' -r < "$entryfile")
-		configs=("${configs[@]%$nl}")
-		if [ -z "${configs[0]}" ]; then
-			err "snapshot $snapshot has no kernels"
-		fi
-	fi
+	id="$(get_top_entry_id "$snapshot")"
+	set_default_entry "$id"
 
 	# The default snapshot is not the criteria used for the
 	# bootloader to select the default boot entry, but for
@@ -2326,8 +2354,6 @@ set_default_snapshot()
 	read -r _ subvolume_id _ < <(btrfs subvolume list -o /.snapshots | grep "${subvol_prefix}/.snapshots/$snapshot/snapshot")
 	btrfs subvolume set-default "${subvolume_id}" /.snapshots
 	rm -f "$snapperfile"
-
-	set_default_entry "${configs[0]}"
 }
 
 have_pcrlock()
