@@ -32,6 +32,7 @@ BuildRequires:  libopenssl-devel
 BuildRequires:  systemd-rpm-macros
 Requires:       %{name}-dracut-measure-pcr
 Requires:       dracut-pcr-signature
+Requires:       e2fsprogs
 Requires:       efibootmgr
 Requires:       jq
 Requires:       keyutils
