@@ -1668,7 +1668,11 @@ update_kernels()
 	for kv in "${!found_kernels[@]}"; do
 		installed_kernels["/$entry_token/$kv/linux-${found_kernels[$kv]}"]=''
 	done
-	update_entries_for_snapshot "$snapshot"
+	if [ -n "$snapshot" ]; then
+		update_entries_for_snapshot "$snapshot"
+	else
+		update_entries_for_this_system
+	fi
 
 	# XXX: maybe we should parse the actual path in the entry
 	while read -r path id; do
