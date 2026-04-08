@@ -865,7 +865,7 @@ set_os_release()
 {
 	local snapshot="$1"
 	local subvol=""
-	[ -z "$snapshot" ] || subvol="${subvol_prefix}/.snapshots/${snapshot}/snapshot"
+	[ -z "$have_snapshots" ] || subvol="${subvol_prefix}/.snapshots/${snapshot}/snapshot"
 	os_release_files=(
 		"${subvol#"${subvol_prefix}"}/usr/lib/os-release"
 		"${subvol#"${subvol_prefix}"}/etc/os-release"
@@ -882,7 +882,7 @@ set_machine_id()
 {
 	local snapshot="$1"
 	local subvol=""
-	[ -z "$snapshot" ] || subvol="${subvol_prefix}/.snapshots/${snapshot}/snapshot"
+	[ -z "$have_snapshots" ] || subvol="${subvol_prefix}/.snapshots/${snapshot}/snapshot"
 	machine_id_files=()
 	if is_transactional && [ -z "$TRANSACTIONAL_UPDATE" ]; then
 		[ -n "$snapshot" ] && machine_id_files+=("/var/lib/overlay/$snapshot/etc/machine-id")
