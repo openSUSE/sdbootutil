@@ -44,7 +44,7 @@ Requires:       (%{name}-tukit if read-only-root-fs)
 Requires:       tpm2.0-tools
 Requires:       libtss2-tcti-device0
 # For bootctl and systemd-pcrlock
-Requires:       (udev >= 257.9 or systemd-experimental < 257.9)
+Requires:       udev
 Supplements:    (grub2-x86_64-efi-bls and shim)
 Supplements:    (systemd-boot and shim)
 # Because uhmac it is not a noarch package
