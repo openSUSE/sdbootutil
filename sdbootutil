@@ -892,7 +892,8 @@ set_machine_id()
 	for file in "${machine_id_files[@]}"; do
 		if [ -s "$file" ]; then
 			read -r machine_id < "$file"
-			break
+			[ "$machine_id" != "uninitialized" ] || machine_id=
+			[ -z "$machine_id" ] || break
 		fi
 	done
 }
