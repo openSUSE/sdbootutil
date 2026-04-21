@@ -1187,7 +1187,10 @@ create_boot_options() {
 	for i in "${subvol:1}/etc/kernel/cmdline" "${subvol:1}/usr/lib/kernel/cmdline" /etc/kernel/cmdline /usr/lib/kernel/cmdline /proc/cmdline; do
 		[ -f "$i" ] || continue
 		dbg_cat "$i"
-		cmdline="$(<"$i")"
+		while read -r line; do
+			[[ "$line" == '#'* ]] && continue
+			cmdline="${cmdline:+$cmdline }${line}"
+		done < "$i"
 		break
 	done
 
@@ -1195,13 +1198,19 @@ create_boot_options() {
 		[ -e "${subvol:1}/etc/kernel/cmdline.d/$(basename "$i")" ] && continue
 		dbg_cat "$i"
 		[ -s "$i" ] || continue
-		cmdline="${cmdline:+$cmdline }$(<"$i")"
+		while read -r line; do
+			[[ "$line" == '#'* ]] && continue
+			cmdline="${cmdline:+$cmdline }${line}"
+		done < "$i"
 	done
 
 	for i in "${subvol:1}"/etc/kernel/cmdline.d/* /etc/kernel/cmdline.d/*; do
 		dbg_cat "$i"
 		[ -s "$i" ] || continue
-		cmdline="${cmdline:+$cmdline }$(<"$i")"
+		while read -r line; do
+			[[ "$line" == '#'* ]] && continue
+			cmdline="${cmdline:+$cmdline }${line}"
+		done < "$i"
 	done
 
 	[ -z "$cmdline" ] || boot_options="$(echo "$cmdline" | sedrootflags "$subvol")"
