@@ -1965,7 +1965,7 @@ install_bootloader()
 		read -r drive partno _ < <(boot_root_drive_partno_dseq)
 
 		local escaped_entry="${entry//\//\\\\}"
-		efibootmgr | grep -q "Boot.*${boot_manager}.*${escaped_entry}" || efibootmgr -q --create --disk "$drive" --part "$partno" --label "${boot_manager} ($bldr_name)" --loader "$entry" || true
+		efibootmgr | grep -q "Boot.*${boot_manager}.*${escaped_entry}" || efibootmgr -q --create --disk "$drive" --part "$partno" --label "${boot_manager} ($bldr_name)" --loader "${entry^^}" || true
 
 		# Make it the first option
 		local boot_order
