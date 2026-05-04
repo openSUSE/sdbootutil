@@ -1539,9 +1539,7 @@ update_entry_conf()
 	local snapshot="$2"
 
 	local subvol=""
-	if [ -n "$have_snapshots" ] || [ -z "$in_buildroot" ]; then
-		subvol="${subvol_prefix}/.snapshots/${snapshot}/snapshot"
-	fi
+	[ -z "$have_snapshots" ] || subvol="${subvol_prefix}/.snapshots/${snapshot}/snapshot"
 
 	local boot_options
 	boot_options="$(create_boot_options "$subvol")"
