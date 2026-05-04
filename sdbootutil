@@ -2998,10 +2998,10 @@ clean_pcrlock_d()
 	# required for the event log aligment.
 	find /var/lib/pcrlock.d -name '*.pcrlock' -type f -mtime +7 -delete
 
-	# Sometimes, like in tests, the user will generate new entries
-	# and reboot in a short period of time
+	# Sometimes, like in openQA tests, the user will generate new
+	# entries and reboot in a short period of time
 	if [ "$(find /var/lib/pcrlock.d -type f -name '*-7.pcrlock' | wc -l)" -gt 0 ]; then
-		rm -fr /var/lib/pcrlock.d
+		rm -fr /var/lib/pcrlock.d/* || true
 	fi
 }
 
@@ -3917,7 +3917,7 @@ unenroll_all_pcrlock()
 {
 	systemctl --quiet disable sdbootutil-update-predictions.service || true
 	pcrlock remove-policy &> /dev/null || true
-	rm -fr /var/lib/pcrlock.d
+	rm -fr /var/lib/pcrlock.d/* || true
 	rm -f /var/lib/systemd/pcrlock.json
 	rm -f "${boot_root}${boot_dst}/pcrlock.json"
 	rm -f /var/lib/sdbootutil/crypttab.sha1
