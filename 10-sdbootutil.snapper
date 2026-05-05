@@ -31,7 +31,7 @@ create_snapshot()
 	# The entries are added here only for Tumbleweed
 	# (non-transactional systems)
 	/usr/bin/sdbootutil add-all-kernels "$num" || :
-	# In Tumblweed clean the default snapshot, not the new created
+	# In Tumbleweed clean the default snapshot, not the new created
 	/usr/bin/sdbootutil cleanup || :
 }
 
