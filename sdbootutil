@@ -48,7 +48,7 @@ arg_esp_free_space=
 arg_force=
 have_snapshots=
 in_buildroot=
-# for x in vmlinuz image vmlinux linux bzImage uImage Image zImage; do
+# Possible values: vmlinuz image vmlinux linux bzImage uImage Image zImage
 image=
 unlock_method=
 
