@@ -3297,7 +3297,7 @@ extend_pcr()
 	local val="$3"
 	local digest
 
-	hash "${dgst}sum" || return 1
+	command -v "${dgst}sum" &> /dev/null || { warn "${dgst}sum not found"; return 1; }
 	hex_to_binary "$pcr$val" > "$tmpdir/pcr"
 	read -r digest _ < <("${dgst}sum" "$tmpdir/pcr")
 	echo "$digest"
@@ -3508,7 +3508,7 @@ have_slot()
 
 in_lockout()
 {
-	hash tpm2_getcap &> /dev/null || { warn "tpm2_getcap not found"; return 1; }
+	command -v tpm2_getcap &> /dev/null || { warn "tpm2_getcap not found"; return 1; }
 	tpm2_getcap properties-variable | grep -q 'inLockout: *1'
 }
 
