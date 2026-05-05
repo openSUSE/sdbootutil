@@ -369,6 +369,7 @@ create_default_config_file()
 	ROOTFS="$ROOTFS"
 
 	# Percentage (%) of free space in the ESP that sdbootutil should guarantee
+	# Default values is 10%
 	ESP_FREE_SPACE="$ESP_FREE_SPACE"
 	EOF
 }
