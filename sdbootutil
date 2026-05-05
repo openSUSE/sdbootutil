@@ -4008,7 +4008,7 @@ unenroll()
 	# Prepare /etc/crypttab and update initrd if required
 	case "$arg_method" in
 		"tpm2"|"tpm2+pin")
-			have_tpm2 || err "No TPM2 found found"
+			have_tpm2 || err "No TPM2 found"
 			for dev in "${tracked_devices[@]}"; do
 				remove_crypttab_option "$dev" 'tpm2-device=auto'
 				remove_crypttab_option "$dev" 'tpm2-measure-pcr=yes'
