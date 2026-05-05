@@ -1056,7 +1056,7 @@ regex_snapshot_ids_for_free_space()
 	if [ "${#snapshots[@]}" = 1 ]; then
 		re="${!snapshots[*]}"
 	else
-		IFS='|' eval re='"(:?${!snapshots[*]})"'
+		IFS='|' eval re='"(?:${!snapshots[*]})"'
 	fi
 
 	echo "$re"
@@ -2446,7 +2446,7 @@ regex_snapshot_ids_for_prediction()
 	local re
 	re="$(snapshot_ids_for_prediction)"
 	re="${re// /|}"
-	echo "(:?$re)"
+	echo "(?:$re)"
 }
 
 select_entries_for_prediction()
