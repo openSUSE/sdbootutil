@@ -3342,10 +3342,11 @@ generate_tpm2_predictions_pcr_15()
 		# the mount point so we can identify /etc or /var.
 		#
 		# According to https://systemd.io/MOUNT_REQUIREMENTS/
-		# /etc is mounted in initrd, and /var is mounted after
-		# initrd, but in MicroOS (via microos-tools) is adding
-		# /var to be mounted in the initrd stage too because
-		# of selinux (98selinux-microos).
+		# /etc and swap are mounted in initrd, and /var is
+		# mounted after initrd, but in MicroOS (via
+		# microos-tools) is adding /var to be mounted in the
+		# initrd stage too because of selinux
+		# (98selinux-microos).
 		extra="$(lsblk --noheadings -o FSTYPE,MOUNTPOINT "$dev")"
 		if [[ "$extra" != *"swap"* ]] && [[ "$extra" != *"/etc"* ]] && { [[ "$extra" != *"/var"* ]] || ! is_transactional; }; then
 			[[ "$opts" != *"x-initrd.attach"* ]] && continue
