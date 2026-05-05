@@ -85,10 +85,12 @@ get_credential fido2 "sdbootutil-enroll.fido2"
 
 if [ -n "$tpm2_pin" ]; then
 	echo "Enrolling TPM2 with PIN"
-	SDB_ADD_INITIAL_COMPONENT=1 PIN="$crypt_tpm_pin" sdbootutil enroll --method=tpm2+pin
+	SDB_ADD_INITIAL_COMPONENT=1 PIN="$tpm2_pin" sdbootutil enroll --method=tpm2+pin
+	# TODO: write_issue_file "$recovery_pin"
 elif [ -n "$tpm2" ]; then
 	echo "Enrolling TPM2"
 	SDB_ADD_INITIAL_COMPONENT=1 sdbootutil enroll --method=tpm2
+	# TODO: write_issue_file "$recovery_pin"
 fi
 
 [ -z "$fido2" ] || {
