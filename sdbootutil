@@ -1026,12 +1026,12 @@ pending_initrds_size()
 
 boot_space()
 {
-	echo $(($(findmnt --noheadings --bytes -o SIZE --target "$boot_root" | head -n 1) / 1024))
+	echo $(($(findmnt --noheadings --bytes -o SIZE --target "${boot_root}" | head -n 1) / 1024))
 }
 
 boot_free_space()
 {
-	echo $(($(findmnt --noheadings --bytes -o AVAIL --target "$boot_root" | head -n 1) / 1024))
+	echo $(($(findmnt --noheadings --bytes -o AVAIL --target "${boot_root}" | head -n 1) / 1024))
 }
 
 regex_snapshot_ids_for_free_space()
@@ -1243,7 +1243,7 @@ install_kernel()
 
 	local initrd="${src%/*}/initrd"
 
-	mkdir -p "$boot_root${dst%/*}"
+	mkdir -p "${boot_root}${dst%/*}"
 
 	if [ -e "$initrd" ]; then
 		ln -s "$initrd" "$tmpdir/initrd-0"
@@ -1274,7 +1274,7 @@ install_kernel()
 		fi
 	fi
 
-	make_free_space_for_kernel "$snapshot" || err "No free space in $boot_root for new kernel"
+	make_free_space_for_kernel "$snapshot" || err "No free space in ${boot_root} for new kernel"
 
 	local boot_options
 	[ -z "$in_buildroot" ] || subvol="${subvol_prefix}/.snapshots/${snapshot}/snapshot"
@@ -1315,16 +1315,16 @@ install_kernel()
 	dbg_cat "$tmpdir/entry.conf"
 
 	local failed=
-	if [ ! -e "$boot_root$dst" ]; then
-		install_with_rollback "$src" "$boot_root$dst" || failed=kernel
+	if [ ! -e "${boot_root}$dst" ]; then
+		install_with_rollback "$src" "${boot_root}$dst" || failed=kernel
 	else
-		info "Reusing $boot_root$dst"
+		info "Reusing ${boot_root}$dst"
 	fi
 	if [ -z "$failed" ] && [ -e "$tmpdir/initrd-0" ]; then
 		i=0
 		while [ -e "$tmpdir/initrd-$i" ]; do
-			if [ ! -e "$boot_root${dstinitrd[$i]}" ]; then
-				install_with_rollback "$tmpdir/initrd-$i" "$boot_root${dstinitrd[$i]}" || { failed=initrd; break; }
+			if [ ! -e "${boot_root}${dstinitrd[$i]}" ]; then
+				install_with_rollback "$tmpdir/initrd-$i" "${boot_root}${dstinitrd[$i]}" || { failed=initrd; break; }
 				rm -f "$tmpdir/initrd-$i"
 			fi
 			((++i))
@@ -1353,8 +1353,8 @@ install_kernel()
 		# removes them
 		local entry_name loader_entry loader_entry_current
 		entry_name="$(entry_conf_file "$kernel_version" "$snapshot")"
-		loader_entry="$boot_root/loader/entries/$(entry_conf_file "$kernel_version" "$snapshot" "$tries")"
-		loader_entry_current="$(find "$boot_root/loader/entries" -maxdepth 1 -type f -name "${entry_name%.conf}*" -print -quit)"
+		loader_entry="${boot_root}/loader/entries/$(entry_conf_file "$kernel_version" "$snapshot" "$tries")"
+		loader_entry_current="$(find "${boot_root}/loader/entries" -maxdepth 1 -type f -name "${entry_name%.conf}*" -print -quit)"
 		install_with_rollback "$tmpdir/entry.conf" "$loader_entry" "$loader_entry_current" || failed="bootloader entry"
 		rm -f "$tmpdir/entry.conf"
 	fi
@@ -1726,9 +1726,9 @@ is_shim_installed()
 {
 	# Check if shim is installed in the ESP
 	# In installed systems there should be a shim.efi
-	[ ! -f "${boot_root}${boot_dst}/shim.efi" ] || return 0
+	[ ! -f "${esp_root}${esp_dst}/shim.efi" ] || return 0
 	# In removable media there is only BOOT${arch}.EFI
-	! grep -q "UEFI SHIM" "${boot_root}/EFI/BOOT/BOOT${firmware_arch^^}.EFI" 2> /dev/null || return 0
+	! grep -q "UEFI SHIM" "${esp_root}/EFI/BOOT/BOOT${firmware_arch^^}.EFI" 2> /dev/null || return 0
 	return 1
 }
 
@@ -1746,13 +1746,13 @@ bootloader_version()
 	local fn="$1"
 	if [ -z "$1" ]; then
 		if is_shim_installed; then
-			fn="$boot_root$boot_dst/grub.efi"
+			fn="${esp_root}${esp_dst}/grub.efi"
 		elif [ -n "$arg_portable" ]; then
-			fn="$boot_root/EFI/BOOT/BOOT${firmware_arch^^}.EFI"
+			fn="${esp_root}/EFI/BOOT/BOOT${firmware_arch^^}.EFI"
 		else
 			local bootloader
 			bootloader="$(find_bootloader)"
-			fn="$boot_root$boot_dst/${bootloader##*/}"
+			fn="${esp_root}${esp_dst}/${bootloader##*/}"
 		fi
 	fi
 	[ -e "$fn" ] || return 1
@@ -1775,7 +1775,7 @@ bootloader_version()
 is_installed()
 {
 	info "Checking if the bootloader is installed"
-	bootloader_version > /dev/null && [ -e "$boot_root/$boot_dst/installed_by_sdbootutil" ]
+	bootloader_version > /dev/null && [ -e "${esp_root}/${esp_dst}/installed_by_sdbootutil" ]
 }
 
 find_sdboot()
@@ -1860,10 +1860,10 @@ bootloader_needs_update()
 	return 1
 }
 
-boot_root_drive_partno_dseq()
+esp_root_drive_partno_dseq()
 {
 	local blkpart drive disk_seq_min
-	blkpart="$(findmnt -nvo SOURCE "$boot_root")"
+	blkpart="$(findmnt -nvo SOURCE "$esp_root")"
 	drive="${blkpart##*/}"
 	lsblk -o NAME,PKNAME,PARTN,DISK-SEQ --json > "$devicefile"
 	# Read the json file with all the devices and, recursively,
@@ -1916,29 +1916,30 @@ install_bootloader()
 	dbg_var "bootloader"
 	dbg_var "bldr_name"
 
-	mkdir -p "$boot_root/loader/entries"
+	mkdir -p "${esp_root}/loader"
+	mkdir -p "${boot_root}/loader/entries"
 
 	if [ -n "$arg_secure_boot" ] && [ ! -e "$prefix$shimdir/shim.efi" ]; then
 		warn "A secure boot installation cannot be done. The shim package is not installed"
 	fi
 
 	if [ -n "$arg_secure_boot" ] && [ -e "$prefix$shimdir/shim.efi" ]; then
-		info "Installing $bldr_name with shim into $boot_root"
-		entry="$boot_dst/shim.efi"
+		info "Installing $bldr_name with shim into $esp_root"
+		entry="$esp_dst/shim.efi"
 		for i in MokManager shim; do
-			[ -n "$arg_portable" ] || install -p -D "$prefix$shimdir/$i.efi" "$boot_root$boot_dst/$i.efi"
+			[ -n "$arg_portable" ] || install -p -D "$prefix$shimdir/$i.efi" "${esp_root}${esp_dst}/$i.efi"
 		done
-		install -p -D "$bootloader" "$boot_root$boot_dst/grub.efi"
+		install -p -D "$bootloader" "${esp_root}${esp_dst}/grub.efi"
 
 		# boot entry point
-		install -p -D "$prefix$shimdir/MokManager.efi" "$boot_root/EFI/BOOT/MokManager.efi"
-		[ -n "$arg_portable" ] || install -p -D "$prefix$shimdir/fallback.efi" "$boot_root/EFI/BOOT/fallback.efi"
-		install -p -D "$prefix$shimdir/shim.efi" "$boot_root/EFI/BOOT/BOOT${firmware_arch^^}.EFI"
+		install -p -D "$prefix$shimdir/MokManager.efi" "${esp_root}/EFI/BOOT/MokManager.efi"
+		[ -n "$arg_portable" ] || install -p -D "$prefix$shimdir/fallback.efi" "${esp_root}/EFI/BOOT/fallback.efi"
+		install -p -D "$prefix$shimdir/shim.efi" "${esp_root}/EFI/BOOT/BOOT${firmware_arch^^}.EFI"
 	else
-		info "Installing $bldr_name without shim into $boot_root"
-		entry="$boot_dst/${bootloader##*/}"
-		[ -n "$arg_portable" ] || install -p -D "$bootloader" "$boot_root$entry"
-		install -p -D "$bootloader" "$boot_root/EFI/BOOT/BOOT${firmware_arch^^}.EFI"
+		info "Installing $bldr_name without shim into $esp_root"
+		entry="$esp_dst/${bootloader##*/}"
+		[ -n "$arg_portable" ] || install -p -D "$bootloader" "${esp_root}$entry"
+		install -p -D "$bootloader" "${esp_root}/EFI/BOOT/BOOT${firmware_arch^^}.EFI"
 	fi
 
 	# shellcheck disable=SC2154
@@ -1949,23 +1950,24 @@ install_bootloader()
 	boot_manager="${split[0]} Boot Manager"
 
 	# This is for shim to create the entry if missing
-	[ -n "$arg_portable" ] || echo "${entry##*/},$boot_manager" | { echo -ne "\xff\xfe"; iconv -f ascii -t ucs-2le; } > "$boot_root$boot_dst/boot.csv"
+	[ -n "$arg_portable" ] || echo "${entry##*/},$boot_manager" | { echo -ne "\xff\xfe"; iconv -f ascii -t ucs-2le; } > "${esp_root}${esp_dst}/boot.csv"
 
-	mkdir -p "$boot_root/$entry_token"
-	echo "$entry_token" > "$boot_root$boot_dst/installed_by_sdbootutil"
+	mkdir -p "${boot_root}/${entry_token}"
+	echo "$entry_token" > "${esp_root}${esp_dst}/installed_by_sdbootutil"
+
 	mkdir -p "/etc/kernel"
 	[ -s /etc/kernel/entry-token ] || echo "$entry_token" > /etc/kernel/entry-token
 	update_random_seed
 
 	if is_sdboot "$snapshot"; then
-		[ -s "$boot_root/loader/entries.srel" ] || echo type1 > "$boot_root/loader/entries.srel"
-		[ -e "$boot_root/loader/loader.conf" ] || echo -e "#timeout 3\n#console-mode keep\n" > "$boot_root/loader/loader.conf"
+		[ -e "${esp_root}/loader/loader.conf" ] || echo -e "#timeout 3\n#console-mode keep\n" > "${esp_root}/loader/loader.conf"
+		[ -s "${boot_root}/loader/entries.srel" ] || echo type1 > "${boot_root}/loader/entries.srel"
 	fi
 
 	# Create boot menu entry if it does not exist
-	if [ -z "$arg_no_variables" ] && [ -z "$arg_portable" ] && mountpoint -q "$boot_root"; then
+	if [ -z "$arg_no_variables" ] && [ -z "$arg_portable" ] && mountpoint -q "$esp_root"; then
 		local drive partno
-		read -r drive partno _ < <(boot_root_drive_partno_dseq)
+		read -r drive partno _ < <(esp_root_drive_partno_dseq)
 
 		local escaped_entry="${entry//\//\\\\}"
 		efibootmgr | grep -q "Boot.*${boot_manager}.*${escaped_entry}" || efibootmgr -q --create --disk "$drive" --part "$partno" --label "${boot_manager} ($bldr_name)" --loader "$entry" || true
@@ -2019,10 +2021,10 @@ update_random_seed()
 {
 	[ -z "$arg_no_random_seed" ] || return 0
 	local s _p
-	read -r s _p < <({ dd if=/dev/urandom bs=32 count=1 status=none; [ -e "$boot_root/loader/random-seed" ] && dd if="$boot_root/loader/random-seed" bs=32 count=1 status=none; } | sha256sum)
+	read -r s _p < <({ dd if=/dev/urandom bs=32 count=1 status=none; [ -e "${esp_root}/loader/random-seed" ] && dd if="${esp_root}/loader/random-seed" bs=32 count=1 status=none; } | sha256sum)
 	[ "${#s}" = 64 ] || { warn "Invalid random seed"; return 0; }
-	hex_to_binary "$s" > "$boot_root/loader/random-seed.new"
-	mv "$boot_root/loader/random-seed.new" "$boot_root/loader/random-seed"
+	hex_to_binary "$s" > "${esp_root}/loader/random-seed.new"
+	mv "${esp_root}/loader/random-seed.new" "${esp_root}/loader/random-seed"
 }
 
 has_efivars()
@@ -2053,20 +2055,20 @@ loader_conf_set()
 	local key="${1:?}"
 	local value="${2:?}"
 
-	[ -e "${boot_root}/loader/loader.conf" ] || touch "${boot_root}/loader/loader.conf"
+	[ -e "${esp_root}/loader/loader.conf" ] || touch "${esp_root}/loader/loader.conf"
 
-	if grep -q "^$key " "${boot_root}/loader/loader.conf"; then
-		sed -i -e "s/^$key .*/$key $value/" "${boot_root}/loader/loader.conf"
+	if grep -q "^$key " "${esp_root}/loader/loader.conf"; then
+		sed -i -e "s/^$key .*/$key $value/" "${esp_root}/loader/loader.conf"
 	else
-		echo "$key $value" >> "${boot_root}/loader/loader.conf"
+		echo "$key $value" >> "${esp_root}/loader/loader.conf"
 	fi
 }
 
 loader_conf_get()
 {
 	local key="${1:?}"
-	if [ -e "${boot_root}/loader/loader.conf" ]; then
-		IFS=' ' read -r key value < <(grep "^$key " "${boot_root}/loader/loader.conf")
+	if [ -e "${esp_root}/loader/loader.conf" ]; then
+		IFS=' ' read -r key value < <(grep "^$key " "${esp_root}/loader/loader.conf")
 		echo -n "$value"
 	fi
 }
@@ -2076,7 +2078,7 @@ grubenv_set()
 	local key="${1:?}"
 	local value="${2:?}"
 
-	[ -e "${boot_root}${boot_dst}/grubenv" ] || touch "${boot_root}${boot_dst}/grubenv"
+	[ -e "${esp_root}${esp_dst}/grubenv" ] || touch "${esp_root}${esp_dst}/grubenv"
 
 	grubenv="$(mktemp -t grubenv.XXXXXX)"
 	echo "# GRUB Environment Block" > "$grubenv"
@@ -2084,22 +2086,22 @@ grubenv_set()
 		[[ "$line" == '#'* ]] && continue
 		[[ "$line" == "$key"=* ]] && continue
 		echo "$line" >> "$grubenv"
-	done < "${boot_root}${boot_dst}/grubenv"
+	done < "${esp_root}${esp_dst}/grubenv"
 	echo "$key=$value" >> "$grubenv"
 
 	local filler
 	filler=$((1024 - $(stat -c %s "$grubenv")))
 	printf '#%.0s' $(seq 1 $filler) >> "$grubenv"
 
-	mv "$grubenv" "${boot_root}${boot_dst}/grubenv"
+	mv "$grubenv" "${esp_root}${esp_dst}/grubenv"
 }
 
 grubenv_get()
 {
 	local key="${1:?}"
 
-	if [ -e "${boot_root}${boot_dst}/grubenv" ]; then
-		IFS='=' read -r key value < <(grep "^$key=" "${boot_root}${boot_dst}/grubenv")
+	if [ -e "${esp_root}${esp_dst}/grubenv" ]; then
+		IFS='=' read -r key value < <(grep "^$key=" "${esp_root}${esp_dst}/grubenv")
 		echo -n "$value"
 	fi
 }
@@ -2493,7 +2495,8 @@ backup_initial_components()
 {
 	select_entries_for_prediction
 	mv "$entryfile" "$initialentryfile"
-	cp -a "$boot_root/." "$tmpdir"
+	cp -a "${boot_root}/." "$tmpdir"
+	[ "$esp_root" = "$boot_root" ] || cp -a "${esp_root}/." "$tmpdir"
 }
 
 parse_eventlog()
@@ -2693,7 +2696,7 @@ pcrlock_grub2_bls_cmdline()
 pcrlock_grub2_bls_entry_files()
 {
 	local suffix="${1:+-$1}"
-	local base="${2:-$boot_root}"
+	local base="${2:-${boot_root}}"
 	local locks=()
 	local n=0
 	for i in "$base"/loader/entries/*.conf; do
@@ -2720,13 +2723,13 @@ pcrlock_sdboot()
 
 	# 641-sdboot-loader-conf.pcrlock is not part of the pcrlock
 	# standards
-	if [ -e "${boot_root}/loader/loader.conf" ]; then
+	if [ -e "${esp_root}/loader/loader.conf" ]; then
 		shift_component 641-sdboot-loader-conf
 		pcrlock \
 			lock-raw \
 			--pcr=5 \
 			--pcrlock=/var/lib/pcrlock.d/641-sdboot-loader-conf.pcrlock.d/generated.pcrlock \
-			"${boot_root}/loader/loader.conf"
+			"${esp_root}/loader/loader.conf"
 	fi
 
 	# 650-kernel-efi-application.pcrlock is not part of the
@@ -2794,13 +2797,13 @@ pcrlock_grub2_bls()
 
 	# 641-grub2-bls-grubenv.pcrlock is not part of the pcrlock
 	# standards
-	if [ -e "${boot_root}${boot_dst}/grubenv" ]; then
+	if [ -e "${esp_root}${esp_dst}/grubenv" ]; then
 		shift_component 641-grub2-bls-grubenv
 		pcrlock \
 			lock-raw \
 			--pcr=9 \
 			--pcrlock=/var/lib/pcrlock.d/641-grub2-bls-grubenv.pcrlock.d/generated.pcrlock \
-			"${boot_root}${boot_dst}/grubenv"
+			"${esp_root}${esp_dst}/grubenv"
 	fi
 
 	# 643-grub2-bls-entry-files.pcrlock is not part of the pcrlock
@@ -2814,11 +2817,11 @@ pcrlock_grub2_bls()
 	local grub2_bls_drive
 	if systemd-analyze compare-versions "$(bootloader_version)" "<" "2.13"; then
 		local partno
-		read -r _ partno dseq < <(boot_root_drive_partno_dseq)
+		read -r _ partno dseq < <(esp_root_drive_partno_dseq)
 		# We are assuming that the disk sequence (that start
 		# with 1) is related with the disk sequence that GRUB2
 		# see during boot time (that start with 0).
-		# boot_root_drive_partno_dseq already set the correct
+		# esp_root_drive_partno_dseq already set the correct
 		# start
 		#
 		# Also if for GRUB2 >= 2.14 this section is not
@@ -2832,12 +2835,12 @@ pcrlock_grub2_bls()
 	while read -r options; do
 		read -r linux
 		read -r initrd
-		[ -f "${boot_root}$linux" ] || {
-			info "Missing ${boot_root}$linux, ignoring entry for prediction"
+		[ -f "${esp_root}$linux" ] || {
+			info "Missing ${esp_root}$linux, ignoring entry for prediction"
 			continue
 		}
-		[ -f "${boot_root}$initrd" ] || {
-			info "Missing ${boot_root}$initrd, ignoring entry for prediction"
+		[ -f "${esp_root}$initrd" ] || {
+			info "Missing ${esp_root}$initrd, ignoring entry for prediction"
 			continue
 		}
 		n=$((n+1))
@@ -2877,8 +2880,8 @@ pcrlock_grub2_bls()
 		local n=0
 		local -A kernels
 		while read -r linux; do
-			[ -f "${boot_root}$linux" ] || {
-				info "Missing ${boot_root}$linux, ignoring entry for prediction"
+			[ -f "${esp_root}$linux" ] || {
+				info "Missing ${esp_root}$linux, ignoring entry for prediction"
 				continue
 			}
 			[ -z "${kernels["$linux"]}" ] || continue
@@ -2892,7 +2895,7 @@ pcrlock_grub2_bls()
 			pcrlock \
 				lock-pe \
 				--pcrlock="/var/lib/pcrlock.d/650-kernel-efi-application.pcrlock.d/linux-$n.pcrlock" \
-				"${boot_root}/$linux"
+				"${esp_root}/$linux"
 		done < <(jq --raw-output 'sort_by(.priority, (.kernel | map(-.))) | map(.linux) | .[]' "$entryfile")
 	fi
 
@@ -2945,12 +2948,12 @@ pcrlock_grub2_bls()
 	while read -r cmdline; do
 		read -r linux
 		read -r initrd
-		[ -f "${boot_root}$linux" ] || {
-			info "Missing ${boot_root}$linux, ignoring entry for prediction"
+		[ -f "${esp_root}$linux" ] || {
+			info "Missing ${esp_root}$linux, ignoring entry for prediction"
 			continue
 		}
-		[ -f "${boot_root}$initrd" ] || {
-			info "Missing ${boot_root}$initrd, ignoring entry for prediction"
+		[ -f "${esp_root}$initrd" ] || {
+			info "Missing ${esp_root}$initrd, ignoring entry for prediction"
 			continue
 		}
 		n=$((n+1))
@@ -2958,7 +2961,7 @@ pcrlock_grub2_bls()
 			info "More than 4 variations for 710-grub2-bls-kernel-initrd-entry"
 			continue
 		}
-		pcrlock_grub2_bls_kernel_initrd_cmdline_initrd "${boot_root}$linux" "${boot_root}$initrd" "BOOT_IMAGE=${grub2_bls_drive}$linux $cmdline" "$n"
+		pcrlock_grub2_bls_kernel_initrd_cmdline_initrd "${esp_root}$linux" "${esp_root}$initrd" "BOOT_IMAGE=${grub2_bls_drive}$linux $cmdline" "$n"
 	done < <(jq --raw-output 'sort_by(.priority, (.kernel | map(-.))) | .[] | .options, .linux, .initrd[0]' "$entryfile")
 
 	# Generate variation for
@@ -3101,7 +3104,7 @@ generate_tpm2_predictions_pcrlock()
 	# boot application was loaded from, which is effectively the
 	# disk where our ESP is located.
 	shift_component 600-gpt
-	pcrlock lock-gpt "$boot_root"
+	pcrlock lock-gpt "$esp_root"
 
 	# Measure the boot loader.  Combinations:
 	#   - Removable media with shim: BOOTX64.EFI, grub.efi
@@ -3112,11 +3115,11 @@ generate_tpm2_predictions_pcrlock()
 	local shim_path bootloader_path
 	if is_shim_installed; then
 		if [ -n "$arg_portable" ]; then
-			shim_path="${boot_root}/EFI/BOOT/BOOT${firmware_arch^^}.EFI"
-			bootloader_path="${boot_root}/EFI/BOOT/grub.efi"
+			shim_path="${esp_root}/EFI/BOOT/BOOT${firmware_arch^^}.EFI"
+			bootloader_path="${esp_root}/EFI/BOOT/grub.efi"
 		else
-			shim_path="${boot_root}${boot_dst}/shim.efi"
-			bootloader_path="${boot_root}${boot_dst}/grub.efi"
+			shim_path="${esp_root}${esp_dst}/shim.efi"
+			bootloader_path="${esp_root}${esp_dst}/grub.efi"
 		fi
 	else
 		local bootloader_filename
@@ -3126,9 +3129,9 @@ generate_tpm2_predictions_pcrlock()
 			bootloader_filename="grubbls.efi"
 		fi
 		if [ -n "$arg_portable" ]; then
-			bootloader_path="${boot_root}/EFI/BOOT/BOOT${firmware_arch^^}.EFI"
+			bootloader_path="${esp_root}/EFI/BOOT/BOOT${firmware_arch^^}.EFI"
 		else
-			bootloader_path="${boot_root}${boot_dst}/${bootloader_filename}"
+			bootloader_path="${esp_root}${esp_dst}/${bootloader_filename}"
 		fi
 	fi
 
@@ -3232,7 +3235,7 @@ generate_tpm2_predictions_pcrlock()
 	# Publish the assets in the ESP, so can be imported by
 	# dracut-pcr-signature
 	[ -e /var/lib/systemd/pcrlock.json ] && \
-		cp /var/lib/systemd/pcrlock.json "${boot_root}${boot_dst}" && {
+		cp /var/lib/systemd/pcrlock.json "${esp_root}${esp_dst}" && {
 			echo "NVIndex policy created"
 		}
 }
@@ -3399,9 +3402,9 @@ generate_tpm2_predictions_pcr_15()
 	# Publish the assets in the ESP, so can be imported by
 	# dracut-pcr-signature
 	[ ! -e /var/lib/sdbootutil/measure-pcr-prediction ] || \
-		cp /var/lib/sdbootutil/measure-pcr-prediction "${boot_root}${boot_dst}"
+		cp /var/lib/sdbootutil/measure-pcr-prediction "${esp_root}${esp_dst}"
 	[ ! -e /var/lib/sdbootutil/measure-pcr-prediction.sha256 ] || \
-		cp /var/lib/sdbootutil/measure-pcr-prediction.sha256 "${boot_root}${boot_dst}"
+		cp /var/lib/sdbootutil/measure-pcr-prediction.sha256 "${esp_root}${esp_dst}"
 }
 
 updated_crypttab()
@@ -3452,11 +3455,11 @@ generate_tpm2_predictions()
 
 	# The user can remove measure-pcr-prediction file from the
 	# ESP, but generate_tpm2_predictions_pcr_15 will not be called
-	[ -f "${boot_root}${boot_dst}/measure-prediction" ] || {
+	[ -f "${esp_root}${esp_dst}/measure-prediction" ] || {
 		[ ! -e /var/lib/sdbootutil/measure-pcr-prediction ] || \
-			cp /var/lib/sdbootutil/measure-pcr-prediction "${boot_root}${boot_dst}"
+			cp /var/lib/sdbootutil/measure-pcr-prediction "${esp_root}${esp_dst}"
 		[ ! -e /var/lib/sdbootutil/measure-pcr-prediction.sha256 ] || \
-			cp /var/lib/sdbootutil/measure-pcr-prediction.sha256 "${boot_root}${boot_dst}"
+			cp /var/lib/sdbootutil/measure-pcr-prediction.sha256 "${esp_root}${esp_dst}"
 	}
 }
 
@@ -3921,14 +3924,14 @@ unenroll_all_pcrlock()
 	pcrlock remove-policy &> /dev/null || true
 	rm -fr /var/lib/pcrlock.d/* || true
 	rm -f /var/lib/systemd/pcrlock.json
-	rm -f "${boot_root}${boot_dst}/pcrlock.json"
+	rm -f "${esp_root}${esp_dst}/pcrlock.json"
 	rm -f /var/lib/sdbootutil/crypttab.sha1
 	rm -f /var/lib/sdbootutil/measure-pcr-private.pem
 	rm -f /var/lib/sdbootutil/measure-pcr-public.pem
 	rm -f /var/lib/sdbootutil/measure-pcr-prediction
 	rm -f /var/lib/sdbootutil/measure-pcr-prediction.sha256
-	rm -f "${boot_root}${boot_dst}/measure-pcr-prediction"
-	rm -f "${boot_root}${boot_dst}/measure-pcr-prediction.sha256"
+	rm -f "${esp_root}${esp_dst}/measure-pcr-prediction"
+	rm -f "${esp_root}${esp_dst}/measure-pcr-prediction.sha256"
 }
 
 unenroll_all_pcr_oracle()
@@ -3936,12 +3939,12 @@ unenroll_all_pcr_oracle()
 	rm -f /etc/systemd/tpm2-pcr-private-key.pem
 	rm -f /etc/systemd/tpm2-pcr-public-key.pem
 	rm -f /etc/systemd/tpm2-pcr-signature.json
-	rm -f "${boot_root}${boot_dst}/tpm2-pcr-public-key.pem"
-	rm -f "${boot_root}${boot_dst}/tpm2-pcr-signature.json"
+	rm -f "${esp_root}${esp_dst}/tpm2-pcr-public-key.pem"
+	rm -f "${esp_root}${esp_dst}/tpm2-pcr-signature.json"
 	rm -f /var/lib/sdbootutil/measure-pcr-prediction
 	rm -f /var/lib/sdbootutil/measure-pcr-prediction.sha256
-	rm -f "${boot_root}${boot_dst}/measure-pcr-prediction"
-	rm -f "${boot_root}${boot_dst}/measure-pcr-prediction.sha256"
+	rm -f "${esp_root}${esp_dst}/measure-pcr-prediction"
+	rm -f "${esp_root}${esp_dst}/measure-pcr-prediction.sha256"
 }
 
 unenroll_device()
@@ -4061,7 +4064,8 @@ eval_bootctl()
 	# XXX: bootctl should have json output for that too
 	# shellcheck disable=SC2016
 	eval "$(bootctl 2> /dev/null | sed -ne 's/Firmware Arch: *\(\w\+\)/firmware_arch="\1"/p;s/ *token: *\(\w\+\)/entry_token="\1"/p')"
-	boot_root="$(bootctl --print-esp-path)"
+	esp_root="$(bootctl --print-esp-path)"
+	boot_root="$(bootctl --print-boot-path)"
 }
 
 bootloader_name()
@@ -4269,31 +4273,32 @@ elif [ -n "$in_buildroot" ]; then
 	root_snapshot="1"
 fi
 
-if [ -n "$arg_esp_path" ] && [ "$boot_root" != "$arg_esp_path" ]; then
+if [ -n "$arg_esp_path" ] && [ "$esp_root" != "$arg_esp_path" ]; then
 	err "mismatch of esp path"
 fi
 [ -n "$arg_arch" ] && firmware_arch="$arg_arch"
 
-[ -n "$boot_root" ] || err "No ESP detected. Legacy system?"
+[ -n "$esp_root" ] || err "No ESP detected. Legacy system?"
 [ -n "$root_subvol" ] || [ -z "$have_snapshots" ] || err "Can't determine root subvolume"
 [ -n "$firmware_arch" ] || err "Can't determine firmware arch"
 set_image_name
 
-mountpoint -q "$boot_root" || warn "$boot_root is not a valid mountpoint"
+mountpoint -q "$esp_root" || warn "$esp_root is not a valid mountpoint"
 
 dbg_var "root_snapshot"
+dbg_var "esp_root"
 dbg_var "boot_root"
 
 # shellcheck disable=SC1091
 [ -e /etc/sysconfig/bootloader ] && . /etc/sysconfig/bootloader
 
 if is_sdboot; then
-	boot_dst="/EFI/systemd"
+	esp_dst="/EFI/systemd"
 elif is_grub2_bls; then
 	set_os_release "${root_snapshot}"
 	# shellcheck disable=SC2154
 	read -r -a name <<<"${os_release_NAME,,}"
-	boot_dst="/EFI/${name[0]}"
+	esp_dst="/EFI/${name[0]}"
 else
 	msg="Bootloader not detected"
 	[ -z "$LOADER_TYPE" ] || msg+=". /etc/sysconfig/bootloader has LOADER_TYPE=\"$LOADER_TYPE\", but only \"systemd-boot\" or \"grub2-bls\" are recognized."
@@ -4303,22 +4308,22 @@ fi
 # Removable media layout is described in
 # https://github.com/rhboot/shim/blob/main/README.fallback
 if [ -n "$arg_portable" ]; then
-	if [ -d "${boot_root}${boot_dst}" ]; then
+	if [ -d "${esp_root}${esp_dst}" ]; then
 		err "Bootloader is already installed permanently"
 	fi
-	boot_dst="/EFI/BOOT"
+	esp_dst="/EFI/BOOT"
 fi
 
 # When we are doing an operation different from installation, the
-# boot_dst should be already present.  We can use it to identify a
+# esp_dst should be already present.  We can use it to identify a
 # removable installation
-if [ "$1" != "install" ] && [ ! -d "${boot_root}${boot_dst}" ]; then
+if [ "$1" != "install" ] && [ ! -d "${esp_root}${esp_dst}" ]; then
 	info "Removable installation detected"
-	boot_dst="/EFI/BOOT"
+	esp_dst="/EFI/BOOT"
 	arg_portable=1
 fi
 
-dbg_var "boot_dst"
+dbg_var "esp_dst"
 
 if [ "$SECURE_BOOT" = "yes" ] || is_shim_installed; then
 	arg_secure_boot=1
