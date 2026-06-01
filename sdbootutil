@@ -46,6 +46,7 @@ arg_rootfs=
 arg_rootfs_data=
 arg_esp_free_space=
 arg_force=
+arg_disable_predictions=
 have_snapshots=
 in_buildroot=
 # Possible values: vmlinuz image vmlinux linux bzImage uImage Image zImage
@@ -146,6 +147,7 @@ helpandquit()
 		  --rootfs-data		Extra data when --rootfs is used
 		  --esp-free-space	Percentage of free space in the ESP
 		  --force		Force certain operations inside a transaction
+		  --disable-predictions	Disable automatic update predictions
 		  -v, --verbose		More verbose output
 		  --start-trace-code	Create /var/log/sdbootutil.log to trace the code.
 		                        (verbose output is enabled)
@@ -4190,6 +4192,7 @@ define_options() {
 		[rootfs-data]="_rootfs_data"
 		[esp-free-space]="_esp_free_space"
 		[force]=""
+		[disable-predictions]=""
 	)
 	opts_long=""
 	for opt in "${!options_with_arg[@]}"; do
@@ -4247,6 +4250,7 @@ while true ; do
 		--rootfs-data) arg_rootfs_data="$2"; shift 2 ;;
 		--esp-free-space) arg_esp_free_space="$2"; shift 2 ;;
 		--force) arg_force=1; shift ;;
+		--disable-predictions) arg_disable_predictions=1; shift ;;
 		--) shift ; break ;;
 		*) echo "Internal error!" ; exit 1 ;;
 	esac
@@ -4458,4 +4462,4 @@ case "$1" in
 		helpandquit ;;
 esac
 
-[ -z "$update_predictions" ] || generate_tpm2_predictions
+[ -z "$update_predictions" ] || [ -n "$arg_disable_predictions" ] || generate_tpm2_predictions
