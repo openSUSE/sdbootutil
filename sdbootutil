@@ -3057,7 +3057,7 @@ get_final_pcrs()
 
 	# If no PCRs are included, we are starting from a very
 	# misaligned event log (initial installation, for example)
-	[ ! "$output" = "{}" ] || {
+	[ "$output" != "{}" ] || {
 		echo "$pcrs"
 		return 0
 	}
