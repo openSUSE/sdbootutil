@@ -39,7 +39,7 @@ create_snapshot()
 	  /usr/bin/sdbootutil cleanup --disable-predictions
 
           # Reset transient timer
-	  mkdir -p /run/sdbootutil; touch /run/sdbootutil/update-predictions
+	  mkdir -p /run/sdbootutil; chmod 700 /run/sdbootutil; touch /run/sdbootutil/update-predictions
 	  systemctl --quiet is-active sdbootutil-update-predictions.timer && \
 	    systemctl stop sdbootutil-update-predictions.timer
 	  systemd-run --on-active=30 --unit sdbootutil-update-predictions.service
@@ -60,7 +60,7 @@ delete_snapshot()
 	  /usr/bin/sdbootutil cleanup --disable-predictions \"$num\"
 
           # Reset transient timer
-	  mkdir -p /run/sdbootutil; touch /run/sdbootutil/update-predictions
+	  mkdir -p /run/sdbootutil; chmod 700 /run/sdbootutil; touch /run/sdbootutil/update-predictions
 	  systemctl --quiet is-active sdbootutil-update-predictions.timer && \
 	    systemctl stop sdbootutil-update-predictions.timer
 	  systemd-run --on-active=30 --unit sdbootutil-update-predictions.service
@@ -94,7 +94,7 @@ set_default_snapshot()
 	  /usr/bin/sdbootutil update --disable-predictions --sync \"$num\"
 
           # Reset transient timer
-	  mkdir -p /run/sdbootutil; touch /run/sdbootutil/update-predictions
+	  mkdir -p /run/sdbootutil; chmod 700 /run/sdbootutil; touch /run/sdbootutil/update-predictions
 	  systemctl --quiet is-active sdbootutil-update-predictions.timer && \
 	    systemctl stop sdbootutil-update-predictions.timer
 	  systemd-run --on-active=30 --unit sdbootutil-update-predictions.service
