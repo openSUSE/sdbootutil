@@ -4,11 +4,15 @@ ConditionSecurity=tpm2
 
 [Service]
 Type=oneshot
-RemainAfterExit=yes
 KeyringMode=shared
 PrivateTmp=yes
 ExecStartPre=/usr/bin/sh -c 'mkdir "/tmp/$INVOCATION_ID"; cp -a /var/lib/pcrlock.d /tmp/$INVOCATION_ID/pcrlock.d'
-ExecStart=/usr/bin/sdbootutil -v update-predictions
+ExecStart=/usr/bin/sh -c '\
+    while true; do \
+        rm -f /run/sdbootutil/update-predictions; \
+        /usr/bin/sdbootutil -v update-predictions || exit $?; \
+	[ -f /run/sdbootutil/update-predictions ] || break; \
+    done'
 ExecStopPost=/usr/bin/sh -c '\
     if [ "$SERVICE_RESULT" != "success" ]; then \
         echo "Command failed. Reason: $SERVICE_RESULT (Status: $EXIT_STATUS). Restoring backup..."; \
