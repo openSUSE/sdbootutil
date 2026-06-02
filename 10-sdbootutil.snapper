@@ -21,18 +21,29 @@ create_snapshot()
 	[ "$path" = "/" ] || return 0
 	[ "$fs" = btrfs ] || return 1
 
-	/usr/bin/sdbootutil update --sync "$num" || :
+	nohup bash -c "(
+	  $(declare -f is_transactional)
 
-	# If we are in a transactional system we abort here.  The
-	# kernel entries are added later via set_default_snapshot,
-	# when tukit set via snapper the new snapshot as complete
-	is_transactional && return 0
+	  /usr/bin/sdbootutil update --disable-predictions \"$num\"
 
-	# The entries are added here only for Tumbleweed
-	# (non-transactional systems)
-	/usr/bin/sdbootutil add-all-kernels "$num" || :
-	# In Tumbleweed clean the default snapshot, not the new created
-	/usr/bin/sdbootutil cleanup || :
+	  # If we are in a transactional system we abort here.  The
+	  # kernel entries are added later via set_default_snapshot,
+	  # when tukit set via snapper the new snapshot as complete
+	  is_transactional && return 0
+
+	  # The entries are added here only for Tumbleweed
+	  # (non-transactional systems)
+	  /usr/bin/sdbootutil add-all-kernels --disable-predictions \"$num\"
+	  # In Tumbleweed clean the default snapshot, not the new
+	  # created
+	  /usr/bin/sdbootutil cleanup --disable-predictions
+
+          # Reset transient timer
+	  mkdir -p /run/sdbootutil; touch /run/sdbootutil/update-predictions
+	  systemctl --quiet is-active sdbootutil-update-predictions.timer && \
+	    systemctl stop sdbootutil-update-predictions.timer
+	  systemd-run --on-active=30 --unit sdbootutil-update-predictions.service
+	)" 2>&1 | logger &
 }
 
 delete_snapshot()
@@ -44,8 +55,16 @@ delete_snapshot()
 	[ "$path" = "/" ] || return 0
 	[ "$fs" = btrfs ] || return 1
 
-	/usr/bin/sdbootutil remove-all-kernels "$num" || :
-	/usr/bin/sdbootutil cleanup "$num" || :
+	nohup bash -c "(
+	  /usr/bin/sdbootutil remove-all-kernels --disable-predictions \"$num\"
+	  /usr/bin/sdbootutil cleanup --disable-predictions \"$num\"
+
+          # Reset transient timer
+	  mkdir -p /run/sdbootutil; touch /run/sdbootutil/update-predictions
+	  systemctl --quiet is-active sdbootutil-update-predictions.timer && \
+	    systemctl stop sdbootutil-update-predictions.timer
+	  systemd-run --on-active=30 --unit sdbootutil-update-predictions.service
+	)" 2>&1 | logger &
 }
 
 set_default_snapshot()
@@ -57,19 +76,29 @@ set_default_snapshot()
 	[ "$path" = "/" ] || return 0
 	[ "$fs" = btrfs ] || return 1
 
-	if is_transactional; then
-		# In transactional systems the boot entries are added
-		# here, once the transaction is complete and tukit
-		# decides to keep it
-		/usr/bin/sdbootutil add-all-kernels "$num" || :
+	nohup bash -c "(
+	  $(declare -f is_transactional)
 
-		if [ -e /usr/lib/module-init-tools/regenerate-initrd-posttrans ]; then
-			/usr/lib/module-init-tools/regenerate-initrd-posttrans
-		fi
-	fi
+	  if is_transactional; then
+	    # In transactional systems the boot entries are added
+	    # here, once the transaction is complete and tukit
+	    # decides to keep it
+	    /usr/bin/sdbootutil add-all-kernels --disable-predictions \"$num\"
 
-	/usr/bin/sdbootutil set-default-snapshot "$num" || :
-	/usr/bin/sdbootutil update --sync "$num" || :
+	    if [ -e /usr/lib/module-init-tools/regenerate-initrd-posttrans ]; then
+	      /usr/lib/module-init-tools/regenerate-initrd-posttrans
+	    fi
+	  fi
+
+	  /usr/bin/sdbootutil set-default-snapshot --disable-predictions \"$num\"
+	  /usr/bin/sdbootutil update --disable-predictions --sync \"$num\"
+
+          # Reset transient timer
+	  mkdir -p /run/sdbootutil; touch /run/sdbootutil/update-predictions
+	  systemctl --quiet is-active sdbootutil-update-predictions.timer && \
+	    systemctl stop sdbootutil-update-predictions.timer
+	  systemd-run --on-active=30 --unit sdbootutil-update-predictions.service
+	)" 2>&1 | logger &
 }
 
 h()
@@ -77,6 +106,34 @@ h()
 	echo "Available commands:"
 	echo "${!commands[@]}"
 }
+
+# In Tumbleweed (non-transactional btrfs) the ordering of events are
+# (for last snapshot n):
+#  * create-snapshot-pre / btrfs n+1   # "pre" snapshot
+#  * create-snapshot / btrfs n+1       # "pre" snapshot
+#  * create-snapshot-post / btrfs n+1  # "pre" snapshot
+#  * modify-snapshot-pre / btrfs n+1
+#  * modify-snapshot / btrfs n+1
+#  * modify-snapshot-post / btrfs n+1
+#  * create-snapshot-pre / btrfs n+2   # "post" snapshot
+#  * create-snapshot / btrfs n+2       # "post" snapshot
+#  * create-snapshot-post / btrfs n+2  # "post" snapshot
+#
+# In MicroOS (transactional btrfs) the ordering is:
+#  * create-snapshot-pre / btrfs n+1
+#  * create-snapshot / btrfs n+1
+#  * create-snapshot-post / btrfs n+1
+#  * modify-snapshot-pre / btrfs n+1
+#  * modify-snapshot / btrfs n+1
+#  * modify-snapshot-post / btrfs n+1
+#  * set-read-only-pre / btrfs n+1
+#  * set-read-only-post / btrfs n+1
+#  * set-default-snapshot-pre / btrfs n+1   # Not is snapperd.logs
+#  * set-default-snapshot / btrfs n+1       # Not is snapperd.logs
+#  * set-default-snapshot-post / btrfs n+1  # Not is snapperd.logs
+
+# For "timeline" snapshots only the create-snapshot-* events are
+# emitted
 
 declare -A commands
 
