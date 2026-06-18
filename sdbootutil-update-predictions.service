@@ -19,7 +19,7 @@ ExecStopPost=/usr/bin/sh -c '\
         rm -rf /var/lib/pcrlock.d/*; \
         cp -a "/tmp/$INVOCATION_ID/pcrlock.d/." /var/lib/pcrlock.d/; \
     fi; \
-    rm -rf "/tmp/$INVOCATION_ID/pcrlock.d"'
+    rm -rf "/tmp/$INVOCATION_ID"'
 ImportCredential=sdbootutil-update-predictions.*
 
 [Install]
