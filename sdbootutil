@@ -1176,11 +1176,13 @@ make_free_space()
 make_free_space_for_kernel()
 {
 	local snapshot="$1"
+	local kernel="$2"
+	local initrds="$3"
 
 	# Calculate the free space and the required size.  All sizes
 	# are in Kb to avoid big numbers
 	local free_space total_size
-	total_size=$(($(pending_kernel_size "$src") + $(pending_initrds_size "$tmpdir")))
+	total_size=$(($(pending_kernel_size "$kernel") + $(pending_initrds_size "$initrds")))
 
 	make_free_space "$snapshot" "$total_size"
 }
@@ -1278,7 +1280,7 @@ install_kernel()
 		fi
 	fi
 
-	make_free_space_for_kernel "$snapshot" || err "No free space in ${boot_root} for new kernel"
+	make_free_space_for_kernel "$snapshot" "$src" "$tmpdir" || err "No free space in ${boot_root} for new kernel"
 
 	local boot_options
 	[ -z "$in_buildroot" ] || subvol="${subvol_prefix}/.snapshots/${snapshot}/snapshot"
