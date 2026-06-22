@@ -45,6 +45,7 @@ arg_pcr=
 arg_rootfs=
 arg_rootfs_data=
 arg_esp_free_space=
+arg_devicetree_source=
 arg_force=
 arg_disable_predictions=
 have_snapshots=
@@ -146,6 +147,15 @@ helpandquit()
 		                        (uuid, partuuid, label, partlabel, device)
 		  --rootfs-data		Extra data when --rootfs is used
 		  --esp-free-space	Percentage of free space in the ESP
+		  --devicetree-source	Absolute source path of a device tree blob to copy
+		                        into the boot partition and reference from generated
+		                        BLS entries. The source path is resolved in the
+		                        target rootfs/snapshot. %K expands to the full
+		                        kernel version and %V to the kernel package version
+		                        without the flavor suffix. If configured, the
+		                        resolved file must exist and be readable, and
+		                        must be usable without Secure Boot, or kernel
+		                        installation is aborted.
 		  --force		Force certain operations inside a transaction
 		  --disable-predictions	Disable automatic update predictions
 		  -v, --verbose		More verbose output
@@ -356,6 +366,7 @@ set_default_config_values()
 	ROOTFS="${arg_rootfs:-$ROOTFS}"
 
 	ESP_FREE_SPACE="${arg_esp_free_space:-10}"
+	DEVICETREE_SOURCE="${arg_devicetree_source:-}"
 }
 
 create_default_config_file()
@@ -376,6 +387,15 @@ create_default_config_file()
 	# Percentage (%) of free space in the ESP that sdbootutil should guarantee
 	# Default values is 10%
 	ESP_FREE_SPACE="$ESP_FREE_SPACE"
+
+	# Optional absolute path to a device tree blob. If set, it is copied to the
+	# boot partition and a devicetree field is added to generated BLS entries.
+	# The source path is resolved in the target rootfs/snapshot. %K expands to
+	# the full kernel version, %V to the kernel package version without the
+	# flavor suffix. If set, the resolved file must exist and be readable,
+	# otherwise kernel installation aborts. Currently supported only with
+	# Secure Boot disabled.
+	DEVICETREE_SOURCE="$DEVICETREE_SOURCE"
 	EOF
 }
 
@@ -410,6 +430,7 @@ load_config_file()
 	FDE_SEAL_PCR_LIST="${arg_pcr:-$FDE_SEAL_PCR_LIST}"
 	ROOTFS="${arg_rootfs:-$ROOTFS}"
 	ESP_FREE_SPACE="${arg_esp_free_space:-$ESP_FREE_SPACE}"
+	DEVICETREE_SOURCE="${arg_devicetree_source:-$DEVICETREE_SOURCE}"
 }
 
 is_secure_boot()
@@ -1028,6 +1049,16 @@ pending_initrds_size()
 	echo $((size / 1024 + 1))
 }
 
+pending_devicetree_size()
+{
+	local devicetree="$1"
+	[ -n "$devicetree" ] || {
+		echo 0
+		return 0
+	}
+	echo $(($(stat -L -c %s "$devicetree") / 1024 + 1))
+}
+
 boot_space()
 {
 	echo $(($(findmnt --noheadings --bytes -o SIZE --target "${boot_root}" | head -n 1) / 1024))
@@ -1178,13 +1209,33 @@ make_free_space_for_kernel()
 	local snapshot="$1"
 	local kernel="$2"
 	local initrds="$3"
+	local devicetree="${4:-}"
 
 	# Calculate the free space and the required size.  All sizes
 	# are in Kb to avoid big numbers
 	local free_space total_size
-	total_size=$(($(pending_kernel_size "$kernel") + $(pending_initrds_size "$initrds")))
+	total_size=$(($(pending_kernel_size "$kernel") + $(pending_initrds_size "$initrds") + $(pending_devicetree_size "$devicetree")))
 
 	make_free_space "$snapshot" "$total_size"
+}
+
+resolve_devicetree_source()
+{
+	local subvol="$1"
+	local kernel_version="$2"
+	local kernel_package_version="${kernel_version%-*}"
+	local devicetree_source="${DEVICETREE_SOURCE:-}"
+
+	[ -n "$devicetree_source" ] || return 0
+	devicetree_source="${devicetree_source//%K/$kernel_version}"
+	devicetree_source="${devicetree_source//%V/$kernel_package_version}"
+	[[ "$devicetree_source" = /* ]] || err "DEVICETREE_SOURCE must be an absolute path"
+
+	local snapshot_prefix="${subvol#"${subvol_prefix}"}"
+	devicetree_source="$snapshot_prefix$devicetree_source"
+	[ -f "$devicetree_source" ] || err "Can't find device tree blob $devicetree_source"
+	[ -r "$devicetree_source" ] || err "Device tree blob is not readable: $devicetree_source"
+	echo "$devicetree_source"
 }
 
 create_boot_options() {
@@ -1246,8 +1297,20 @@ install_kernel()
 	calc_chksum "$src"
 	settle_entry_token "${snapshot}"
 	local dst="/$entry_token/$kernel_version/linux-$chksum"
+	local devicetree_src=
+	local devicetree_dst=
 
 	local initrd="${src%/*}/initrd"
+
+	# Resolve the device tree before creating any ESP directory, so a
+	# missing (but configured) blob aborts without leaving an empty
+	# "$entry_token/$kernel_version" directory behind
+	devicetree_src="$(resolve_devicetree_source "$subvol" "$kernel_version")" || err "Failed to resolve DEVICETREE_SOURCE"
+	if [ -n "$devicetree_src" ]; then
+		! is_secure_boot || err "External devicetree files are not supported when Secure Boot is enabled"
+		calc_chksum "$devicetree_src"
+		devicetree_dst="${dst%/*}/devicetree-$chksum.dtb"
+	fi
 
 	mkdir -p "${boot_root}${dst%/*}"
 
@@ -1280,7 +1343,7 @@ install_kernel()
 		fi
 	fi
 
-	make_free_space_for_kernel "$snapshot" "$src" "$tmpdir" || err "No free space in ${boot_root} for new kernel"
+	make_free_space_for_kernel "$snapshot" "$src" "$tmpdir" "$devicetree_src" || err "No free space in ${boot_root} for new kernel"
 
 	local boot_options
 	[ -z "$in_buildroot" ] || subvol="${subvol_prefix}/.snapshots/${snapshot}/snapshot"
@@ -1312,7 +1375,7 @@ install_kernel()
 	title      $title
 	version    ${snapshot:+$snapshot@}$kernel_version${entry_machine_id:+${nl}machine-id $entry_machine_id}${sort_key:+${nl}sort-key   $sort_key}
 	options    $boot_options
-	linux      $dst
+	linux      $dst${devicetree_dst:+${nl}devicetree ${devicetree_dst}}
 	EOF
 	for i in "${dstinitrd[@]}"; do
 		echo "initrd     $i" >> "$tmpdir/entry.conf"
@@ -1325,6 +1388,13 @@ install_kernel()
 		install_with_rollback "$src" "${boot_root}$dst" || failed=kernel
 	else
 		info "Reusing ${boot_root}$dst"
+	fi
+	if [ -z "$failed" ] && [ -n "$devicetree_src" ]; then
+		if [ ! -e "${boot_root}${devicetree_dst}" ]; then
+			install_with_rollback "$devicetree_src" "${boot_root}${devicetree_dst}" || failed=devicetree
+		else
+			info "Reusing ${boot_root}${devicetree_dst}"
+		fi
 	fi
 	if [ -z "$failed" ] && [ -e "$tmpdir/initrd-0" ]; then
 		i=0
@@ -1490,7 +1560,7 @@ list_entries()
 			local k
 			local v
 			while read -r k v; do
-				if [ "$k" = 'linux' ] || [ "$k" = 'initrd' ]; then
+				if [ "$k" = 'linux' ] || [ "$k" = 'initrd' ] || [ "$k" = 'devicetree' ]; then
 					if [ ! -e "$root$v" ]; then
 						errors+=("$root/$v does not exist")
 					fi
@@ -1530,7 +1600,7 @@ show_entry_fields()
 	local v
 	while read -r k v; do
 		case "$k" in
-			title|version|sort-key|options|linux|initrd) ;;
+			title|version|sort-key|options|linux|initrd|devicetree) ;;
 			*) continue ;;
 		esac
 
@@ -2642,10 +2712,12 @@ pcrlock_grub2_bls_kernel_initrd_cmdline_initrd()
 {
 	local linux="$1"
 	local initrd="$2"
-	local cmdline="$3"
-	local suffix="$4"
+	local devicetree="$3"
+	local cmdline="$4"
+	local suffix="$5"
 
 	local elements=("$linux" "$initrd")
+	[ -z "$devicetree" ] || elements+=("$devicetree")
 	local locks=()
 	local n=0
 	for element in "${elements[@]}"; do
@@ -2700,8 +2772,10 @@ pcrlock_grub2_bls_cmdline()
 	local linux="$1"
 	local cmdline="$2"
 	local initrd="$3"
-	local suffix="$4"
+	local devicetree="$4"
+	local suffix="$5"
 	local lines=("$linux" "$cmdline" "$initrd")
+	[ -z "$devicetree" ] || lines+=("$devicetree")
 
 	local locks=()
 	local n=0
@@ -2865,6 +2939,7 @@ pcrlock_grub2_bls()
 	while read -r options; do
 		read -r linux
 		read -r initrd
+		read -r devicetree
 		[ -f "${esp_root}$linux" ] || {
 			info "Missing ${esp_root}$linux, ignoring entry for prediction"
 			continue
@@ -2873,6 +2948,10 @@ pcrlock_grub2_bls()
 			info "Missing ${esp_root}$initrd, ignoring entry for prediction"
 			continue
 		}
+		if [ -n "$devicetree" ] && [ ! -f "${esp_root}$devicetree" ]; then
+			info "Missing ${esp_root}$devicetree, ignoring entry for prediction"
+			continue
+		fi
 		n=$((n+1))
 		[ "$n" -le 8 ] || {
 			info "More than 8 variations for 650-grub2-bls-entry-cmdline"
@@ -2880,8 +2959,10 @@ pcrlock_grub2_bls()
 		}
 		pcrlock_grub2_bls_cmdline "linux ${grub2_bls_drive}$linux $options" \
 					  "${grub2_bls_drive}$linux $options" \
-					  "initrd ${grub2_bls_drive}$initrd" "$n"
-	done < <(jq --raw-output 'sort_by(.priority, (.kernel | map(-.))) | .[] | .options, .linux, .initrd[0]' "$entryfile")
+					  "initrd ${grub2_bls_drive}$initrd" \
+					  "${devicetree:+devicetree ${grub2_bls_drive}$devicetree}" \
+					  "$n"
+	done < <(jq --raw-output 'sort_by(.priority, (.kernel | map(-.))) | .[] | .options, .linux, .initrd[0], (.devicetree // "")' "$entryfile")
 
 	# Generate variation for 650-grub2-bls-entry-cmdline component
 	# that contains the current cmdline and the current initrd,
@@ -2894,11 +2975,14 @@ pcrlock_grub2_bls()
 		while read -r options; do
 			read -r linux
 			read -r initrd
+			read -r devicetree
 			n=$((n+1))
 			pcrlock_grub2_bls_cmdline "linux ${grub2_bls_drive}$linux $options" \
 						  "${grub2_bls_drive}$linux $options" \
-						  "initrd ${grub2_bls_drive}$initrd" "0-$n"
-		done < <(jq --raw-output '.[] | .options, .linux, .initrd[0]' "$initialentryfile")
+						  "initrd ${grub2_bls_drive}$initrd" \
+						  "${devicetree:+devicetree ${grub2_bls_drive}$devicetree}" \
+						  "0-$n"
+		done < <(jq --raw-output '.[] | .options, .linux, .initrd[0], (.devicetree // "")' "$initialentryfile")
 	fi
 
 	# If shim is installed, grub2-bls invokes shim to extend PCR4
@@ -2978,6 +3062,7 @@ pcrlock_grub2_bls()
 	while read -r cmdline; do
 		read -r linux
 		read -r initrd
+		read -r devicetree
 		[ -f "${esp_root}$linux" ] || {
 			info "Missing ${esp_root}$linux, ignoring entry for prediction"
 			continue
@@ -2986,13 +3071,21 @@ pcrlock_grub2_bls()
 			info "Missing ${esp_root}$initrd, ignoring entry for prediction"
 			continue
 		}
+		if [ -n "$devicetree" ] && [ ! -f "${esp_root}$devicetree" ]; then
+			info "Missing ${esp_root}$devicetree, ignoring entry for prediction"
+			continue
+		fi
 		n=$((n+1))
 		[ "$n" -le 4 ] || {
 			info "More than 4 variations for 710-grub2-bls-kernel-initrd-entry"
 			continue
 		}
-		pcrlock_grub2_bls_kernel_initrd_cmdline_initrd "${esp_root}$linux" "${esp_root}$initrd" "BOOT_IMAGE=${grub2_bls_drive}$linux $cmdline" "$n"
-	done < <(jq --raw-output 'sort_by(.priority, (.kernel | map(-.))) | .[] | .options, .linux, .initrd[0]' "$entryfile")
+		pcrlock_grub2_bls_kernel_initrd_cmdline_initrd \
+			"${esp_root}$linux" "${esp_root}$initrd" \
+			"${devicetree:+${esp_root}$devicetree}" \
+			"BOOT_IMAGE=${grub2_bls_drive}$linux $cmdline" \
+			"$n"
+	done < <(jq --raw-output 'sort_by(.priority, (.kernel | map(-.))) | .[] | .options, .linux, .initrd[0], (.devicetree // "")' "$entryfile")
 
 	# Generate variation for
 	# 710-grub2-bls-kernel-initrd-kernel-cmdline-initrd-entry for
@@ -3002,9 +3095,14 @@ pcrlock_grub2_bls()
 		while read -r cmdline; do
 			read -r linux
 			read -r initrd
+			read -r devicetree
 			n=$((n+1))
-			pcrlock_grub2_bls_kernel_initrd_cmdline_initrd "${tmpdir}$linux" "${tmpdir}$initrd" "BOOT_IMAGE=${grub2_bls_drive}$linux $cmdline" "0-$n"
-		done < <(jq --raw-output '.[] | .options, .linux, .initrd[0]' "$initialentryfile")
+			pcrlock_grub2_bls_kernel_initrd_cmdline_initrd \
+				"${tmpdir}$linux" "${tmpdir}$initrd" \
+				"${devicetree:+${tmpdir}$devicetree}" \
+				"BOOT_IMAGE=${grub2_bls_drive}$linux $cmdline" \
+				"0-$n"
+		done < <(jq --raw-output '.[] | .options, .linux, .initrd[0], (.devicetree // "")' "$initialentryfile")
 	fi
 }
 
@@ -3456,6 +3554,10 @@ generate_tpm2_predictions()
 	[ -z "$TRANSACTIONAL_UPDATE" ] || [ -n "$arg_force" ] || {
 		warn "Inside transactional-update. Updating predictions must be done outside the transaction"
 		return 0
+	}
+
+	[ -z "${DEVICETREE_SOURCE:-}" ] || ! is_sdboot || {
+		warn "TPM2 predictions with systemd-boot devicetree entries are not validated. Use --disable-predictions if this affects boot."
 	}
 
 	! is_pcr_oracle || {
@@ -4193,6 +4295,7 @@ define_options() {
 		[rootfs]="_rootfs"
 		[rootfs-data]="_rootfs_data"
 		[esp-free-space]="_esp_free_space"
+		[devicetree-source]="_file"
 		[force]=""
 		[disable-predictions]=""
 	)
@@ -4251,6 +4354,7 @@ while true ; do
 		--rootfs) arg_rootfs="$2"; shift 2 ;;
 		--rootfs-data) arg_rootfs_data="$2"; shift 2 ;;
 		--esp-free-space) arg_esp_free_space="$2"; shift 2 ;;
+		--devicetree-source) arg_devicetree_source="$2"; shift 2 ;;
 		--force) arg_force=1; shift ;;
 		--disable-predictions) arg_disable_predictions=1; shift ;;
 		--) shift ; break ;;

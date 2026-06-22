@@ -113,6 +113,9 @@ _sdbootutil_completion()
 	elif [ "$opt_arg_fun" == "_path" ]; then
 		# shellcheck disable=SC2207
 		COMPREPLY=($(compgen -d -- "$cur"))
+	elif [ "$opt_arg_fun" == "_file" ]; then
+		# shellcheck disable=SC2207
+		COMPREPLY=($(compgen -f -- "$cur"))
 	elif [ "$opt_arg_fun" ]; then
 		eval "$opt_arg_fun"
 		# shellcheck disable=SC2207
