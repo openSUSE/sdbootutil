@@ -1229,7 +1229,7 @@ resolve_devicetree_source()
 	[ -n "$devicetree_source" ] || return 0
 	devicetree_source="${devicetree_source//%K/$kernel_version}"
 	devicetree_source="${devicetree_source//%V/$kernel_package_version}"
-	[[ "$devicetree_source" = /* ]] || err "DEVICETREE_SOURCE must be an absolute path"
+	[[ "$devicetree_source" == '/'* ]] || err "DEVICETREE_SOURCE must be an absolute path"
 
 	local snapshot_prefix="${subvol#"${subvol_prefix}"}"
 	devicetree_source="$snapshot_prefix$devicetree_source"
@@ -1300,6 +1300,13 @@ install_kernel()
 	local devicetree_src=
 	local devicetree_dst=
 
+	# Because nullglob, the second condition can be false
+	# shellcheck disable=SC2144 disable=SC2157
+	[ -z "${boot_root}${dst}" ] || [ -z "${boot_root}/$entry_token/$kernel_version/initrd-"* ] || [ -n "$arg_force" ] || {
+		info "Kernel $kernel_version already in the ESP"
+		return 0
+	}
+
 	local initrd="${src%/*}/initrd"
 
 	# Resolve the device tree before creating any ESP directory, so a
@@ -1311,8 +1318,6 @@ install_kernel()
 		calc_chksum "$devicetree_src"
 		devicetree_dst="${dst%/*}/devicetree-$chksum.dtb"
 	fi
-
-	mkdir -p "${boot_root}${dst%/*}"
 
 	if [ -e "$initrd" ]; then
 		ln -s "$initrd" "$tmpdir/initrd-0"
@@ -1382,6 +1387,8 @@ install_kernel()
 	done
 	dbg "Generated new boot entry"
 	dbg_cat "$tmpdir/entry.conf"
+
+	mkdir -p "${boot_root}${dst%/*}"
 
 	local failed=
 	if [ ! -e "${boot_root}$dst" ]; then
