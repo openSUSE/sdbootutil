@@ -1302,7 +1302,7 @@ install_kernel()
 
 	# Because nullglob, the second condition can be false
 	# shellcheck disable=SC2144 disable=SC2157
-	[ -z "${boot_root}${dst}" ] || [ -z "${boot_root}/$entry_token/$kernel_version/initrd-"* ] || [ -n "$arg_force" ] || {
+	[ -z "${boot_root}${dst}" ] || [ -z "${boot_root}/$entry_token/$kernel_version/initrd-"* ] || [ -n "$arg_force" ] || [ -n "$arg_no_reuse_initrd" ] || {
 		info "Kernel $kernel_version already in the ESP"
 		return 0
 	}
