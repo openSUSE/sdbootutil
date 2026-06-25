@@ -9,6 +9,18 @@ is_transactional()
 	findmnt --fstab / -O ro >/dev/null
 }
 
+set_update_predictions_timer()
+{
+	local to="${1:-2}"
+	# Reset transient timer to `to` seconds (find a better
+	# estimator than a random number)
+	mkdir -p /run/sdbootutil; chmod 700 /run/sdbootutil; touch /run/sdbootutil/update-predictions
+	systemctl --quiet is-active sdbootutil-update-predictions.timer && \
+		systemctl stop sdbootutil-update-predictions.timer
+	echo "Resetting sdbootutil-update-predictions timer to $to seconds"
+	systemd-run --on-active="$to" --unit sdbootutil-update-predictions.service
+}
+
 # When creating a snapshot we fetch all bls configs from previous
 # snapshot dir, mangle them to contain current snapshot number, then
 # install to efi partition.
@@ -23,6 +35,7 @@ create_snapshot()
 
 	nohup bash -c "(
 	  $(declare -f is_transactional)
+	  $(declare -f set_update_predictions_timer)
 
 	  /usr/bin/sdbootutil update --disable-predictions \"$num\"
 
@@ -38,11 +51,7 @@ create_snapshot()
 	  # created
 	  /usr/bin/sdbootutil cleanup --disable-predictions
 
-          # Reset transient timer
-	  mkdir -p /run/sdbootutil; chmod 700 /run/sdbootutil; touch /run/sdbootutil/update-predictions
-	  systemctl --quiet is-active sdbootutil-update-predictions.timer && \
-	    systemctl stop sdbootutil-update-predictions.timer
-	  systemd-run --on-active=30 --unit sdbootutil-update-predictions.service
+	  set_update_predictions_timer 30
 	)" 2>&1 | logger &
 }
 
@@ -56,14 +65,12 @@ delete_snapshot()
 	[ "$fs" = btrfs ] || return 1
 
 	nohup bash -c "(
+	  $(declare -f set_update_predictions_timer)
+
 	  /usr/bin/sdbootutil remove-all-kernels --disable-predictions \"$num\"
 	  /usr/bin/sdbootutil cleanup --disable-predictions \"$num\"
 
-          # Reset transient timer
-	  mkdir -p /run/sdbootutil; chmod 700 /run/sdbootutil; touch /run/sdbootutil/update-predictions
-	  systemctl --quiet is-active sdbootutil-update-predictions.timer && \
-	    systemctl stop sdbootutil-update-predictions.timer
-	  systemd-run --on-active=30 --unit sdbootutil-update-predictions.service
+	  set_update_predictions_timer
 	)" 2>&1 | logger &
 }
 
@@ -78,6 +85,7 @@ set_default_snapshot()
 
 	nohup bash -c "(
 	  $(declare -f is_transactional)
+	  $(declare -f set_update_predictions_timer)
 
 	  if is_transactional; then
 	    # In transactional systems the boot entries are added
@@ -93,11 +101,7 @@ set_default_snapshot()
 	  /usr/bin/sdbootutil set-default-snapshot --disable-predictions \"$num\"
 	  /usr/bin/sdbootutil update --disable-predictions --sync \"$num\"
 
-          # Reset transient timer
-	  mkdir -p /run/sdbootutil; chmod 700 /run/sdbootutil; touch /run/sdbootutil/update-predictions
-	  systemctl --quiet is-active sdbootutil-update-predictions.timer && \
-	    systemctl stop sdbootutil-update-predictions.timer
-	  systemd-run --on-active=30 --unit sdbootutil-update-predictions.service
+	  set_update_predictions_timer
 	)" 2>&1 | logger &
 }
 
