@@ -4530,7 +4530,7 @@ elif [ -n "$in_buildroot" ]; then
 fi
 
 if [ -n "$arg_esp_path" ] && [ "$esp_root" != "$arg_esp_path" ]; then
-	err "mismatch of esp path"
+	err "Mismatch of ESP path"
 fi
 [ -n "$arg_arch" ] && firmware_arch="$arg_arch"
 
