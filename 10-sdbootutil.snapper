@@ -9,6 +9,43 @@ is_transactional()
 	findmnt --fstab / -O ro >/dev/null
 }
 
+# Decoupling the calls for update-predictions from the plugin is
+# tricky.  Those are the basic requirements:
+#
+# * The plugin launch a detached process with `nohup` that will
+#   trigger the update
+#
+# * The call to update-predictions is done by a transient timer
+#
+# * Because in Tumbleweed the create-snapshot event is received two
+#   times (pre / post snapshots), to avoid triggering two times the
+#   update-predictions, we set a large timeout for the
+#   `create_snapshot` event
+#
+# * The marker file `/run/sdbootutil/update-predictions` is used to
+#   mark when there is a pending update-predictions
+#
+# * If the timer is up, this means that the service has not been
+#   executed, we reset the timer shutting it down and re-creating it
+#
+# * Inside the service we remove the marker file, update the
+#   predictions, and if the file is there again we update the
+#   predictions again.  This guarantee that the predictions are also
+#   updated for the latest point that is still required (even if this
+#   means that it is executed multiple times)
+#
+# * In case that a reboot or shutdown is commanded when the service is
+#   running, it will not accept the SIGTERM signal, and will require 2
+#   minutes before forcing it down
+#
+# * Finally, if the reboot or shutdown command is launched before the
+#   timer triggers, a transient service will be executed to run the
+#   update-predictions.  This is done in the ExecStop, because systemd
+#   will stop this service before the reboot
+#
+# * The same marker file is used to detect that there is a pending
+#   update-predictions
+
 set_update_predictions_timer()
 {
 	local to="${1:-2}"
@@ -19,6 +56,22 @@ set_update_predictions_timer()
 		systemctl stop sdbootutil-update-predictions.timer
 	echo "Resetting sdbootutil-update-predictions timer to $to seconds"
 	systemd-run --on-active="$to" --unit sdbootutil-update-predictions.service
+
+	# Set the transient service that will guarantee updating the
+	# prediction before the shutdown
+	if ! systemctl --quiet is-active sdbootutil-update-predictions-shutdown.service; then
+		systemd-run --unit=sdbootutil-update-predictions-shutdown.service \
+			    --property=Description="Update TPM predictions before shutdown" \
+			    --property=ConditionSecurity=tpm2 \
+			    --property=RemainAfterExit=yes \
+			    --property=DefaultDependencies=no \
+			    --property=Conflicts=umount.target \
+			    --property=Before=umount.target \
+			    --property=RequiresMountsFor="/ /var /run /tmp /boot/efi" \
+			    --property=TimeoutStopSec=120 \
+			    --property=ExecStop='/bin/bash -c "[ $(systemctl is-system-running) = stopping ] && [ -f /run/sdbootutil/update-predictions ] && /usr/bin/sdbootutil -v update-predictions || true"' \
+			    /bin/true
+	fi
 }
 
 # When creating a snapshot we fetch all bls configs from previous
@@ -113,28 +166,28 @@ h()
 
 # In Tumbleweed (non-transactional btrfs) the ordering of events are
 # (for last snapshot n):
-#  * create-snapshot-pre / btrfs n+1   # "pre" snapshot
-#  * create-snapshot / btrfs n+1       # "pre" snapshot
-#  * create-snapshot-post / btrfs n+1  # "pre" snapshot
-#  * modify-snapshot-pre / btrfs n+1
-#  * modify-snapshot / btrfs n+1
-#  * modify-snapshot-post / btrfs n+1
-#  * create-snapshot-pre / btrfs n+2   # "post" snapshot
-#  * create-snapshot / btrfs n+2       # "post" snapshot
-#  * create-snapshot-post / btrfs n+2  # "post" snapshot
+# * create-snapshot-pre / btrfs n+1   # "pre" snapshot
+# * create-snapshot / btrfs n+1       # "pre" snapshot
+# * create-snapshot-post / btrfs n+1  # "pre" snapshot
+# * modify-snapshot-pre / btrfs n+1
+# * modify-snapshot / btrfs n+1
+# * modify-snapshot-post / btrfs n+1
+# * create-snapshot-pre / btrfs n+2   # "post" snapshot
+# * create-snapshot / btrfs n+2       # "post" snapshot
+# * create-snapshot-post / btrfs n+2  # "post" snapshot
 #
 # In MicroOS (transactional btrfs) the ordering is:
-#  * create-snapshot-pre / btrfs n+1
-#  * create-snapshot / btrfs n+1
-#  * create-snapshot-post / btrfs n+1
-#  * modify-snapshot-pre / btrfs n+1
-#  * modify-snapshot / btrfs n+1
-#  * modify-snapshot-post / btrfs n+1
-#  * set-read-only-pre / btrfs n+1
-#  * set-read-only-post / btrfs n+1
-#  * set-default-snapshot-pre / btrfs n+1   # Not is snapperd.logs
-#  * set-default-snapshot / btrfs n+1       # Not is snapperd.logs
-#  * set-default-snapshot-post / btrfs n+1  # Not is snapperd.logs
+# * create-snapshot-pre / btrfs n+1
+# * create-snapshot / btrfs n+1
+# * create-snapshot-post / btrfs n+1
+# * modify-snapshot-pre / btrfs n+1
+# * modify-snapshot / btrfs n+1
+# * modify-snapshot-post / btrfs n+1
+# * set-read-only-pre / btrfs n+1
+# * set-read-only-post / btrfs n+1
+# * set-default-snapshot-pre / btrfs n+1   # Not is snapperd.logs
+# * set-default-snapshot / btrfs n+1       # Not is snapperd.logs
+# * set-default-snapshot-post / btrfs n+1  # Not is snapperd.logs
 
 # For "timeline" snapshots only the create-snapshot-* events are
 # emitted

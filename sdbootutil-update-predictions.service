@@ -21,6 +21,11 @@ ExecStopPost=/usr/bin/sh -c '\
     fi; \
     rm -rf "/tmp/$INVOCATION_ID"'
 ImportCredential=sdbootutil-update-predictions.*
+# The service can be triggered by a timer (snapper plugin), this
+# prevents systemd from killing the script mid-run during a reboot,
+# and gives 2 minutes to complete
+KillSignal=SIGCONT
+TimeoutStopSec=120
 
 [Install]
 WantedBy=default.target
