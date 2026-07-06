@@ -14,7 +14,7 @@ ExecStart=/usr/bin/sh -c '\
 	[ -f /run/sdbootutil/update-predictions ] || break; \
     done'
 ExecStopPost=/usr/bin/sh -c '\
-    systemctl stop sdbootutil-update-predictions-shutdown.service; \
+    systemctl --quiet is-active sdbootutil-update-predictions-shutdown.service && systemctl stop sdbootutil-update-predictions-shutdown.service; \
     if [ "$SERVICE_RESULT" != "success" ]; then \
         echo "Command failed. Reason: $SERVICE_RESULT (Status: $EXIT_STATUS). Restoring backup..."; \
         rm -rf /var/lib/pcrlock.d/*; \
