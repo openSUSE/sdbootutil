@@ -1305,10 +1305,9 @@ install_kernel()
 	local devicetree_src=
 	local devicetree_dst=
 
-	# Because nullglob, the second condition can be false
-	# shellcheck disable=SC2144 disable=SC2157
+	local initrds=("${boot_root}/$entry_token/$kernel_version/initrd-"*)
 	[ -z "${boot_root}${dst}" ] \
-		|| [ -z "${boot_root}/$entry_token/$kernel_version/initrd-"* ] \
+		|| [ "${#initrds[@]}" -eq 0 ] \
 		|| ! find_conf_file "$kernel_version" "$snapshot" > /dev/null \
 		|| [ -n "$arg_no_reuse_initrd" ] \
 		|| [ -n "$arg_force" ] \
