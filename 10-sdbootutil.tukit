@@ -12,6 +12,15 @@ callExt_post()
     fi
 }
 
+abort_post()
+{
+    systemctl --quiet is-active sdbootutil-update-predictions.timer \
+	    && systemctl stop sdbootutil-update-predictions.timer
+
+    systemctl --quiet is-active sdbootutil-update-predictions-shutdown.service \
+	    && systemctl stop sdbootutil-update-predictions-shutdown.service
+}
+
 h()
 {
     echo "Available commands:"
@@ -21,6 +30,7 @@ h()
 declare -A commands
 
 commands['callExt-post']=callExt_post
+commands['abort-post']=abort_post
 commands['help']=h
 
 cmd="$1"
