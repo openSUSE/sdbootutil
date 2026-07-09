@@ -8,13 +8,13 @@ KeyringMode=shared
 PrivateTmp=yes
 ExecStartPre=/usr/bin/sh -c 'mkdir "/tmp/$INVOCATION_ID"; cp -a /var/lib/pcrlock.d /tmp/$INVOCATION_ID/pcrlock.d'
 ExecStart=/usr/bin/sh -c '\
+    systemctl --quiet is-active sdbootutil-update-predictions-shutdown.service && systemctl stop sdbootutil-update-predictions-shutdown.service; \
     while true; do \
         rm -f /run/sdbootutil/update-predictions; \
         /usr/bin/sdbootutil -v update-predictions || exit $?; \
 	[ -f /run/sdbootutil/update-predictions ] || break; \
     done'
 ExecStopPost=/usr/bin/sh -c '\
-    systemctl --quiet is-active sdbootutil-update-predictions-shutdown.service && systemctl stop sdbootutil-update-predictions-shutdown.service; \
     if [ "$SERVICE_RESULT" != "success" ]; then \
         echo "Command failed. Reason: $SERVICE_RESULT (Status: $EXIT_STATUS). Restoring backup..."; \
         rm -rf /var/lib/pcrlock.d/*; \

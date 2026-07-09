@@ -9,11 +9,21 @@ is_transactional()
 	findmnt --fstab / -O ro >/dev/null
 }
 
-# Decoupling the calls for update-predictions from the plugin is
-# tricky.  Those are the basic requirements:
+# Updating predictions is getting slower.  The predict operation is
+# not fast as it is done two times: one to filtering the PCRs and the
+# other for creating the policy.
 #
-# * The plugin launch a detached process with `nohup` that will
-#   trigger the update
+# Before this operation gets optimized, we will place a timer that
+# will trigger the `sdbootutil-update-predictions.service` outside the
+# snapper plugin.  This is not ideal for MicroOS, but the operations
+# done are outside the transaction (change /var and /boot).
+#
+# To guarantee that the predictions are done before the reboot, a
+# second service is created,
+# `sdbootutil-update-predictions-shutdown.service`, that will update
+# the predictions via the `ExecStop` before the reboot / shutdown.
+#
+# More details:
 #
 # * The call to update-predictions is done by a transient timer
 #
@@ -86,26 +96,21 @@ create_snapshot()
 	[ "$path" = "/" ] || return 0
 	[ "$fs" = btrfs ] || return 1
 
-	nohup bash -c "(
-	  $(declare -f is_transactional)
-	  $(declare -f set_update_predictions_timer)
+	/usr/bin/sdbootutil update --disable-predictions "$num"
 
-	  /usr/bin/sdbootutil update --disable-predictions \"$num\"
+	# If we are in a transactional system we abort here.  The
+	# kernel entries are added later via set_default_snapshot,
+	# when tukit set via snapper the new snapshot as complete
+	is_transactional && return 0
 
-	  # If we are in a transactional system we abort here.  The
-	  # kernel entries are added later via set_default_snapshot,
-	  # when tukit set via snapper the new snapshot as complete
-	  is_transactional && return 0
+	# The entries are added here only for Tumbleweed
+	# (non-transactional systems)
+	/usr/bin/sdbootutil add-all-kernels --disable-predictions "$num"
+	# In Tumbleweed clean the default snapshot, not the new
+	# created
+	/usr/bin/sdbootutil cleanup --disable-predictions
 
-	  # The entries are added here only for Tumbleweed
-	  # (non-transactional systems)
-	  /usr/bin/sdbootutil add-all-kernels --disable-predictions \"$num\"
-	  # In Tumbleweed clean the default snapshot, not the new
-	  # created
-	  /usr/bin/sdbootutil cleanup --disable-predictions
-
-	  set_update_predictions_timer 30
-	)" 2>&1 | logger &
+	set_update_predictions_timer 30
 }
 
 delete_snapshot()
@@ -117,14 +122,10 @@ delete_snapshot()
 	[ "$path" = "/" ] || return 0
 	[ "$fs" = btrfs ] || return 1
 
-	nohup bash -c "(
-	  $(declare -f set_update_predictions_timer)
+	/usr/bin/sdbootutil remove-all-kernels --disable-predictions "$num"
+	/usr/bin/sdbootutil cleanup --disable-predictions "$num"
 
-	  /usr/bin/sdbootutil remove-all-kernels --disable-predictions \"$num\"
-	  /usr/bin/sdbootutil cleanup --disable-predictions \"$num\"
-
-	  set_update_predictions_timer
-	)" 2>&1 | logger &
+	set_update_predictions_timer
 }
 
 set_default_snapshot()
@@ -136,26 +137,21 @@ set_default_snapshot()
 	[ "$path" = "/" ] || return 0
 	[ "$fs" = btrfs ] || return 1
 
-	nohup bash -c "(
-	  $(declare -f is_transactional)
-	  $(declare -f set_update_predictions_timer)
+	if is_transactional; then
+		# In transactional systems the boot entries are added
+		# here, once the transaction is complete and tukit
+		# decides to keep it
+		/usr/bin/sdbootutil add-all-kernels --disable-predictions "$num"
 
-	  if is_transactional; then
-	    # In transactional systems the boot entries are added
-	    # here, once the transaction is complete and tukit
-	    # decides to keep it
-	    /usr/bin/sdbootutil add-all-kernels --disable-predictions \"$num\"
+		if [ -e /usr/lib/module-init-tools/regenerate-initrd-posttrans ]; then
+			/usr/lib/module-init-tools/regenerate-initrd-posttrans
+		fi
+	fi
 
-	    if [ -e /usr/lib/module-init-tools/regenerate-initrd-posttrans ]; then
-	      /usr/lib/module-init-tools/regenerate-initrd-posttrans
-	    fi
-	  fi
+	/usr/bin/sdbootutil set-default-snapshot --disable-predictions "$num"
+	/usr/bin/sdbootutil update --disable-predictions --sync "$num"
 
-	  /usr/bin/sdbootutil set-default-snapshot --disable-predictions \"$num\"
-	  /usr/bin/sdbootutil update --disable-predictions --sync \"$num\"
-
-	  set_update_predictions_timer
-	)" 2>&1 | logger &
+	set_update_predictions_timer
 }
 
 h()
