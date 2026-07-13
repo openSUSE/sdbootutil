@@ -199,5 +199,5 @@ cmd="$1"
 shift
 [ -n "$cmd" ] || cmd=help
 if [ "${#commands[$cmd]}" -gt 0 ]; then
-	${commands[$cmd]} "$@"
+	${commands[$cmd]} "$@" || :
 fi
