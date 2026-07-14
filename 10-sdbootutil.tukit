@@ -15,10 +15,10 @@ callExt_post()
 abort_post()
 {
     systemctl --quiet is-active sdbootutil-update-predictions.timer \
-	    && systemctl stop sdbootutil-update-predictions.timer
+	    && systemctl stop sdbootutil-update-predictions.timer || :
 
     systemctl --quiet is-active sdbootutil-update-predictions-shutdown.service \
-	    && systemctl stop sdbootutil-update-predictions-shutdown.service
+	    && systemctl stop sdbootutil-update-predictions-shutdown.service || :
 }
 
 h()
