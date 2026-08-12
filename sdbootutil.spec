@@ -45,8 +45,8 @@ Requires:       tpm2.0-tools
 Requires:       libtss2-tcti-device0
 # For bootctl and systemd-pcrlock
 Requires:       udev
-Supplements:    (grub2-x86_64-efi-bls and shim)
-Supplements:    (systemd-boot and shim)
+Supplements:    ((grub2-x86_64-efi-bls and shim) unless (grub2-x86_64-efi or grub2-arm64-efi or grub2-riscv64-efi))
+Supplements:    ((systemd-boot and shim) unless (grub2-x86_64-efi or grub2-arm64-efi or grub2-riscv64-efi))
 # Because uhmac it is not a noarch package
 # BuildArch:      noarch
 ExclusiveArch:  aarch64 %{arm} riscv64 x86_64
