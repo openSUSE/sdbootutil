@@ -1,12 +1,17 @@
 [Unit]
 Description=Update TPM predictions
 ConditionSecurity=tpm2
+# The directory is created during the enrollment, when the predictions
+# are generated for the first time.  If it is missing the system is
+# not using systemd-pcrlock (no FDE, or enrolled with pcr-oracle), and
+# there is nothing to update nor to back up
+ConditionPathExists=/var/lib/pcrlock.d
 
 [Service]
 Type=oneshot
 KeyringMode=shared
 PrivateTmp=yes
-ExecStartPre=/usr/bin/sh -c 'mkdir "/tmp/$INVOCATION_ID"; cp -a /var/lib/pcrlock.d /tmp/$INVOCATION_ID/pcrlock.d'
+ExecStartPre=/usr/bin/sh -c 'mkdir -p "/tmp/$INVOCATION_ID"; cp -a /var/lib/pcrlock.d "/tmp/$INVOCATION_ID/pcrlock.d"'
 ExecStart=/usr/bin/sh -c '\
     systemctl --quiet is-active sdbootutil-update-predictions-shutdown.service && systemctl stop sdbootutil-update-predictions-shutdown.service; \
     while true; do \
@@ -16,9 +21,13 @@ ExecStart=/usr/bin/sh -c '\
     done'
 ExecStopPost=/usr/bin/sh -c '\
     if [ "$SERVICE_RESULT" != "success" ]; then \
-        echo "Command failed. Reason: $SERVICE_RESULT (Status: $EXIT_STATUS). Restoring backup..."; \
-        rm -rf /var/lib/pcrlock.d/*; \
-        cp -a "/tmp/$INVOCATION_ID/pcrlock.d/." /var/lib/pcrlock.d/; \
+        if [ -d "/tmp/$INVOCATION_ID/pcrlock.d" ]; then \
+            echo "Command failed. Reason: $SERVICE_RESULT (Status: $EXIT_STATUS). Restoring backup..."; \
+            rm -rf /var/lib/pcrlock.d/*; \
+            cp -a "/tmp/$INVOCATION_ID/pcrlock.d/." /var/lib/pcrlock.d/; \
+        else \
+            echo "Command failed. Reason: $SERVICE_RESULT (Status: $EXIT_STATUS). No backup found, keeping the current predictions"; \
+        fi; \
     fi; \
     rm -rf "/tmp/$INVOCATION_ID"'
 ImportCredential=sdbootutil-update-predictions.*

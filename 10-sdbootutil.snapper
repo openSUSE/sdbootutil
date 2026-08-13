@@ -55,10 +55,16 @@ is_transactional()
 #
 # * The same marker file is used to detect that there is a pending
 #   update-predictions
+#
+# * If the system is not using systemd-pcrlock the predictions are a
+#   no-op, so no transient unit is created at all.  This is the same
+#   condition that guards sdbootutil-update-predictions.service
 
 set_update_predictions_timer()
 {
 	local to="${1:-2}"
+
+	[ -d /var/lib/pcrlock.d ] || return 0
 	# Reset transient timer to `to` seconds (find a better
 	# estimator than a random number)
 	mkdir -p /run/sdbootutil; chmod 700 /run/sdbootutil; touch /run/sdbootutil/update-predictions
