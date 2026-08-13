@@ -156,7 +156,8 @@ helpandquit()
 		                        resolved file must exist and be readable, and
 		                        must be usable without Secure Boot, or kernel
 		                        installation is aborted.
-		  --force		Force certain operations inside a transaction
+		  --force		Force certain operations inside a transaction, and
+		                        force the regeneration of the TPM2 policy
 		  --disable-predictions	Disable automatic update predictions
 		  -v, --verbose		More verbose output
 		  --start-trace-code	Create /var/log/sdbootutil.log to trace the code.
@@ -3323,14 +3324,6 @@ generate_tpm2_predictions_pcrlock()
 
 	clean_pcrlock_d
 
-	# Get the list of hashes that can participate in the policy.
-	# We will compare them with the generated for the next
-	# prediction.  If there are no new hashes, a new policy will
-	# include all the PCR values form the current one, and we can
-	# skip the update
-	local pre_hashes
-	pre_hashes="$(get_predicted_hashes)"
-
 	shift_component 250-firmware-code-early
 	shift_component 550-firmware-code-late
 	pcrlock lock-firmware-code
@@ -3408,6 +3401,65 @@ generate_tpm2_predictions_pcrlock()
 		pcrlock_grub2_bls
 	fi
 
+	# The copy in the ESP is imported by `dracut-pcr-signature`,
+	# and can be missing after a new ESP installation.  Both copies
+	# are identical, so a missing one can be restored from the
+	# other, and by itself it does not require a new policy.
+	#
+	# Restoring the local copy also matters because it stores the
+	# PIN that `systemd-pcrlock` needs to update the NVIndex.
+	# Without it a new policy cannot replace the current one
+	if [ -e /var/lib/systemd/pcrlock.json ] && [ ! -e "${esp_root}${esp_dst}/pcrlock.json" ]; then
+		dbg "Restoring the pcrlock policy in the ESP"
+		cp /var/lib/systemd/pcrlock.json "${esp_root}${esp_dst}" || \
+			warn "Cannot copy the pcrlock policy into the ESP"
+	elif [ ! -e /var/lib/systemd/pcrlock.json ] && [ -e "${esp_root}${esp_dst}/pcrlock.json" ]; then
+		dbg "Restoring the pcrlock policy from the ESP"
+		cp "${esp_root}${esp_dst}/pcrlock.json" /var/lib/systemd/ || \
+			warn "Cannot restore the pcrlock policy from the ESP"
+	fi
+
+	# Decide if the current policy can be reused before running
+	# any expensive operation (`predict` and `make-policy`), and
+	# before asking for any PIN.
+	#
+	# The hashes that can participate in the policy are compared
+	# with the ones that were used to build the current policy, and
+	# not with the ones present before regenerating the components.
+	# The components are also regenerated at boot by
+	# `sdbootutil-update-predictions.service`, so a change in the
+	# firmware is already absorbed by `/var/lib/pcrlock.d` before
+	# the user can call this command.  Comparing with the state of
+	# this run would make such a change invisible forever, and only
+	# wiping `/var/lib/pcrlock.d` would recover.
+	#
+	# Duplicated hashes do not add new values, so the list is
+	# deduplicated
+	local post_hashes
+	post_hashes="$(get_predicted_hashes)"
+
+	if [ -n "$arg_force" ]; then
+		dbg "A new policy is forced (--force)"
+	elif [ ! -e /var/lib/systemd/pcrlock.json ]; then
+		# There is no policy to reuse, independently of how
+		# the components compare
+		dbg "Missing /var/lib/systemd/pcrlock.json"
+	elif [ ! -e /var/lib/sdbootutil/pcrlock-hashes ]; then
+		# The policy was created by a version that did not
+		# track the hashes, so there is nothing to compare
+		# with.  `make-policy` will detect that the prediction
+		# is unchanged and will keep the NVIndex untouched
+		dbg "Missing /var/lib/sdbootutil/pcrlock-hashes"
+	elif ! echo "$post_hashes" | cmp -s - /var/lib/sdbootutil/pcrlock-hashes; then
+		dbg "The components changed since the current policy was created"
+	else
+		info "Policy is up to date"
+		return 0
+	fi
+
+	local final_pcrs
+	final_pcrs="$(get_final_pcrs "$pcrs")"
+
 	# If the prediction fails, the system will ask for a password,
 	# but we can do a re-enrollment using the recovery PIN.  To
 	# register a recovery PIN the installer (sdbootutil-enroll,
@@ -3444,13 +3496,9 @@ generate_tpm2_predictions_pcrlock()
 		extra=("--recovery-pin=show")
 	fi
 
-	local post_hashes
-	post_hashes="$(get_predicted_hashes)"
-
-	[ -n "$(comm -13 <(echo "$pre_hashes") <(echo "$post_hashes"))" ] || return 0
-
-	local final_pcrs
-	final_pcrs="$(get_final_pcrs "$pcrs")"
+	# Rewrite the NV index even if systemd-pcrlock considers the
+	# prediction unchanged
+	[ -z "$arg_force" ] || extra+=("--force")
 
 	local output
 	output="$(PIN="$pin" pcrlock --pcr="$final_pcrs" "${extra[@]}" make-policy 2>"$tmpfile")"
@@ -3478,12 +3526,21 @@ generate_tpm2_predictions_pcrlock()
 		keyctl_add_with_timeout "sdbootutil-pin" "$pin"
 	fi
 
+	[ -e /var/lib/systemd/pcrlock.json ] || {
+		warn "Missing /var/lib/systemd/pcrlock.json after the policy creation"
+		return 1
+	}
+
+	# Track the hashes used for this policy, so a later run can
+	# detect that the components diverged from it
+	echo "$post_hashes" > /var/lib/sdbootutil/pcrlock-hashes
+
 	# Publish the assets in the ESP, so can be imported by
 	# dracut-pcr-signature
-	[ -e /var/lib/systemd/pcrlock.json ] && \
-		cp /var/lib/systemd/pcrlock.json "${esp_root}${esp_dst}" && {
-			echo "NVIndex policy created"
-		}
+	cp /var/lib/systemd/pcrlock.json "${esp_root}${esp_dst}" || \
+		warn "Cannot copy the pcrlock policy into the ESP"
+
+	echo "NVIndex policy created"
 }
 
 get_device_password()
@@ -4175,6 +4232,7 @@ unenroll_all_pcrlock()
 	rm -fr /var/lib/pcrlock.d/* || true
 	rm -f /var/lib/systemd/pcrlock.json
 	rm -f "${esp_root}${esp_dst}/pcrlock.json"
+	rm -f /var/lib/sdbootutil/pcrlock-hashes
 	rm -f /var/lib/sdbootutil/crypttab.sha1
 	rm -f /var/lib/sdbootutil/measure-pcr-private.pem
 	rm -f /var/lib/sdbootutil/measure-pcr-public.pem
