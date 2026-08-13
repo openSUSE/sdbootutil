@@ -55,10 +55,21 @@ is_transactional()
 #
 # * The same marker file is used to detect that there is a pending
 #   update-predictions
+#
+# * If no device is unlocked with the TPM2 the predictions are a
+#   no-op, so no transient unit is created at all.  This is the same
+#   condition that guards sdbootutil-update-predictions.service
+
+has_tpm2_unlock()
+{
+	[ -e /etc/crypttab ] && grep -q "tpm2-device" /etc/crypttab
+}
 
 set_update_predictions_timer()
 {
 	local to="${1:-2}"
+
+	has_tpm2_unlock || return 0
 	# Reset transient timer to `to` seconds (find a better
 	# estimator than a random number)
 	mkdir -p /run/sdbootutil; chmod 700 /run/sdbootutil; touch /run/sdbootutil/update-predictions

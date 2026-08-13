@@ -6,7 +6,15 @@ ConditionSecurity=tpm2
 Type=oneshot
 KeyringMode=shared
 PrivateTmp=yes
-ExecStartPre=/usr/bin/sh -c 'mkdir "/tmp/$INVOCATION_ID"; cp -a /var/lib/pcrlock.d /tmp/$INVOCATION_ID/pcrlock.d'
+# Predictions are only needed when a device is unlocked with the TPM2.
+# This is the same condition that sdbootutil checks before generating
+# them, and it does not depend on the state under /var, so a system
+# that lost the pcrlock components can still regenerate them
+ExecCondition=/usr/bin/sh -c '[ -e /etc/crypttab ] && grep -q tpm2-device /etc/crypttab'
+# Do not create /var/lib/pcrlock.d if it is missing, systemd-pcrlock
+# creates it with the correct SELinux label.  Without components there
+# is nothing to back up
+ExecStartPre=/usr/bin/sh -c 'mkdir -p "/tmp/$INVOCATION_ID"; [ ! -d /var/lib/pcrlock.d ] || cp -a /var/lib/pcrlock.d "/tmp/$INVOCATION_ID/pcrlock.d"'
 ExecStart=/usr/bin/sh -c '\
     systemctl --quiet is-active sdbootutil-update-predictions-shutdown.service && systemctl stop sdbootutil-update-predictions-shutdown.service; \
     while true; do \
@@ -15,10 +23,14 @@ ExecStart=/usr/bin/sh -c '\
 	[ -f /run/sdbootutil/update-predictions ] || break; \
     done'
 ExecStopPost=/usr/bin/sh -c '\
-    if [ "$SERVICE_RESULT" != "success" ]; then \
-        echo "Command failed. Reason: $SERVICE_RESULT (Status: $EXIT_STATUS). Restoring backup..."; \
-        rm -rf /var/lib/pcrlock.d/*; \
-        cp -a "/tmp/$INVOCATION_ID/pcrlock.d/." /var/lib/pcrlock.d/; \
+    if [ "$SERVICE_RESULT" != "success" ] && [ "$SERVICE_RESULT" != "exec-condition" ]; then \
+        if [ -d "/tmp/$INVOCATION_ID/pcrlock.d" ]; then \
+            echo "Command failed. Reason: $SERVICE_RESULT (Status: $EXIT_STATUS). Restoring backup..."; \
+            rm -rf /var/lib/pcrlock.d/*; \
+            cp -a "/tmp/$INVOCATION_ID/pcrlock.d/." /var/lib/pcrlock.d/; \
+        else \
+            echo "Command failed. Reason: $SERVICE_RESULT (Status: $EXIT_STATUS). No backup found, keeping the current predictions"; \
+        fi; \
     fi; \
     rm -rf "/tmp/$INVOCATION_ID"'
 ImportCredential=sdbootutil-update-predictions.*
