@@ -2780,6 +2780,94 @@ shift_component()
 	find /var/lib/pcrlock.d/"$component".pcrlock.d -name '*.pcrlock' ! -name 'shift-*.pcrlock' -delete
 }
 
+uint64_le()
+{
+	# 64 bit little endian representation of a number, as escape
+	# sequences for `echo -ne`.  Nothing that is measured here is
+	# big enough to reach the high 32 bits
+	local value="$1"
+
+	printf '\\x%02x' \
+	       "$((value & 255))" \
+	       "$((value >> 8 & 255))" \
+	       "$((value >> 16 & 255))" \
+	       "$((value >> 24 & 255))" \
+	       0 0 0 0
+}
+
+pcrlock_secureboot_sbatlevel()
+{
+	# shim measures the `SbatLevel` variable into PCR 7 as an
+	# EV_EFI_VARIABLE_AUTHORITY event.  When Secure Boot is
+	# enabled `systemd-pcrlock lock-secureboot-authority` collects
+	# every EV_EFI_VARIABLE_AUTHORITY record of PCR 7 in event log
+	# order, without filtering by variable name, so this
+	# measurement is already covered and there is nothing to do.
+	# But when Secure Boot is disabled that command removes the
+	# component and generates nothing, leaving the shim measurement
+	# without an owner.  A measurement that no component can claim
+	# drops the full PCR from the policy, so PCR 7 can never be
+	# sealed in a system that boots via shim without Secure Boot.
+	#
+	# The prediction is written under the name that the failing
+	# verb owns, and not under a new one.  `SbatLevel` is exactly
+	# the record that `lock-secureboot-authority` would have
+	# claimed, so the position in the replay order is the correct
+	# one, and if Secure Boot is enabled later the verb overwrites
+	# the file with the complete set of authorities.  A component
+	# with a name of our own would survive that transition and
+	# replay `SbatLevel` twice, breaking the PCR that it is meant
+	# to fix
+	local component_dir=/var/lib/pcrlock.d/620-secureboot-authority.pcrlock.d
+
+	! is_secure_boot || {
+		dbg "Secure Boot enabled, SbatLevel is locked by lock-secureboot-authority"
+		return 0
+	}
+
+	local guid="605dab50-e046-4300-abb6-3dd810dd8b23"
+	# The same GUID in binary form: the first three fields are
+	# stored in little endian, and the last two as they are
+	# written
+	local guid_le='\x50\xab\x5d\x60\x46\xe0\x00\x43\xab\xb6\x3d\xd8\x10\xdd\x8b\x23'
+
+	# The variable is measured as `SbatLevel`, but is exposed at
+	# runtime as `SbatLevelRT`
+	local name="SbatLevel"
+	local var="/sys/firmware/efi/efivars/${name}RT-$guid"
+
+	# Without shim there is no `SbatLevel` measurement to claim, and
+	# `lock-secureboot-authority` already removed the component
+	[ -e "$var" ] || {
+		dbg "Missing $var, skipping the SbatLevel component"
+		return 0
+	}
+
+	# What is measured is a UEFI_VARIABLE_DATA structure: the
+	# GUID, the length of the name in characters, the length of
+	# the content in bytes, the name in UTF-16LE, and the content.
+	# The first four bytes of the efivarfs file are the
+	# attributes, and are not part of the variable content
+	local size
+	size="$(stat -c%s "$var")"
+	size=$((size - 4))
+
+	{
+		echo -ne "$guid_le$(uint64_le "${#name}")$(uint64_le "$size")"
+		echo -n "$name" | iconv -t UTF-16LE
+		tail -c "$size" "$var"
+	} > "$tmpdir/sbatlevel"
+
+	mkdir -p "$component_dir"
+	pcrlock \
+		lock-raw \
+		--pcr=7 \
+		--pcrlock="$component_dir/generated.pcrlock" \
+		"$tmpdir/sbatlevel"
+	rm "$tmpdir/sbatlevel"
+	dbg_cat "$component_dir/generated.pcrlock"
+}
+
 pcrlock_cmdline_initrd()
 {
 	local cmdline="$1"
@@ -3235,11 +3323,26 @@ clean_pcrlock_d()
 	# file gets replaced (loader.conf) the new measurement cannot
 	# be found in the event log, as contains the old hash, making
 	# the aligment fail.
+	#
+	# The masked components (see `mask_unmatched_components`) are
+	# also a statement about the current event log, and expire in
+	# the same way.  If the measurement that is missing today is
+	# done in a later boot, for example because the initrd gained
+	# `systemd-pcrextend`, the mask would hide the component that
+	# owns it, and the new records would drop the PCR from the
+	# policy.  Unlike a missing component, that is reported and
+	# can be masked, an unclaimed record cannot be recovered from,
+	# so the masks are dropped and re-evaluated after every reboot.
+	# They cannot be recognized by name, as a mask is required to
+	# be named after the component that it hides, but they are the
+	# only empty files in the directory
 	local btime
 	read -r _ btime < <(grep btime /proc/stat)
 	local minutes=$((1 + ($(date +%s) - btime) / 60))
-	dbg "Cleaning shifted measurements older than $minutes minutes"
-	find /var/lib/pcrlock.d -name 'shift-*.pcrlock' -type f -cmin +"$minutes" -delete
+	dbg "Cleaning shifted and masked measurements older than $minutes minutes"
+	find /var/lib/pcrlock.d -type f \
+	     \( -name 'shift-*.pcrlock' -o \( -name '*.pcrlock' -empty \) \) \
+	     -cmin +"$minutes" -delete
 
 	# Remove older (1 week) generated measurements.  This will
 	# keep the predictions at minimum and decrease the
@@ -3261,6 +3364,60 @@ get_predicted_hashes()
 	find /var/lib/pcrlock.d/ -name "*.pcrlock" -type f -exec jq -r '.records[].digests[] | select(.hashAlg == "sha256") | .digest' {} + | sort -u
 }
 
+mask_unmatched_components()
+{
+	# `systemd-pcrlock` drops from the protection mask every PCR
+	# that is touched by a component that cannot be found in the
+	# event log.  Some of the components shipped in
+	# /usr/lib/pcrlock.d describe measurements that the system
+	# never does.  For example `750-enter-initrd` and
+	# `750-os-separator` are measured by `systemd-pcrextend`, that
+	# is not always present in the initrd.  As `750-os-separator`
+	# touches PCRs 0-7, 9 and 12-14, a single missing component is
+	# enough to leave the policy without a single PCR.
+	#
+	# A component is masked with an empty file placed in a
+	# directory with more priority.  The name of the mask has to be
+	# the name of the component, as `systemd-pcrlock` collects the
+	# components with `conf_files_list_strv`, that resolves the
+	# priority and the masking by file name.  A symlink to
+	# /dev/null is also understood as a mask, but the SELinux
+	# policy does not allow `lnk_file` in the pcrlock directory.
+	# Only the components provided by the system are masked: the
+	# ones generated here are expected to align, and if they do not
+	# the problem is somewhere else.
+	#
+	# The mask describes the current event log, so it is dropped
+	# after a reboot by `clean_pcrlock_d`, like the shifted
+	# measurements.
+	#
+	# Returns 0 if something was masked, so the caller knows that
+	# the prediction is stale
+	local component masked=1
+	while read -r component; do
+		[ -e "/usr/lib/pcrlock.d/$component.pcrlock" ] || \
+		    [ -d "/usr/lib/pcrlock.d/$component.pcrlock.d" ] || {
+			warn "Component $component cannot be found in the event log"
+			continue
+		}
+		[ ! -e "/var/lib/pcrlock.d/$component.pcrlock" ] || continue
+		info "Masking component $component (not found in the event log)"
+		: > "/var/lib/pcrlock.d/$component.pcrlock"
+		masked=0
+	done < <(sed -n "s/^Couldn't find component '\(.*\)' in event log\.\$/\1/p" "$tmpfile")
+
+	return "$masked"
+}
+
+predict_pcrs()
+{
+	local pcrs="$1"
+
+	# The components that cannot be aligned are reported at
+	# `notice` level, and `mask_unmatched_components` needs them
+	SYSTEMD_LOG_LEVEL=notice pcrlock --pcr="$pcrs" --json=short predict 2>"$tmpfile"
+}
+
 get_final_pcrs()
 {
 	local pcrs="$1"
@@ -3269,18 +3426,33 @@ get_final_pcrs()
 	# participate in the policy.  To avoid the PolicyOR limit, we
 	# filter the PCRs with more that 8 values
 	local output
-	output="$(pcrlock --pcr="$pcrs" --json=short predict 2>"$tmpfile")"
+	output="$(predict_pcrs "$pcrs")"
 	local pcrlock_status=$?
 
 	if [ "$pcrlock_status" -ne 0 ]; then
-		err "Error creating the systemd-pcrlock prediction!\n$(cat "$tmpfile")"
+		warn "Error creating the systemd-pcrlock prediction!\n$(cat "$tmpfile")"
+		return 1
 	fi
 
-	# If no PCRs are included, we are starting from a very
-	# misaligned event log (initial installation, for example)
+	# Predict again if some component was masked, as the previous
+	# prediction was done with it in place
+	if mask_unmatched_components; then
+		output="$(predict_pcrs "$pcrs")"
+		pcrlock_status=$?
+
+		if [ "$pcrlock_status" -ne 0 ]; then
+			warn "Error creating the systemd-pcrlock prediction!\n$(cat "$tmpfile")"
+			return 1
+		fi
+	fi
+
+	# An empty prediction means that no PCR survived the event log
+	# alignment.  A policy can still be created from it, but it
+	# will not bind the NVIndex to any PCR, silently dropping the
+	# protection that the user asked for
 	[ "$output" != "{}" ] || {
-		echo "$pcrs"
-		return 0
+		warn "No PCR from $pcrs can be predicted, the event log cannot be aligned!\n$(cat "$tmpfile")"
+		return 1
 	}
 
 	# PCRs that participate in the policy
@@ -3306,6 +3478,22 @@ get_final_pcrs()
 
 	local pcrs_policy_missing
 	pcrs_policy_missing="$(IFS=","; echo "${!pcrs_policy_missing_table[*]}")"
+	# `systemd-pcrlock` can report that a PCR matches the event log
+	# and still predict a set of values that does not contain the
+	# current one, for example when a component is replayed in the
+	# wrong order.  The resulting policy is valid, but the device
+	# will not be unsealed after a reboot that changes nothing, so
+	# it is better to report it
+	local pcr_current
+	for i in "${!pcrs_policy_table[@]}"; do
+		[ -e "/sys/class/tpm/tpm0/pcr-sha256/$i" ] || continue
+		read -r pcr_current < "/sys/class/tpm/tpm0/pcr-sha256/$i"
+		jq -e --argjson pcr "$i" --arg value "${pcr_current,,}" \
+			'[.sha256[] | select(.pcr == $pcr) | .values[]] | index($value)' \
+			<<<"$output" > /dev/null || \
+			warn "The prediction for PCR $i does not contain the current value"
+	done
+
 	[ -z "$pcrs_policy_missing" ] || info "PCRs $pcrs_policy_missing dropped from the policy (component mapping)"
 	[ -z "$pcrs_policyor" ] || info "PCRs $pcrs_policyor dropped from the policy (PolicyOR)"
 	[ "$pcrs" = "$pcrs_policy" ] || info "Final PCRs list ($pcrs -> $pcrs_policy)"
@@ -3338,6 +3526,8 @@ generate_tpm2_predictions_pcrlock()
 	pcrlock lock-secureboot-policy &> /dev/null || true
 	shift_component 620-secureboot-authority
 	pcrlock lock-secureboot-authority &> /dev/null || true
+	# Generates 620-secureboot-authority when the verb cannot
+	pcrlock_secureboot_sbatlevel
 
 	# Uses / by default, but firmware measures GPT of the disk a
 	# boot application was loaded from, which is effectively the
@@ -3458,7 +3648,7 @@ generate_tpm2_predictions_pcrlock()
 	fi
 
 	local final_pcrs
-	final_pcrs="$(get_final_pcrs "$pcrs")"
+	final_pcrs="$(get_final_pcrs "$pcrs")" || return 1
 
 	# If the prediction fails, the system will ask for a password,
 	# but we can do a re-enrollment using the recovery PIN.  To
