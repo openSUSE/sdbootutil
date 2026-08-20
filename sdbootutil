@@ -2617,6 +2617,23 @@ is_pcr_oracle()
 	    have_pcr_oracle
 }
 
+pcr_oracle_public_key()
+{
+	# The public key that pcr-oracle used to sign the PCR policy
+	# is not removed when the package goes away, and
+	# systemd-cryptenroll picks it up from any of the
+	# configuration directories.  Print the first one found.
+	local dir
+	for dir in /etc/systemd /run/systemd /usr/local/lib/systemd /usr/lib/systemd; do
+		if [ -e "$dir/tpm2-pcr-public-key.pem" ]; then
+			echo "$dir/tpm2-pcr-public-key.pem"
+			return 0
+		fi
+	done
+
+	return 1
+}
+
 snapshot_ids_for_prediction()
 {
 	# Select the ID of the snapshots that participate in the
@@ -3932,6 +3949,19 @@ generate_tpm2_predictions()
 		return 0
 	}
 
+	# is_pcr_oracle() is false once the pcr-oracle package is
+	# gone, but the LUKS2 token can still require a signed PCR
+	# policy that nothing signs anymore, in which case the pcrlock
+	# predictions are updated but the TPM2 unlock keeps falling
+	# back to the password.  Only a re-enrollment fixes that.
+	local dev
+	if detect_tracked_devices; then
+		for dev in "${tracked_devices[@]}"; do
+			! has_signed_pcr_policy "$dev" || \
+				warn "$dev is enrolled with a signed PCR policy. Re-enroll to use systemd-pcrlock"
+		done
+	fi
+
 	generate_tpm2_predictions_pcrlock
 
 	# Generate a PCR 15 prediction only in certain cases, as for
@@ -4006,6 +4036,16 @@ have_slot()
 	local dev="${1:?}"
 	local kind="${2:?}"
 	grep -q "$kind" < <(systemd-cryptenroll "$dev")
+}
+
+has_signed_pcr_policy()
+{
+	# A "tpm2_pubkey" field in the token means that a shard of the
+	# sealed key is locked to a signed PCR policy, and that
+	# unlocking the device also requires a tpm2-pcr-signature.json
+	local dev="${1:?}"
+	cryptsetup luksDump --dump-json-metadata "$dev" 2> /dev/null | \
+		jq -e 'any(.tokens[]?; .type == "systemd-tpm2" and has("tpm2_pubkey"))' &> /dev/null
 }
 
 in_lockout()
@@ -4155,10 +4195,20 @@ enroll_tpm2()
 	# not, systemd-cryptenroll will ask one
 	get_device_password &> /dev/null
 
+	# Unless an empty --tpm2-public-key is passed,
+	# systemd-cryptenroll loads "tpm2-pcr-public-key.pem" from the
+	# configuration directories and adds a signed PCR policy as a
+	# second shard of the sealed key, next to the pcrlock one.
+	local pcr_oracle_key
+	if pcr_oracle_key="$(pcr_oracle_public_key)"; then
+		warn "Ignoring $pcr_oracle_key for the enrollment. Remove it, and the private key, if pcr-oracle is not used anymore"
+	fi
+
 	# Note that the PCRs are now not stored in the LUKS2 header
 	if NEWPIN="$tpm2_pin" systemd-cryptenroll \
 		 --wipe-slot=tpm2 \
 		 --tpm2-device=auto \
+		 --tpm2-public-key= \
 		 "${extra_args[@]}" \
 		 --tpm2-pcrlock=/var/lib/systemd/pcrlock.json \
 		 "$dev"; then
