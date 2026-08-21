@@ -2701,12 +2701,31 @@ have_pcr_oracle()
 	[ -e /usr/bin/pcr-oracle ]
 }
 
+# Warnings that `systemd-pcrlock` emits, once per event log
+# record, when the firmware pads the UEFI device paths stored in
+# the log.  All of them are produced while collecting the
+# description of the record, that is only used to display the log,
+# so neither the policy nor the predictions are affected by them
+pcrlock_noise="^(Garbage after device path end|Device path too short|Device path size does not match|Device path element too short), ignoring\.$"
+
 pcrlock()
 {
 	dbg "systemd-pcrlock $*"
 	local pcrlock_cmd="/usr/bin/systemd-pcrlock"
 	[ -e "$pcrlock_cmd" ] || pcrlock_cmd="/usr/lib/systemd/systemd-pcrlock"
-	SYSTEMD_LOG_LEVEL="${SYSTEMD_LOG_LEVEL:-warning}" "$pcrlock_cmd" "$@"
+
+	if [ -n "$verbose" ]; then
+		SYSTEMD_LOG_LEVEL="${SYSTEMD_LOG_LEVEL:-warning}" "$pcrlock_cmd" "$@"
+		return
+	fi
+
+	local status=0
+	SYSTEMD_LOG_LEVEL="${SYSTEMD_LOG_LEVEL:-warning}" "$pcrlock_cmd" "$@" \
+		2>"$tmpdir/pcrlock.err" || status=$?
+	grep -Ev "$pcrlock_noise" "$tmpdir/pcrlock.err" >&2 || :
+	rm -f "$tmpdir/pcrlock.err"
+
+	return "$status"
 }
 
 is_pcr_oracle()
