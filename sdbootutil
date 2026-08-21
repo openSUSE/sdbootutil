@@ -1036,6 +1036,9 @@ mount_chroot()
 	# properly detect the fs type and load the relevant module.
 	findmnt -o TARGET,FSTYPE,FSROOT -Rv --pairs / > "$tmpdir/mounts"
 	mount --bind "$snapshot_dir" "$snapshot_dir"
+	# Register the chroot before mounting anything else, so a
+	# failure in the middle of the loop is unwound by `cleanup`
+	chroot_dir="$snapshot_dir"
 	while read -r line; do
 		eval "$line"
 		# shellcheck disable=SC2153
@@ -1051,6 +1054,16 @@ mount_chroot()
 		# "$snapshot_dir" provides
 		# shellcheck disable=SC2153
 		[ -z "$(snapshot_from_fsroot "$FSROOT")" ] || continue
+		# Not every mount point of the running system is present
+		# in the snapshot.  For example the directory that
+		# `transactional-update` mounts under /tmp while a
+		# transaction is open, or any external media.  They are
+		# not needed to generate the initrd, and the snapshot can
+		# be read-only, so the directory cannot be created
+		if [ ! -d "$snapshot_dir$TARGET" ]; then
+			dbg "Skipping $TARGET, not present in $snapshot_dir"
+			continue
+		fi
 		mountpoint --quiet "$snapshot_dir$TARGET" || mount --bind "$TARGET" "$snapshot_dir$TARGET"
 	done < "$tmpdir/mounts"
 	rm "$tmpdir/mounts"
@@ -1063,7 +1076,6 @@ mount_chroot()
 	for i in proc dev sys tmp; do
 		mount --bind "/$i" "$snapshot_dir/$i"
 	done
-	chroot_dir="$snapshot_dir"
 }
 
 umount_chroot()
