@@ -4597,16 +4597,22 @@ enroll()
 	# generate a new initrd
 	if [ "$arg_no_reuse_initrd" = "1" ]; then
 		install_all_kernels "$root_snapshot"
-		if [ "$arg_method" = "tpm2" ] || [ "$arg_method" = "tpm2+pin" ]; then
-			# During the initial enrollment it is expected
-			# that for systemd-pcrlock the recovery PIN
-			# will be extracted from the %u keyring
-			# "sdbootutil[-pin]" entry
-			generate_tpm2_predictions
-			# Avoid the call of generate_tpm2_predictions
-			# at the end of the script
-			update_predictions=
-		fi
+	fi
+
+	if [ "$arg_method" = "tpm2" ] || [ "$arg_method" = "tpm2+pin" ]; then
+		# During the initial enrollment it is expected that
+		# for systemd-pcrlock the recovery PIN will be
+		# extracted from the %u keyring "sdbootutil[-pin]"
+		# entry
+		#
+		# This is done even when /etc/crypttab did not change,
+		# as the enrollment points to an NV index that can be
+		# missing (for example after a `tpm2_clear`) or to a
+		# policy that does not match the current system
+		generate_tpm2_predictions
+		# Avoid the call of generate_tpm2_predictions at the
+		# end of the script
+		update_predictions=
 	fi
 
 	# For the PIN (tpm2+pin) or password (password), we can get it
