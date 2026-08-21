@@ -536,6 +536,10 @@ ask_password()
 {
 	local msg="$1"
 	local -n nameref_pw="$2"
+	# `read -p` prints the prompt only when the input is a
+	# terminal, so without this check a non-interactive caller
+	# gets an empty password and no indication of why
+	[ -t 0 ] || err "\"$msg\" is required, but there is no terminal to ask for it"
 	read -r -s -p "$msg: " nameref_pw
 	echo >&2
 }
