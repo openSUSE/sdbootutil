@@ -8,6 +8,11 @@ check() {
         if ! [ -d /sys/class/tpmrm ] || [ -z "$(ls -A /sys/class/tpmrm)" ]; then
             return 255
         fi
+        # A system with a TPM2 but without a device that measures
+        # PCR 15 has nothing to validate
+        if ! grep -qs "tpm2-measure-pcr=yes" /etc/crypttab; then
+            return 255
+        fi
     fi
 
     return 0
