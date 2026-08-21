@@ -50,6 +50,12 @@ arg_force=
 arg_disable_predictions=
 have_snapshots=
 in_buildroot=
+# Snapshot that owns the "/" subvolume, that is not always the one
+# that provides /usr (see `detect_applied_snapshot`)
+running_snapshot=
+# Snapshot mapped over the running system by `transactional-update
+# apply` (see `detect_applied_snapshot`)
+applied_snapshot=
 # Possible values: vmlinuz image vmlinux linux bzImage uImage Image zImage
 image=
 unlock_method=
@@ -277,6 +283,11 @@ helpandquit()
 		Trace Code		Create /var/log/sdbootutil.log to debug deep
 		                        sdbootutil calls.  Remove the file to stop the
 		                        trace, and audit the content before sharing
+		Applied Snapshots	After a "transactional-update apply" the running
+		                        system is a mix of two snapshots.  [SNAPSHOT] has
+		                        no meaningful default then, so commands that
+		                        change the ESP require an explicit snapshot
+		                        number or --default-snapshot
 
 
 	EOF
@@ -572,6 +583,45 @@ detect_parent()
 
 	dbg_var "parent_subvol"
 	dbg_var "parent_snapshot"
+}
+
+snapshot_from_fsroot()
+{
+	local fsroot="${1#/}"
+	local snapshot="${fsroot#"${subvol_prefix}"/.snapshots/}"
+
+	[ "$snapshot" != "$fsroot" ] || return 0
+	echo "${snapshot%%/*}"
+}
+
+detect_applied_snapshot()
+{
+	local fsroot
+	local usr_snapshot=""
+
+	[ -n "$have_snapshots" ] || return 0
+
+	# With more than one `apply` the mounts stack, and the last
+	# line is the visible one
+	while read -r fsroot; do
+		usr_snapshot="$(snapshot_from_fsroot "$fsroot")"
+	done < <(findmnt --noheadings --output FSROOT /usr 2> /dev/null)
+
+	[ -n "$usr_snapshot" ] || return 0
+	[ "$usr_snapshot" != "$running_snapshot" ] || return 0
+	echo "$usr_snapshot"
+}
+
+assert_snapshot()
+{
+	[ -n "$applied_snapshot" ] || return 0
+	[ -z "$arg_default_snapshot" ] || return 0
+	[ -z "$1" ] || return 0
+
+	err "The running system is a mix of snapshot $running_snapshot (mounted in /) and" \
+	    "snapshot $applied_snapshot (mounted in /usr), as left by 'transactional-update apply'." \
+	    "\nRe-run the command with an explicit snapshot number, or with --default-snapshot" \
+	    "to select the snapshot that will be booted next."
 }
 
 is_rootfs_crypt()
@@ -975,7 +1025,7 @@ mount_chroot()
 	# We include the rootfs (the first line usually), as is needed
 	# to appear in the mounts under the chroot, allowing dracut to
 	# properly detect the fs type and load the relevant module.
-	findmnt -o TARGET,FSTYPE -Rv --pairs / > "$tmpdir/mounts"
+	findmnt -o TARGET,FSTYPE,FSROOT -Rv --pairs / > "$tmpdir/mounts"
 	mount --bind "$snapshot_dir" "$snapshot_dir"
 	while read -r line; do
 		eval "$line"
@@ -985,6 +1035,13 @@ mount_chroot()
 		[ "$TARGET" = "/etc" ] && [ "$FSTYPE" = "btrfs" ] && continue
 		[[ "$TARGET" != /.snapshots* ]] || continue
 		[[ "$TARGET" != /run/media/* ]] || continue
+		# After a `transactional-update apply` the running
+		# system has /usr and /boot bind mounted from the new
+		# default snapshot.  Those belong to a different
+		# snapshot and must not shadow the ones that
+		# "$snapshot_dir" provides
+		# shellcheck disable=SC2153
+		[ -z "$(snapshot_from_fsroot "$FSROOT")" ] || continue
 		mountpoint --quiet "$snapshot_dir$TARGET" || mount --bind "$TARGET" "$snapshot_dir$TARGET"
 	done < "$tmpdir/mounts"
 	rm "$tmpdir/mounts"
@@ -1343,7 +1400,10 @@ install_kernel()
 
 		info "Generating new initrd"
 
-		if [ -n "$have_snapshots" ] && [ "$subvol" != "$root_subvol" ]; then
+		# When the running system is a mix of snapshots the live
+		# /usr is not the one of "$root_subvol", so the initrd
+		# needs to be generated inside the snapshot in any case
+		if [ -n "$have_snapshots" ] && { [ "$subvol" != "$root_subvol" ] || [ -n "$applied_snapshot" ]; }; then
 			mount_chroot "${subvol#"${subvol_prefix}"}"
 			# In MicroOS we need to be sure to have the same /etc
 			# inside the snapshot.  For example, /etc/crypttab can
@@ -1351,10 +1411,12 @@ install_kernel()
 			# visible once the snapshot is active, but the version
 			# in /.snapshots is still the unmodified base
 			is_transactional && mount_etc "${subvol#"${subvol_prefix}"}"
-			chroot "${subvol#"${subvol_prefix}"}" dracut "${dracut_args[@]}" "$tmpdir/initrd-0" "$kernel_version"
+			chroot "${subvol#"${subvol_prefix}"}" dracut "${dracut_args[@]}" "$tmpdir/initrd-0" "$kernel_version" \
+				|| err "Failed to generate the initrd for $kernel_version"
 			umount_chroot "${subvol#"${subvol_prefix}"}"
 		else
-			dracut "${dracut_args[@]}" "$tmpdir/initrd-0" "$kernel_version"
+			dracut "${dracut_args[@]}" "$tmpdir/initrd-0" "$kernel_version" \
+				|| err "Failed to generate the initrd for $kernel_version"
 		fi
 	fi
 
@@ -1372,6 +1434,11 @@ install_kernel()
 			((++i))
 		done
 	fi
+
+	# A boot entry without an initrd will not boot.  This can only
+	# happen if the initrd generation failed in a context where
+	# `set -e` does not apply, like a command substitution
+	[ "${#dstinitrd[@]}" -ne 0 ] || err "No initrd found for $kernel_version in snapshot $snapshot"
 
 	title="${os_release_PRETTY_NAME:-Linux $kernel_version}"
 	# shellcheck disable=SC2154
@@ -2094,7 +2161,10 @@ install_bootloader()
 	local prefix=""
 	if [ -n "$have_snapshots" ]; then
 		snapshot="${1:-$root_snapshot}"
-		prefix="/.snapshots/${root_snapshot}/snapshot"
+		# The binaries are taken from the same snapshot that
+		# `bootloader_needs_update` inspected, that is not
+		# necessarily the running one
+		prefix="/.snapshots/${snapshot}/snapshot"
 	fi
 
 	info "Installing bootloader"
@@ -2360,7 +2430,11 @@ get_top_entry_id()
 set_default_entry()
 {
 	local id="$1"
+	# `get_top_entry_id` can install kernels, and inside a command
+	# substitution `set -e` does not abort this shell, so the
+	# result needs to be validated
 	[ -n "$1" ] || id=$(get_top_entry_id "$root_snapshot")
+	[ -n "$id" ] || err "Can't determine the top boot entry for snapshot $root_snapshot"
 
 	info "Setting default entry $id"
 
@@ -2576,7 +2650,11 @@ set_default_snapshot()
 		return 0
 	}
 
+	# `get_top_entry_id` can install kernels, and inside a command
+	# substitution `set -e` does not abort this shell, so the
+	# result needs to be validated
 	id="$(get_top_entry_id "$snapshot")"
+	[ -n "$id" ] || err "Can't determine the top boot entry for snapshot $snapshot"
 	set_default_entry "$id"
 
 	# The default snapshot is not the criteria used for the
@@ -4816,14 +4894,17 @@ elif [ -e /.snapshots/1/info.xml ]; then
 fi
 
 root_snapshot=""
+running_snapshot=""
 if [ -n "$have_snapshots" ]; then
+	running_snapshot="${root_subvol#"${subvol_prefix}"/.snapshots/}"
+	running_snapshot="${running_snapshot%/snapshot}"
 	if [ -n "$arg_default_snapshot" ]; then
 		[ -s "$snapperfile" ] || update_snapper
 		read -r root_snapshot <<<"$(jq -r '.root[]|select(.default==true)|.number' < "$snapperfile")"
 	else
-		root_snapshot="${root_subvol#"${subvol_prefix}"/.snapshots/}"
-		root_snapshot="${root_snapshot%/snapshot}"
+		root_snapshot="$running_snapshot"
 	fi
+	applied_snapshot="$(detect_applied_snapshot)"
 elif [ -n "$in_buildroot" ]; then
 	root_snapshot="1"
 fi
@@ -4841,6 +4922,8 @@ set_image_name
 mountpoint -q "$esp_root" || warn "$esp_root is not a valid mountpoint"
 
 dbg_var "root_snapshot"
+dbg_var "running_snapshot"
+dbg_var "applied_snapshot"
 dbg_var "esp_root"
 dbg_var "boot_root"
 
@@ -4913,15 +4996,18 @@ fi
 
 case "$1" in
 	install)
+		assert_snapshot "$2"
 		install_bootloader "${2:-$root_snapshot}"
 		install_extra_entries "${2:-$root_snapshot}"
 		create_default_config_file ;;
 	needs-update)
 		bootloader_needs_update "${2:-$root_snapshot}" ;;
 	update)
+		assert_snapshot "$2"
 		bootloader_update "${2:-$root_snapshot}" ;;
 	force-update)
 		if is_installed; then
+			assert_snapshot "$2"
 			install_bootloader "${2:-$root_snapshot}"
 		else
 			:
@@ -4929,19 +5015,25 @@ case "$1" in
 	bootloader)
 		bootloader_name "${2:-$root_snapshot}" ;;
 	add-kernel)
+		assert_snapshot "$3"
 		install_kernel "${3:-$root_snapshot}" "$2" ;;
 	add-all-kernels)
+		assert_snapshot "$2"
 		install_all_kernels "${2:-$root_snapshot}" ;;
 	mkinitrd)
+		assert_snapshot "$2"
 		arg_no_reuse_initrd=1
 		install_all_kernels "${2:-$root_snapshot}" ;;
 	remove-kernel)
+		assert_snapshot "$3"
 		remove_kernel "${3:-$root_snapshot}" "$2" ;;
 	remove-all-kernels)
+		assert_snapshot "$2"
 		remove_all_kernels "${2:-$root_snapshot}" ;;
 	cleanup)
 		cleanup_entries "${2:-}" ;;
 	set-default-snapshot)
+		assert_snapshot "$2"
 		set_default_snapshot "${2:-$root_snapshot}" ;;
 	is-installed)
 		if is_installed; then
@@ -4962,12 +5054,15 @@ case "$1" in
 	show-entry)
 		show_entry_fields "${3:-$root_snapshot}" "$2" ;;
 	update-entry)
+		assert_snapshot "$3"
 		update_entry "${3:-$root_snapshot}" "$2" ;;
 	update-all-entries)
+		assert_snapshot "$2"
 		update_all_entries "${2:-$root_snapshot}" ;;
 	is-bootable)
 		is_bootable "${2:-$root_snapshot}" ;;
 	set-default)
+		assert_snapshot "$2"
 		set_default_entry "$2" ;;
 	get-default)
 		get_default_entry "$2" ;;
