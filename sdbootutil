@@ -4911,6 +4911,20 @@ if [ -z "$SYSTEMD_LOG_LEVEL" ] && [ "${verbose:-0}" -gt 1 ]; then
 	export SYSTEMD_LOG_LEVEL
 fi
 
+# The variables documented in the help (PW, KEY, PIN) are read from
+# the environment, so they must be set before the command name.
+# `getopt` moves them to the end of the argument list, where they are
+# indistinguishable from an optional [SNAPSHOT] and silently ignored,
+# so a command like
+#
+#   sdbootutil update-predictions PW=secret --measure-pcr
+#
+# drops the password instead of using it
+for variable_arg in "$@"; do
+	[[ "$variable_arg" =~ ^[A-Za-z_][A-Za-z0-9_]*= ]] || continue
+	err "\"$variable_arg\" is not a command nor an option. Set the variable before the command name: ${variable_arg%%=*}=... ${0##*/} ..."
+done
+
 define_commands
 if [ -z "$1" ]; then
 	helpandquit
