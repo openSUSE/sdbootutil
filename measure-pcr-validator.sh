@@ -60,7 +60,14 @@ exit_with_msg() {
 		echo -e "${WHITE}Use${END} '${LIGHT_BLUE}measure-pcr-validator.ignore=yes${END}' ${WHITE}in cmdline to bypass the check${END}"
 		echo -e "${WHITE}*********************************************************************${END}"
 		echo
-		read -n1 -s -r -t 10 -p $'\e[1;37m*** The system will be halted. Press any key ...\e[0m' || true
+		if [ -t 0 ]; then
+			read -n1 -s -r -t 10 -p $'\e[1;37m*** The system will be halted. Press any key ...\e[0m' || true
+		else
+			# There is no terminal to read from, so only
+			# give some time to read the message
+			echo -ne "${WHITE}*** The system will be halted ...${END}"
+			sleep 10
+		fi
 		echo
 		kill -SIGRTMIN+20 1
 
