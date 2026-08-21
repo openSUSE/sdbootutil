@@ -91,6 +91,9 @@ fi
 state_file="/var/lib/misc/transactional-update.state"
 
 update_predictions=
+# Set only when "update-predictions" is the command, to tell it apart
+# from the predictions that are a side effect of another command
+explicit_predictions=
 
 tracked_devices=()
 
@@ -3940,6 +3943,29 @@ extend_pcr()
 	echo "$digest"
 }
 
+# Create the key pair that signs the PCR 15 prediction, if it is not
+# already there.  Returns 0 only when a new key pair was created: the
+# public key is copied into the initrd by dracut (module-setup.sh), so
+# any initrd generated before this point cannot validate PCR 15
+create_measure_pcr_keys()
+{
+	local private="/var/lib/sdbootutil/measure-pcr-private.pem"
+	local public="/var/lib/sdbootutil/measure-pcr-public.pem"
+
+	[ ! -f "$private" ] || [ ! -f "$public" ] || return 1
+
+	if [ ! -f "$private" ]; then
+		info "Creating the key pair that signs the PCR 15 prediction"
+		# A public key that comes from a different private key
+		# cannot validate anything
+		rm -f "$public"
+		openssl genrsa -out "$private" 4096
+	fi
+	# Writes "writing RSA key" in stderr and -noout is not doing
+	# what I was expecting
+	[ -f "$public" ] || openssl rsa -in "$private" -pubout -out "$public" 2> /dev/null
+}
+
 generate_tpm2_predictions_pcr_15()
 {
 	local devs=()
@@ -4005,6 +4031,15 @@ generate_tpm2_predictions_pcr_15()
 		vks+=("$vk")
 	done
 
+	# The key pair is created during the enrollment, but not when
+	# `--no-measure-pcr` is used.  If PCR 15 is enabled later in
+	# /etc/crypttab there is nothing to sign the prediction with,
+	# and an unsigned prediction also halts the boot
+	local private="/var/lib/sdbootutil/measure-pcr-private.pem"
+	if create_measure_pcr_keys; then
+		warn "The public key is only added to the initrd by 'sdbootutil mkinitrd'"
+	fi
+
 	rm -f /var/lib/sdbootutil/measure-pcr-prediction
 	rm -f /var/lib/sdbootutil/measure-pcr-prediction.sha256
 	local dgsts=("sha1" "sha256" "sha384" "sha512")
@@ -4021,12 +4056,18 @@ generate_tpm2_predictions_pcr_15()
 		echo "$pcr15" >> "/var/lib/sdbootutil/measure-pcr-prediction"
 	done
 
-	if [ -f "/var/lib/sdbootutil/measure-pcr-prediction" ] && [ -f "/var/lib/sdbootutil/measure-pcr-private.pem" ]; then
-		openssl dgst -sha256 \
-			-sign /var/lib/sdbootutil/measure-pcr-private.pem \
-			-out /var/lib/sdbootutil/measure-pcr-prediction.sha256 \
-			/var/lib/sdbootutil/measure-pcr-prediction
-	fi
+	# An unsigned prediction is worse than no prediction at all, as
+	# the ESP can still contain the signature of a previous one
+	openssl dgst -sha256 \
+		-sign "$private" \
+		-out /var/lib/sdbootutil/measure-pcr-prediction.sha256 \
+		/var/lib/sdbootutil/measure-pcr-prediction || {
+		rm -f /var/lib/sdbootutil/measure-pcr-prediction
+		rm -f /var/lib/sdbootutil/measure-pcr-prediction.sha256
+		rm -f "${esp_root}${esp_dst}/measure-pcr-prediction"
+		rm -f "${esp_root}${esp_dst}/measure-pcr-prediction.sha256"
+		err "The PCR 15 prediction cannot be signed with $private"
+	}
 
 	# Register the hash of the parsed crypttab
 	local crypttab_sha1
@@ -4095,12 +4136,14 @@ generate_tpm2_predictions()
 	# keyring, so no password will be asked.  Internally the
 	# function that ask for the volume key password will check
 	# arg_measure_pcr (--measure-pcr)
+	local missing_pcr_15=
 	updated_crypttab || {
 		generate_tpm2_predictions_pcr_15
 		# shellcheck disable=SC2015
 		if ! updated_crypttab || [ ! -f "/var/lib/sdbootutil/measure-pcr-prediction" ]; then
 			warn "File measure-pcr-prediction should be updated"
 			warn "Call sdbootutil update-predictions --measure-pcr"
+			missing_pcr_15=1
 		fi
 	}
 
@@ -4112,6 +4155,17 @@ generate_tpm2_predictions()
 		[ ! -e /var/lib/sdbootutil/measure-pcr-prediction.sha256 ] || \
 			cp /var/lib/sdbootutil/measure-pcr-prediction.sha256 "${esp_root}${esp_dst}"
 	}
+
+	# /etc/crypttab measures PCR 15 but the prediction does not
+	# match it anymore, so `measure-pcr-validator` will halt the
+	# next boot.  Report it to the caller of "update-predictions",
+	# that can be a script that is about to do something
+	# irreversible, like removing the key that is needed to
+	# recompute the prediction.  When the predictions are a side
+	# effect of another command (a kernel or a bootloader update)
+	# the warning is enough, as failing there would also abort the
+	# RPM transaction that triggered it
+	[ -z "$missing_pcr_15" ] || [ -z "$explicit_predictions" ] || return 1
 }
 
 have_tracked_devices()
@@ -4533,15 +4587,10 @@ enroll()
 	esac
 
 	# For predicting PCR 15 we need to sign a file.  Create the
-	# public and private key if missing.  This (as the
-	# /etc/crypttab change) can require a new initrd
+	# public and private key if missing, before the initrd is
+	# regenerated below, as the public key is installed inside it
 	if { [ "$arg_method" = "tpm2" ] || [ "$arg_method" = "tpm2+pin" ]; } && [ -z "$arg_no_measure_pcr" ]; then
-		local private="/var/lib/sdbootutil/measure-pcr-private.pem"
-		local public="/var/lib/sdbootutil/measure-pcr-public.pem"
-		[ -f "$private" ] || openssl genrsa -out "$private" 4096
-		# Writes "writing RSA key" in stderr and -noout is not
-		# doing what I was expecting
-		[ -f "$public" ] || openssl rsa -in "$private" -pubout -out "$public" 2> /dev/null
+		create_measure_pcr_keys || :
 	fi
 
 	# If the crypttab file changed (that is expected), we need to
@@ -5135,7 +5184,8 @@ case "$1" in
 	unenroll)
 		unenroll ;;
 	update-predictions)
-		update_predictions=1 ;;
+		update_predictions=1
+		explicit_predictions=1 ;;
 	*)
 		helpandquit ;;
 esac
