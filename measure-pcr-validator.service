@@ -4,6 +4,12 @@ DefaultDependencies=false
 
 FailureAction=poweroff-immediate
 
+# Without /etc/crypttab there is no device that can measure PCR 15, so
+# there is nothing to validate.  A unit skipped by a condition is
+# considered started successfully, so this also keeps FailureAction
+# away from systems that do not use FDE
+ConditionPathExists=/etc/crypttab
+
 Wants=cryptsetup.target
 After=cryptsetup.target
 Before=initrd-root-device.target
@@ -14,8 +20,13 @@ RemainAfterExit=yes
 ExecStart=/usr/bin/measure-pcr-validator
 Environment=TERM=linux
 ExecStopPost=/bin/sh -c "/usr/bin/plymouth quit 2>/dev/null || :"
-StandardOutput=tty
-StandardInput=tty
+# /dev/console can exist but not be a TTY (a serial console, or a
+# board where no console driver is registered), and then systemd fails
+# the service at the STDIN/STDOUT step, before the validation is even
+# attempted.  With FailureAction that powers off the machine, so do
+# not request a terminal that may not be there
+StandardOutput=journal+console
+StandardInput=null
 
 [Install]
 # If we use RequiredBy we trigger its OnFailure=emergency.target
