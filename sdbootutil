@@ -9,14 +9,23 @@ export LC_ALL=C
 DEBUG_LOG="/var/log/sdbootutil.log"
 verbose=
 
-[[ "$*" =~ "--start-trace-code" ]] && touch "$DEBUG_LOG"
-[[ "$*" =~ "--stop-trace-code" ]] && rm -f "$DEBUG_LOG"
-if [ -f "$DEBUG_LOG" ]; then
+if [[ "$*" =~ "--start-trace-code" ]] && ! touch "$DEBUG_LOG" 2>/dev/null; then
+	echo "Cannot enable the code trace, $DEBUG_LOG is not writable" >&2
+	exit 1
+fi
+if [[ "$*" =~ "--stop-trace-code" ]] && ! rm -f "$DEBUG_LOG" 2>/dev/null; then
+	echo "Cannot disable the code trace, $DEBUG_LOG cannot be removed" >&2
+	exit 1
+fi
+# The trace is only enabled if the log can be opened for writing, so a
+# trace left behind by root does not break the tool for the other users.
+# The completion data is also excluded, as the messages and the trace
+# itself interfere with the shell completion
+if [ "$1" != "_print_bash_completion_data" ] && [ -f "$DEBUG_LOG" ] && { exec 3>>"$DEBUG_LOG"; } 2>/dev/null; then
 	verbose=3
 	echo "The trace of the code is being stored in $DEBUG_LOG" >&2
 	echo "Remove the file or use --stop-trace-code to stop tracing the code" >&2
 	echo "Audit the file before sharing, as secrets can be leaked" >&2
-	exec 3>>"$DEBUG_LOG"
 	export BASH_XTRACEFD=3
 	export PS4='+ \D{%F %T} ${BASH_SOURCE##*/}:${LINENO}:${FUNCNAME[0]:-main}: '
 	set -x

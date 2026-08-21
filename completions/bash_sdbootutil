@@ -65,7 +65,7 @@ _devices()
 
 _sdbootutil_completion()
 {
-	eval "$(sdbootutil _print_bash_completion_data)"
+	eval "$(sdbootutil _print_bash_completion_data 2>/dev/null)"
 	local cur prev words cword image
 	COMPREPLY=()
 	_get_comp_words_by_ref -n : cur prev words cword
