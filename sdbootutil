@@ -1530,6 +1530,12 @@ install_kernel()
 			tries=
 		fi
 
+		# The directory can be missing if the user removed it,
+		# or if the kernel is installed before the bootloader.
+		# Note that `find` fails when the directory is not
+		# present, and `install` does not create it
+		mkdir -p "${boot_root}/loader/entries"
+
 		# The entry can be already present with or without
 		# boot counter.  In any case, if a new `initrd` was
 		# created with a different `sha1`, then this boot
