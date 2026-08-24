@@ -5039,8 +5039,9 @@ eval_bootctl
 root_subvol=""
 subvol_prefix=""
 root_subvol_err=
+is_btrfs_snapshots=
 if [ "$(stat -f -c %T /)" = "btrfs" ] && [ -d /.snapshots ]; then
-	have_snapshots=1
+	is_btrfs_snapshots=1
 	# `btrfs` lives in /usr/sbin, that is not present in every
 	# PATH.  Without this check the only symptom is an empty
 	# `root_subvol`, reported below as a generic "Can't determine
@@ -5053,6 +5054,14 @@ if [ "$(stat -f -c %T /)" = "btrfs" ] && [ -d /.snapshots ]; then
 	root_subvol_err="$(cat "$tmpdir/btrfs.err")" || :
 	rm -f "$tmpdir/btrfs.err"
 	subvol_prefix="${root_subvol%/.snapshots/*}"
+	# The presence of "/.snapshots" is not enough: the system boots
+	# from a snapshot only when the root subvolume is under
+	# "<prefix>/.snapshots/<N>/snapshot", which is also the only
+	# shape that "subvol_prefix" and "running_snapshot" can parse.
+	# A plain "@" root with snapper installed (no rollback layout)
+	# is a regular system, and treating it as a snapshot one builds
+	# paths like "@/.snapshots/@/snapshot" that do not exist
+	[[ "$root_subvol" =~ ^.+/\.snapshots/[0-9]+/snapshot$ ]] && have_snapshots=1
 elif [ -e /.snapshots/1/info.xml ]; then
 	# We can detect when we are in a image building situation
 	# (mkosi) when we are not in btrfs, but there is a snapshots
@@ -5084,7 +5093,7 @@ fi
 [ -n "$arg_arch" ] && firmware_arch="$arg_arch"
 
 [ -n "$esp_root" ] || err "No ESP detected. Legacy system?"
-[ -n "$root_subvol" ] || [ -z "$have_snapshots" ] || \
+[ -n "$root_subvol" ] || [ -z "$is_btrfs_snapshots" ] || \
 	err "Can't determine root subvolume${root_subvol_err:+: $root_subvol_err}"
 [ -n "$firmware_arch" ] || err "Can't determine firmware arch"
 set_image_name
