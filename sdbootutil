@@ -71,15 +71,22 @@ unlock_method=
 
 chroot_dir=
 
+# The output goes to a terminal, so it is read by a person and can
+# carry colors and extra decorations.  When it is captured by another
+# program only the plain data is printed: `transactional-update` reads
+# `list-entries` with `popen` and opens the result as a file name, and
+# `weak-modules2` parses `show-entry` with a command substitution
+interactive=
+[ ! -t 1 ] || interactive=1
+
 color_red=
 color_end=
-# The shell is interactive and the colors haven't been disabled
-# forcefully or the shell is not connected to a terminal but the
-# colors have been forcefully enabled
-if { [ -t 1 ] \
-    && [ "$SYSTEMD_COLORS" != "false" ] && [ "$SYSTEMD_COLORS" != "0" ]; } \
-    || { [ ! -t 1 ] \
-    && [ "$SYSTEMD_COLORS" = "true" ] || [ "$SYSTEMD_COLORS" = "1" ]; }; then
+# SYSTEMD_COLORS can only disable the colors, as documented in the help
+# message.  Honouring a forced "true" would leak escape sequences into
+# the programs above, that inherit the variable from the environment of
+# the caller
+if [ -n "$interactive" ] \
+    && [ "$SYSTEMD_COLORS" != "false" ] && [ "$SYSTEMD_COLORS" != "0" ]; then
 	color_red="\e[31m"
 	color_green="\e[32m"
 	color_yellow="\e[33m"
@@ -210,10 +217,16 @@ helpandquit()
 		           List all kernels related to SNAPSHOT
 
 		list-entries [SNAPSHOT]
-		           List all entries related to SNAPSHOT
+		           List all entries related to SNAPSHOT.  On a
+		           terminal the entry is marked with "+" when it
+		           is the default one, "-" when the system booted
+		           from it, and "*" when it is both
 
 		list-snapshots
-		           List all snapshots
+		           List all snapshots.  On a terminal the snapshot
+		           is marked with "+" when it is the default one,
+		           "-" when the system is running from it, and "*"
+		           when it is both
 
 		list-devices
 		           List encrypted devices that are tracked
@@ -1666,13 +1679,40 @@ list_entries()
 		fi
 	fi
 
-	local isdefault isreported type id root conf title
-	while read -r isdefault isreported type id root conf title; do
+	# `bootctl` builds "isSelected" by matching the entry ID against
+	# "LoaderEntrySelected", but grub2-bls writes the variable without
+	# the ".conf" suffix, so nothing matches there and "isSelected" is
+	# always null.  Read the variable to compare it here too, both
+	# spellings, until grub2-bls is fixed.  Note that the value is
+	# lower-cased by `bli_efi_var_get`
+	local selected=
+	[ -z "$interactive" ] || selected="$(bli_efi_var_get "LoaderEntrySelected")"
+
+	local isdefault isselected isreported type id root conf title marker booted
+	while read -r isdefault isselected isreported type id root conf title; do
 		color=
 		if [ "$isdefault" = "true" ]; then
 			color="$color_bu"
 		elif [ -n "$arg_only_default" ]; then
 			continue
+		fi
+		# The entry that the boot loader reported as booted is
+		# not necessarily the default one, so both are marked
+		# separately.  The marker is kept out of the highlight,
+		# as "list_snapshots" does
+		marker=
+		if [ -n "$interactive" ]; then
+			booted=
+			if [ "$isselected" = "true" ] || [ "${id,,}" = "$selected" ] \
+			    || [ "${id,,}" = "$selected.conf" ]; then
+				booted=1
+			fi
+			if [ "$isdefault" = "true" ]; then
+				marker="+"
+				[ -z "$booted" ] || marker="*"
+			elif [ -n "$booted" ]; then
+				marker="-"
+			fi
 		fi
 		if [ "$isreported" = "false" ]; then
 			color="$color${color_green}"
@@ -1705,8 +1745,8 @@ list_entries()
 		if [ "${#errors[@]}" -gt 0 ]; then
 			echo -e "  ${color_red}${errors[*]}${color_end}" >&2
 		fi
-		echo -e "$color$id${verbose:+: $title}${color_end}"
-	done < <(jq '.[]|[.isDefault, if has("isReported") then .isReported else 0 end, if has("type") then .type else "unknown" end, .id, .root, .path, .showTitle]|join(" ")' -r < "$entryfile")
+		echo -e "$marker$color$id${verbose:+: $title}${color:+$color_end}"
+	done < <(jq '.[]|[.isDefault, .isSelected // false, if has("isReported") then .isReported else 0 end, if has("type") then .type else "unknown" end, .id, .root, .path, .showTitle]|join(" ")' -r < "$entryfile")
 }
 
 show_entry_fields()
@@ -1821,6 +1861,7 @@ list_snapshots()
 	info "Listing snapshots"
 
 	local n=0
+	local marker
 	while read -r n isdefault title; do
 		[ "$n" != "0" ] || continue
 		local id="$n"
@@ -1829,7 +1870,19 @@ list_snapshots()
 		fi
 		update_kernels "$n"
 		[ "$is_bootable" = 1 ] || id="!$id"
-		echo -e "$id $title"
+		# The snapshot the system is running from is not
+		# necessarily the default one, so both are marked
+		# separately
+		marker=
+		if [ -n "$interactive" ]; then
+			if [ "$isdefault" = "true" ]; then
+				marker="+"
+				[ "$n" != "$running_snapshot" ] || marker="*"
+			elif [ "$n" = "$running_snapshot" ]; then
+				marker="-"
+			fi
+		fi
+		echo -e "$marker$id $title"
 	done < <(jq '.root|.[]|[.number, .default, .description]|join(" ")' -r < "$snapperfile")
 }
 
