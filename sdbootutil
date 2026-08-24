@@ -584,9 +584,9 @@ detect_parent()
 	[ "$parent_uuid" != '-' ] || return 0
 
 	local -a parent_subvol_uuid
+	local btrfs_subvol_status=0
 	# shellcheck disable=SC2207
-	parent_subvol_uuid=($(btrfs subvol show -u "$parent_uuid" "${subvol#"${subvol_prefix}"}" 2> /dev/null))
-	local btrfs_subvol_status=$?
+	parent_subvol_uuid=($(btrfs subvol show -u "$parent_uuid" "${subvol#"${subvol_prefix}"}" 2> /dev/null)) || btrfs_subvol_status=$?
 	[ "$btrfs_subvol_status" = 0 ] || return 0
 	parent_subvol="${parent_subvol_uuid[0]}"
 
@@ -1006,8 +1006,8 @@ reuse_initrd()
 	[ -z "$arg_no_reuse_initrd" ] || return 1
 	settle_entry_token "$snapshot"
 
-	conf="$(find_conf_file "$kernel_version" "$snapshot")"
-	local find_conf_status=$?
+	local find_conf_status=0
+	conf="$(find_conf_file "$kernel_version" "$snapshot")" || find_conf_status=$?
 
 	if [ $find_conf_status -ne 0 ]; then
 		# Check if we can reuse the initrd from the parent to
@@ -1015,8 +1015,8 @@ reuse_initrd()
 		detect_parent "$subvol"
 		if [ -n "$parent_subvol" ]; then
 			settle_entry_token "$parent_snapshot"
-			conf="$(find_conf_file "$kernel_version" "$parent_snapshot")"
-			find_conf_status=$?
+			find_conf_status=0
+			conf="$(find_conf_file "$kernel_version" "$parent_snapshot")" || find_conf_status=$?
 		fi
 	fi
 
@@ -1707,7 +1707,10 @@ show_entry_fields()
 	id="$(entry_conf_file "$kernel_version" "$snapshot")"
 
 	local conf
-	conf="$(find_conf_file "$kernel_version" "$snapshot")"
+	# Without collecting the status here `set -e` ends the script
+	# with an empty message when there is no entry for the kernel
+	conf="$(find_conf_file "$kernel_version" "$snapshot")" || \
+		err "Missing boot entry for kernel $kernel_version"
 
 	[ -z "$verbose" ] || echo -e "ID\t$id"
 	local k
@@ -1751,7 +1754,9 @@ update_entry()
 	id="$(entry_conf_file "$kernel_version" "$snapshot")"
 
 	local conf
-	conf="$(find_conf_file "$kernel_version" "$snapshot")"
+	# A missing entry is not an error, but `set -e` would end the
+	# script before the check below
+	conf="$(find_conf_file "$kernel_version" "$snapshot")" || :
 	[ -f "$conf" ] || return 0
 
 	info "Updating boot entry $id"
@@ -2032,14 +2037,17 @@ bootloader_needs_update()
 
 	local bldr_name
 	local v nv
-	v="$(bootloader_version)"
+	# The status of the next commands is checked below, so it must
+	# be collected in the same line: `set -e` would end the script
+	# before the check, and without any message
+	v="$(bootloader_version)" || :
 	[ -n "$v" ] || return 1
 	info "Deployed version $v"
-	nv="$(bootloader_version "$(find_bootloader "$snapshot")")"
+	nv="$(bootloader_version "$(find_bootloader "$snapshot")")" || :
 	[ -n "$nv" ] || return 1
 	info "System version $nv"
-	systemd-analyze compare-versions "$v" "$nv" 2> /dev/null
-	local status="$?"
+	local status=0
+	systemd-analyze compare-versions "$v" "$nv" 2> /dev/null || status="$?"
 	bldr_name=$(bootloader_name "$snapshot")
 	if [ "$status" = "11" ]; then
 		info "$bldr_name is newer than system bootloader"
@@ -2145,8 +2153,10 @@ install_extra_entries()
 	for i in "${subvol:1}"/usr/lib/sdbootutil/entries.d/*.conf; do
 		[ -e "${subvol:1}/etc/sdbootutil/entries.d/$(basename "$i")" ] && continue
 		dbg_cat "$i"
-		efi="$(install_extra_entry "$subvol" "$i")"
-		install_extra_entry_status=$?
+		# A broken entry is reported and skipped, but `set -e`
+		# would end the script before the status is checked
+		install_extra_entry_status=0
+		efi="$(install_extra_entry "$subvol" "$i")" || install_extra_entry_status=$?
 		[ "$install_extra_entry_status" -eq 0 ] || {
 			warn "Error installing extra entry $(basename "$i")"
 		}
@@ -2155,8 +2165,8 @@ install_extra_entries()
 
 	for i in "${subvol:1}"/etc/sdbootutil/entries.d/*.conf; do
 		dbg_cat "$i"
-		efi="$(install_extra_entry "$subvol" "$i")"
-		install_extra_entry_status=$?
+		install_extra_entry_status=0
+		efi="$(install_extra_entry "$subvol" "$i")" || install_extra_entry_status=$?
 		[ "$install_extra_entry_status" -eq 0 ] || {
 			warn "Error installing extra entry $(basename "$i")"
 		}
@@ -3569,9 +3579,14 @@ get_final_pcrs()
 	# Generate a JSON prediction, to get the final PCRs that will
 	# participate in the policy.  To avoid the PolicyOR limit, we
 	# filter the PCRs with more that 8 values
+	#
+	# The status is collected in the same command: with `set -e` a
+	# failing command substitution ends the shell before the next
+	# line can read `$?`, and the error message that is in $tmpfile
+	# would never be printed
 	local output
-	output="$(predict_pcrs "$pcrs")"
-	local pcrlock_status=$?
+	local pcrlock_status=0
+	output="$(predict_pcrs "$pcrs")" || pcrlock_status=$?
 
 	if [ "$pcrlock_status" -ne 0 ]; then
 		warn "Error creating the systemd-pcrlock prediction!\n$(cat "$tmpfile")"
@@ -3581,8 +3596,8 @@ get_final_pcrs()
 	# Predict again if some component was masked, as the previous
 	# prediction was done with it in place
 	if mask_unmatched_components; then
-		output="$(predict_pcrs "$pcrs")"
-		pcrlock_status=$?
+		pcrlock_status=0
+		output="$(predict_pcrs "$pcrs")" || pcrlock_status=$?
 
 		if [ "$pcrlock_status" -ne 0 ]; then
 			warn "Error creating the systemd-pcrlock prediction!\n$(cat "$tmpfile")"
@@ -3834,9 +3849,12 @@ generate_tpm2_predictions_pcrlock()
 	# prediction unchanged
 	[ -z "$arg_force" ] || extra+=("--force")
 
+	# Like in `get_final_pcrs`, the status cannot be read in the next
+	# line: `set -e` would end the script here, without printing the
+	# reason that `systemd-pcrlock` left in $tmpfile
 	local output
-	output="$(PIN="$pin" pcrlock --pcr="$final_pcrs" "${extra[@]}" make-policy 2>"$tmpfile")"
-	local pcrlock_status=$?
+	local pcrlock_status=0
+	output="$(PIN="$pin" pcrlock --pcr="$final_pcrs" "${extra[@]}" make-policy 2>"$tmpfile")" || pcrlock_status=$?
 
 	if [ "$pcrlock_status" -ne 0 ]; then
 		warn "Error creating the systemd-pcrlock policy!\n$(cat "$tmpfile")"
@@ -4050,7 +4068,11 @@ generate_tpm2_predictions_pcr_15()
 		pcr15="$(printf '0%.0s' $(seq 1 "${sizes[i]}"))"
 		for j in "${!msgs[@]}"; do
 			hmac="$(echo -ne "${msgs[j]}" | /usr/libexec/sdbootutil/uhmac "${dgsts[i]}" <(echo "${vks[j]}"))"
-			pcr15="$(extend_pcr "${dgsts[i]}" "$pcr15" "$hmac")"
+			# `extend_pcr` reports why it failed, but with
+			# `set -e` the script would end here, leaving
+			# an incomplete and unsigned prediction behind.
+			# Drop only the affected hash algorithm
+			pcr15="$(extend_pcr "${dgsts[i]}" "$pcr15" "$hmac")" || continue 2
 			dbg "${msgs[j]} (${dgsts[i]}): $hmac"
 		done
 		echo "$pcr15" >> "/var/lib/sdbootutil/measure-pcr-prediction"
