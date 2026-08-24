@@ -5015,9 +5015,20 @@ eval_bootctl
 
 root_subvol=""
 subvol_prefix=""
+root_subvol_err=
 if [ "$(stat -f -c %T /)" = "btrfs" ] && [ -d /.snapshots ]; then
 	have_snapshots=1
-	root_subvol=$(btrfs subvol show / 2> /dev/null | head -1)
+	# `btrfs` lives in /usr/sbin, that is not present in every
+	# PATH.  Without this check the only symptom is an empty
+	# `root_subvol`, reported below as a generic "Can't determine
+	# root subvolume" that hides the real cause
+	command -v btrfs > /dev/null || \
+		err "btrfs command not found. Install btrfsprogs or add /usr/sbin to the PATH"
+	# Keep the error of the command, to report it together with
+	# the failed detection below
+	root_subvol=$(btrfs subvol show / 2> "$tmpdir/btrfs.err" | head -1)
+	root_subvol_err="$(cat "$tmpdir/btrfs.err")" || :
+	rm -f "$tmpdir/btrfs.err"
 	subvol_prefix="${root_subvol%/.snapshots/*}"
 elif [ -e /.snapshots/1/info.xml ]; then
 	# We can detect when we are in a image building situation
@@ -5050,7 +5061,8 @@ fi
 [ -n "$arg_arch" ] && firmware_arch="$arg_arch"
 
 [ -n "$esp_root" ] || err "No ESP detected. Legacy system?"
-[ -n "$root_subvol" ] || [ -z "$have_snapshots" ] || err "Can't determine root subvolume"
+[ -n "$root_subvol" ] || [ -z "$have_snapshots" ] || \
+	err "Can't determine root subvolume${root_subvol_err:+: $root_subvol_err}"
 [ -n "$firmware_arch" ] || err "Can't determine firmware arch"
 set_image_name
 
