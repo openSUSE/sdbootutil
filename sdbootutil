@@ -3925,12 +3925,26 @@ generate_tpm2_predictions_pcrlock()
 	# prediction unchanged
 	[ -z "$arg_force" ] || extra+=("--force")
 
+	# `systemd-pcrlock` skips the update when the new prediction is
+	# identical to the one stored in the current policy, and it does
+	# so before authenticating against the TPM2.  The recovery PIN is
+	# then never used, and an incorrect one is silently accepted.
+	# The policy file is rewritten only when the NVIndex is updated,
+	# so it can be used to tell both cases apart
+	local policy_digest=
+	[ ! -e /var/lib/systemd/pcrlock.json ] || \
+		policy_digest="$(sha256sum < /var/lib/systemd/pcrlock.json)"
+
 	# Like in `get_final_pcrs`, the status cannot be read in the next
 	# line: `set -e` would end the script here, without printing the
 	# reason that `systemd-pcrlock` left in $tmpfile
 	local output
 	local pcrlock_status=0
 	output="$(PIN="$pin" pcrlock --pcr="$final_pcrs" "${extra[@]}" make-policy 2>"$tmpfile")" || pcrlock_status=$?
+
+	# `systemd-pcrlock` explains in stderr what it did, but the
+	# messages are discarded when the command succeeds
+	dbg_cat "$tmpfile"
 
 	if [ "$pcrlock_status" -ne 0 ]; then
 		warn "Error creating the systemd-pcrlock policy!\n$(cat "$tmpfile")"
@@ -3968,7 +3982,22 @@ generate_tpm2_predictions_pcrlock()
 	cp /var/lib/systemd/pcrlock.json "${esp_root}${esp_dst}" || \
 		warn "Cannot copy the pcrlock policy into the ESP"
 
-	echo "NVIndex policy created"
+	# With --force the NVIndex is always rewritten, and the policy
+	# file can still be identical: the serializations of the NVIndex,
+	# the SRK and the sealed PIN are reused from the old policy, so
+	# only the prediction can make it different
+	if [ -n "$arg_force" ] || \
+	    [ "$policy_digest" != "$(sha256sum < /var/lib/systemd/pcrlock.json)" ]; then
+		echo "NVIndex policy created"
+	else
+		info "The prediction did not change, so the NVIndex was not updated"
+		# Only the TPM2 can tell if the recovery PIN is
+		# correct, and it is asked to do it when the NVIndex is
+		# written.  Without this message a wrong PIN looks
+		# accepted, as the command succeeds
+		[ -z "$pin" ] || \
+			warn "The recovery PIN was not needed, so it was not validated. Use --force to rewrite the NVIndex with it"
+	fi
 }
 
 get_device_password()
