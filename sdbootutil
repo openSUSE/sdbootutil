@@ -2283,17 +2283,23 @@ install_bootloader()
 		local escaped_entry="${entry//\//\\\\}"
 		efibootmgr | grep -q "Boot.*${boot_manager}.*${escaped_entry}" || efibootmgr -q --create --disk "$drive" --part "$partno" --label "${boot_manager} ($bldr_name)" --loader "$entry" || true
 
-		# Make it the first option
+		# Make it the first option.  A system that never booted
+		# from disk can have no `BootOrder` at all
 		local boot_order
-		boot_order="$(efibootmgr | grep BootOrder)"
+		boot_order="$(efibootmgr | grep BootOrder)" || :
 		boot_order="${boot_order#BootOrder: }"
 
+		# There can be more than one match, for example a stale
+		# entry left behind by a previous installation.
+		# `efibootmgr` expects a single ID, so take the first
+		# active one (the `*` marker), as an inactive entry is
+		# never booted by the firmware
 		local boot_entry
-		boot_entry="$(efibootmgr | grep "Boot.*${boot_manager}.*${escaped_entry}")"
-		boot_entry="${boot_entry%\* *}"
-		boot_entry="${boot_entry#Boot}"
+		boot_entry="$(efibootmgr | grep -m1 "Boot[0-9A-Fa-f]\{4\}\*.*${boot_manager}.*${escaped_entry}")" || :
+		# The ID is printed as `BootXXXX`
+		boot_entry="${boot_entry:4:4}"
 
-		efibootmgr -q -D -o "$boot_entry,$boot_order" || true
+		[ -z "$boot_entry" ] || efibootmgr -q -D -o "$boot_entry${boot_order:+,$boot_order}" || true
 	fi
 
 	# This action will require to update the PCR predictions
