@@ -3622,18 +3622,23 @@ get_final_pcrs()
 	local pcrs_policyor
 	pcrs_policyor="$(jq -r '[.sha256[] | select(.values | length > 8) | .pcr] | join(",")' <<<"$output")"
 
+	# The lists are comma separated but do not end with a comma, so
+	# `read -d ','` would always drop the last PCR
 	local i
+	local -a list
 	local -A pcrs_policy_table
-	while read -r -d ',' i; do
+	IFS=',' read -r -a list <<<"$pcrs_policy"
+	for i in "${list[@]}"; do
 		pcrs_policy_table[$i]=1
-	done <<<"$pcrs_policy"
+	done
 
 	local -A pcrs_policy_missing_table
-	while read -r -d ',' i; do
+	IFS=',' read -r -a list <<<"$pcrs"
+	for i in "${list[@]}"; do
 		if [ -z "${pcrs_policy_table[$i]}" ]; then
 			pcrs_policy_missing_table[$i]=1
 		fi
-	done <<<"$pcrs"
+	done
 
 	local pcrs_policy_missing
 	pcrs_policy_missing="$(IFS=","; echo "${!pcrs_policy_missing_table[*]}")"
