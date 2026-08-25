@@ -770,12 +770,6 @@ update_entries_for_snapshot()
 	update_entries_for_subvol "${subvol_prefix}/.snapshots/$n/snapshot"
 }
 
-update_entries_for_snapshot_invert()
-{
-	local n="$1"
-	update_entries_for_subvol "${subvol_prefix}/.snapshots/$n/snapshot" "not"
-}
-
 update_entries_for_this_system()
 {
 	local root
@@ -1175,147 +1169,190 @@ pending_devicetree_size()
 
 boot_space()
 {
-	echo $(($(findmnt --noheadings --bytes -o SIZE --target "${boot_root}" | head -n 1) / 1024))
+	local size
+	size="$(findmnt --noheadings --bytes -o SIZE --target "${boot_root}" | head -n 1)"
+	# Called from a command substitution, so `err` only ends the
+	# sub-shell and the caller can detect the failure via the exit
+	# status
+	[[ "$size" =~ ^[0-9]+$ ]] || err "Can't determine the size of ${boot_root}"
+	echo $((size / 1024))
 }
 
 boot_free_space()
 {
-	echo $(($(findmnt --noheadings --bytes -o AVAIL --target "${boot_root}" | head -n 1) / 1024))
+	local avail
+	avail="$(findmnt --noheadings --bytes -o AVAIL --target "${boot_root}" | head -n 1)"
+	[[ "$avail" =~ ^[0-9]+$ ]] || err "Can't determine the free space in ${boot_root}"
+	echo $((avail / 1024))
 }
 
-regex_snapshot_ids_for_free_space()
+# The snapshots whose boot entries must be preserved: the default and
+# the active ones, plus the snapshot from where the kernel is being
+# installed, if any.  Printed one number per line
+snapshots_in_use()
 {
 	local snapshot="$1"
 
-	[ -s "$snapperfile" ] || update_snapper
+	[ -n "$have_snapshots" ] || return 0
 
-	# Select the default and the active snapshots.  Also include
-	# one extra snapshot if it is passed as a parameter, that
-	# refers to the snapshot from where we are installing the
-	# kernel
-	local -A snapshots
-	[ -z "$snapshot" ] || snapshots["$snapshot"]=1
-	[ -z "$root_snapshot" ] || snapshots["$root_snapshot"]=1
-	local id
-	while read -r id; do
-		snapshots[$id]=1
-	done < <(jq -r '.root[]|select(.active==true or .default==true)|.number' "$snapperfile")
-
-	local re
-	if [ "${#snapshots[@]}" = 1 ]; then
-		re="${!snapshots[*]}"
-	else
-		IFS='|' eval re='"(?:${!snapshots[*]})"'
-	fi
-
-	echo "$re"
+	{
+		[ -z "$snapshot" ] || echo "$snapshot"
+		[ -z "$root_snapshot" ] || echo "$root_snapshot"
+		[ -s "$snapperfile" ] || update_snapper
+		jq -r '.root[]|select(.active==true or .default==true)|.number' "$snapperfile"
+	} | sort -un
 }
 
-select_entries_for_free_space()
+# Print the ids of the boot entries that can be removed to make room in
+# the ESP, in the order in which they should be removed.
+#
+# `bootctl unlink` garbage collects the kernel and the initrd only when
+# the last entry that references them is removed, so entries are peeled
+# off one snapshot at a time and the free space is re-evaluated after
+# each removal.  Removing more than needed would leave older snapshots
+# without a bootable entry.
+#
+# The order is:
+#
+#   1. entries of the snapshots that are not in use, oldest snapshot
+#      first and, inside a snapshot, oldest kernel first
+#   2. entries of "root_snapshot" (the default snapshot, or the running
+#      one), as a last resort
+#
+# Never returned, and so never removed:
+#
+#   - the default and the selected entries
+#   - the entries of the snapshots in use, except the ones of
+#     "root_snapshot", that are last in the list
+#
+# This covers both layouts.  In MicroOS the default snapshot is the
+# newest one and in Tumbleweed it is the oldest one, but in both cases
+# the snapshots that are not in use are leftovers that can be removed
+# from the oldest to the newest.  Snapshots created after a rollback
+# fall in the same group and are removed the same way.
+#
+# The snapshot and the kernel version are read from "options" and
+# "linux", which sdbootutil writes itself, and only then from "version"
+# and "id".  An entry where none of them can be parsed (a kernel from a
+# third party repository, an entry written by another tool, a system
+# without snapshots) is still a candidate, but is sorted last inside
+# its group: it can be removed, yet only after the entries that can be
+# ordered with confidence
+removable_entries()
 {
 	local snapshot="$1"
 
-	# Extend the entry file with a "priority" field, based on the
-	# ordered snapshot IDs, and the "kernel" field, based on the
-	# kernel version.  Note that the textual suffix (-default,
-	# -slowroll) is removed and does not participate in the
-	# ordering
-	#
-	# The final list is a join of two list.  One that contains all
-	# the entries that belong to the safe-to-delete snapshots, and
-	# another one that contain the entries from the default
-	# snapshot, that is not the default entry.  This last sub-list
-	# has the higher priority value, so when sorted get the last
-	# order
-	#
-	# Expected order for removal:
-	#
-	# MicroOS
-	#   - The default / active snapshot is always the last one,
-	#     except when we do a rollback
-	#   - The default boot entry should never be removed
-	#   - The removal order is sort(snapshot_id, kernel), except
-	#     for entries that belong to the default snapshot.  Those
-	#     should be removed as a last resort
-	#   - If there are snapshots after the default and active one,
-	#     they are remainigs from a rollback, and they can be
-	#     removed in the same order (ideally early)
-	#
-	# Tumbleweed
-	#   - The default / active snapshot is always the first one,
-	#     except when we do a rollback
-	#   - The default boot entry should never be removed
-	#   - The removal order is sort(snapshot_id, kernel), the same
-	#     as in MicroOS
-	#   - If there are snapshot before the default and active one,
-	#     they are remainings from a rollback and they can be
-	#     removed in the same order
+	local in_use
+	mapfile -t in_use < <(snapshots_in_use "$snapshot")
+	dbg "Snapshots that keep their boot entries: ${in_use[*]:-none}"
 
-	# Select the entries that are safe to remove, i.e. the ones
-	# that are not the default, the active nor the one from where
-	# we are extracting the kernel (that usually is the default or
-	# the active one)
-	update_entries_for_snapshot_invert "$(regex_snapshot_ids_for_free_space "$snapshot")"
-	jq 'map(. + {"priority": .version | scan("(\\d+)@") | .[] | tonumber, "kernel": .version | scan(".*@(?:(\\d+).(\\d+).(\\d+)-(\\d+))") | map(. | tonumber)})' < "$entryfile" > "${entryfile}.ext-1"
+	update_entries_for_this_system
 
-	# The name is confusing.  The maximum priority is the minimal
-	# one once is sorted by priority
-	local max_priority
-	read -r max_priority <<<"$(jq -r 'max_by(.priority)|.priority' < "${entryfile}.ext-1")"
-	((++max_priority))
+	# Six sort columns are emitted, and the last one is the id:
+	#
+	#   1. 0 for a snapshot that is not in use, 1 for "root_snapshot"
+	#   2. 0 if the snapshot number is known, 1 if it is not
+	#   3. the snapshot number
+	#   4. 0 if the kernel version is known, 1 if it is not
+	#   5. the kernel version
+	#   6. the id, to make the order stable
+	#
+	# The columns are never empty, as `read` and `sort` would
+	# collapse consecutive tabs and shift the fields
+	jq -r --arg in_use "${in_use[*]}" --arg last "$root_snapshot" '
+		def snapshot_of:
+			((.options // "") | capture("rootflags=subvol=[^ ]*/\\.snapshots/(?<n>[0-9]+)/snapshot") | .n)
+			// ((.version // "") | capture("^(?<n>[0-9]+)@") | .n)
+			// ((.id // "") | capture("-(?<n>[0-9]+)(\\+[0-9]+(-[0-9]+)?)?\\.conf$") | .n)
+			// "";
+		def kernel_of:
+			((.linux // "") | capture("^/[^/]+/(?<k>[^/]+)/[^/]+$") | .k)
+			// ((.version // "") | capture("@(?<k>.+)$") | .k)
+			// "";
 
-	# From the no-safe ones, we can remove some entries from the
-	# default entry (the active is the one under development in
-	# MicroOS)
-	update_entries_for_snapshot "$root_snapshot"
-	jq --arg max_priority "$max_priority" 'map(. + {"priority": $max_priority | tonumber, "kernel": .version | scan(".*@(?:(\\d+).(\\d+).(\\d+)-(\\d+))") | map(. | tonumber)})' < "$entryfile" > "${entryfile}.ext-2"
-
-	# The default boot entry should be in the second list, but
-	# puting the filter here guarantees that it will not appears
-	# in the final list
-	jq --slurp 'add|[.[]|select(.isDefault==false)]' "${entryfile}.ext-1" "${entryfile}.ext-2" > "$entryfile"
-	dbg "Added priority and kernel version to entry file (for free space)"
-	dbg_cat "$entryfile"
+		($in_use | split(" ") | map(select(. != ""))) as $in_use
+		| .[]
+		| select(.isDefault != true and .isSelected != true)
+		| snapshot_of as $s
+		| kernel_of as $k
+		| select(($in_use | index($s)) == null or $s == $last)
+		| [ (if $s == $last then 1 else 0 end),
+		    (if $s == "" then 1 else 0 end),
+		    (if $s == "" then 0 else ($s | tonumber) end),
+		    (if $k == "" then 1 else 0 end),
+		    (if $k == "" then "-" else $k end),
+		    .id ]
+		| @tsv
+	' < "$entryfile" |
+		sort -t$'\t' -k1,1n -k2,2n -k3,3n -k4,4n -k5,5V -k6,6 |
+		cut -f6
 }
 
+# Try to make room in the ESP for "required_size" KB.  Note that the
+# caller collects the exit status (`make_free_space ... || err ...`),
+# so `set -e` is not active here and every failure must be reported,
+# or it will be presented as a lack of space
 make_free_space()
 {
 	local snapshot="$1"
 	local required_size="$2"
 
-	local required_size_extra
-	required_size_extra=$(("$(boot_space)" * ESP_FREE_SPACE / 100))
+	[[ "$required_size" =~ ^[0-9]+$ ]] || {
+		warn "Can't determine the size of the new kernel and initrd"
+		return 1
+	}
+
+	local total_space free_space
+	total_space="$(boot_space)" || return 1
+	free_space="$(boot_free_space)" || return 1
+
+	# The extra size is a reserve that sdbootutil tries to keep
+	# free in the ESP.  It is a goal, not a requirement: it must
+	# never block the installation of a kernel that still fits
+	local required_size_extra wanted_size
+	required_size_extra=$((total_space * ESP_FREE_SPACE / 100))
+	wanted_size=$((required_size + required_size_extra))
 
 	info "Required free space in ESP: ${required_size}KB + ${required_size_extra}KB (${ESP_FREE_SPACE}% ESP size)"
 
-	required_size=$((required_size + required_size_extra))
-
 	# If there is already free space, shortcut the code
-	local free_space
-	free_space="$(boot_free_space)"
-	[ "$required_size" -gt "$free_space" ] || return 0
+	[ "$wanted_size" -gt "$free_space" ] || return 0
 
 	# "Cleaning /boot/efi" message is presented via stderr
 	dbg "Calling bootctl cleanup"
-	bootctl -q cleanup 2> /dev/null
+	bootctl -q cleanup 2> /dev/null || warn "Failed to clean up ${boot_root}"
 
-	select_entries_for_free_space "$snapshot"
-
+	# Remove the entries one by one, from the least to the most
+	# valuable one, until there is enough space.  It is re-evaluated
+	# after every removal, as `bootctl unlink` frees the kernel and
+	# the initrd only when the last entry that references them is
+	# gone
 	local id
 	while read -r id; do
-		free_space="$(boot_free_space)"
+		free_space="$(boot_free_space)" || return 1
 		dbg "Free space in the ESP: $free_space KB"
-		if [ "$required_size" -gt "$free_space" ]; then
-			info "Removing boot entry $id"
-			bootctl unlink "$id"
-		else
-			return 0
-		fi
-	done < <(jq -r 'sort_by(.priority, .kernel) | .[] | .id' < "$entryfile")
+		[ "$wanted_size" -gt "$free_space" ] || return 0
+		info "Removing boot entry $id"
+		bootctl unlink "$id" || warn "Failed to remove the boot entry $id"
+	done < <(removable_entries "$snapshot")
 
-	free_space="$(boot_free_space)"
+	free_space="$(boot_free_space)" || return 1
 	dbg "Free space in the ESP after deallocation: $free_space KB"
-	[ "$required_size" -lt "$free_space" ]
+
+	[ "$wanted_size" -gt "$free_space" ] || return 0
+
+	# The reserve could not be honoured, but the new kernel and
+	# initrd still fit.  Warn about it, as the next installation
+	# can fail, but do not block this one
+	[ "$required_size" -gt "$free_space" ] || {
+		warn "Only ${free_space}KB free in ${boot_root}, below the ${ESP_FREE_SPACE}% reserve"
+		warn "Remove the old kernels, or increase the size of ${boot_root}"
+		return 0
+	}
+
+	warn "Needed ${required_size}KB in ${boot_root}, but only ${free_space}KB are free"
+	warn "There are no more boot entries that can be removed automatically"
+	return 1
 }
 
 make_free_space_for_kernel()
@@ -1750,8 +1787,9 @@ cleanup_entries()
 	dbg "Calling bootctl cleanup"
 	bootctl -q cleanup 2> /dev/null
 
-	# Guarantee ESP_FREE_SPACE
-	make_free_space "${1:-$root_snapshot}" "0"
+	# Guarantee ESP_FREE_SPACE.  Not being able to reach it is not
+	# an error here: nothing is going to be installed
+	make_free_space "${1:-$root_snapshot}" "0" || warn "Can't free space in ${boot_root}"
 }
 
 list_entries()
@@ -1928,7 +1966,7 @@ update_all_entries()
 		return 0
 	}
 
-	make_free_space "$snapshot" 1024
+	make_free_space "$snapshot" 1024 || warn "Can't free space in ${boot_root}"
 
 	if [ -n "$snapshot" ]; then
 		update_entries_for_snapshot "$snapshot"
