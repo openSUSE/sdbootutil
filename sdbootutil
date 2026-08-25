@@ -838,6 +838,16 @@ find_conf_file()
 	return 1
 }
 
+# There is no type#1 entry in the ESP.  Note that "nullglob" makes no
+# difference between an empty and a missing directory, which is what
+# the caller expects: both mean that no kernel was installed yet
+no_boot_entries()
+{
+	local confs=("${boot_root}/loader/entries/"*.conf)
+
+	[ "${#confs[@]}" -eq 0 ]
+}
+
 settle_entry_token()
 {
 	local snapshot="$1"
@@ -1342,41 +1352,98 @@ resolve_devicetree_source()
 	echo "$devicetree_source"
 }
 
+# Detect when the script is not operating over the system that is
+# running, but over one that is mounted somewhere else and entered via
+# `chroot` (the installer, or a `zypper --root` transaction), or over
+# an image that is being built inside a container
+foreign_system()
+{
+	[ -z "$in_buildroot" ] || return 0
+
+	# `--chroot` compares "/" with "/proc/1/root", and reports a
+	# chroot also when "/proc" is not mounted and the comparison
+	# cannot be made.  Both answers are the ones that the caller
+	# expects: without "/proc" there is no "/proc/cmdline" to take a
+	# decision about either
+	systemd-detect-virt -q --chroot && return 0
+	systemd-detect-virt -q --container && return 0
+
+	return 1
+}
+
+# List every file that contributes to the kernel command line of the
+# entry of "subvol", in the order that they have to be aggregated: the
+# first configuration file that is found, followed by the drop-in
+# snippets that extend it.  Fails when the system does not configure a
+# command line in any of them
+kernel_cmdline_files()
+{
+	local subvol="$1"
+
+	local sources=("${subvol:1}/etc/kernel/cmdline" "${subvol:1}/usr/lib/kernel/cmdline" /etc/kernel/cmdline /usr/lib/kernel/cmdline)
+	# "/proc/cmdline" is the command line of the kernel that is
+	# running, so it is a valid last resort only when the entry
+	# belongs to the system that is running.  Inside the installer it
+	# describes the installation medium, and parameters like
+	# "Y2DEBUG=1", "linuxrc.debug" or "console=ttyS0" would be
+	# inherited by the installed system, that would also miss the
+	# ones that the installer is expected to provide, like "quiet"
+	if foreign_system; then
+		dbg "Ignoring /proc/cmdline: not the running system"
+	else
+		sources+=(/proc/cmdline)
+	fi
+
+	local found=
+	local i
+	for i in "${sources[@]}"; do
+		[ -f "$i" ] || continue
+		echo "$i"
+		found=1
+		break
+	done
+
+	# A drop-in in "/etc" replaces the one with the same name in
+	# "/usr", and an empty one is a way of masking it
+	for i in "${subvol:1}"/usr/kernel/cmdline.d/* /usr/kernel/cmdline.d/*; do
+		[ -e "${subvol:1}/etc/kernel/cmdline.d/$(basename "$i")" ] && continue
+		[ -s "$i" ] || continue
+		echo "$i"
+		found=1
+	done
+
+	for i in "${subvol:1}"/etc/kernel/cmdline.d/* /etc/kernel/cmdline.d/*; do
+		[ -s "$i" ] || continue
+		echo "$i"
+		found=1
+	done
+
+	[ -n "$found" ]
+}
+
 create_boot_options() {
 	local subvol="$1"
 	local cmdline
 	local boot_options
-	for i in "${subvol:1}/etc/kernel/cmdline" "${subvol:1}/usr/lib/kernel/cmdline" /etc/kernel/cmdline /usr/lib/kernel/cmdline /proc/cmdline; do
-		[ -f "$i" ] || continue
-		dbg_cat "$i"
-		while read -r line; do
-			[[ "$line" == '#'* ]] && continue
-			cmdline="${cmdline:+$cmdline }${line}"
-		done < "$i"
-		break
-	done
 
-	for i in "${subvol:1}"/usr/kernel/cmdline.d/* /usr/kernel/cmdline.d/*; do
-		[ -e "${subvol:1}/etc/kernel/cmdline.d/$(basename "$i")" ] && continue
+	local cmdline_files=()
+	mapfile -t cmdline_files < <(kernel_cmdline_files "$subvol")
+
+	local i
+	for i in "${cmdline_files[@]}"; do
 		dbg_cat "$i"
-		[ -s "$i" ] || continue
 		while read -r line; do
 			[[ "$line" == '#'* ]] && continue
 			cmdline="${cmdline:+$cmdline }${line}"
 		done < "$i"
 	done
 
-	for i in "${subvol:1}"/etc/kernel/cmdline.d/* /etc/kernel/cmdline.d/*; do
-		dbg_cat "$i"
-		[ -s "$i" ] || continue
-		while read -r line; do
-			[[ "$line" == '#'* ]] && continue
-			cmdline="${cmdline:+$cmdline }${line}"
-		done < "$i"
-	done
-
-	[ -z "$cmdline" ] || boot_options="$(echo "$cmdline" | sedrootflags "$subvol")"
-	echo "$boot_options"
+	# Now that "/proc/cmdline" is not always a valid fallback there
+	# can be no command line at all.  Generate the options anyway:
+	# "sedrootflags" adds "root=" and "rootflags=", which are the
+	# minimum required to boot the system
+	boot_options="$(echo "$cmdline" | sedrootflags "$subvol")"
+	echo "${boot_options# }"
 }
 
 install_kernel()
@@ -1392,6 +1459,30 @@ install_kernel()
 
 	info "Installing kernel $kernel_version"
 	dbg_var "snapshot"
+
+	# The RPM triggers install the kernel while the system is still
+	# being installed, before the installer wrote
+	# "/etc/kernel/cmdline".  The entry created now would carry a
+	# command line that is not the one of the installed system, and
+	# the initrd would be generated from a system that is not yet
+	# configured.  Skip the installation: the installer calls
+	# "add-all-kernels" once the system is set up.  An empty ESP is
+	# what tells this situation apart from a configured system where
+	# the administrator removed "/etc/kernel/cmdline"
+	#
+	# The subvolume is resolved like the one used later to generate
+	# the options, so both look at the same files
+	local cmdline_subvol="$subvol"
+	[ -z "$in_buildroot" ] || cmdline_subvol="${subvol_prefix}/.snapshots/${snapshot}/snapshot"
+	[ -n "$arg_force" ] || kernel_cmdline_files "$cmdline_subvol" > /dev/null || ! no_boot_entries || {
+		# Building an image is a single pass: nothing will
+		# install the kernel later, so a missing command line
+		# is a configuration error and not a transient state
+		[ -z "$in_buildroot" ] || err "No kernel command line configured for $kernel_version"
+		warn "The system seems to be not fully configured (no kernel command line)"
+		warn "Kernel $kernel_version will not be installed"
+		return 0
+	}
 
 	[ -z "$TRANSACTIONAL_UPDATE" ] || [ -n "$arg_force" ] || {
 		warn "Inside transactional-update. Installing kernels must be done outside the transaction"
