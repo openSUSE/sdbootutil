@@ -182,7 +182,11 @@ do_enroll() {
 	fi
 
 	[ -z "$with_fido2" ] || {
-		d --infobox "Enrolling FIDO2 ..." 3 40
+		# systemd-cryptenroll requires the presence of the user
+		# on the security token, but it prints the request in
+		# the output that is captured here, so the user needs
+		# to be warned in advance
+		d --infobox "Enrolling FIDO2 ...\n\nConfirm the presence on the security token when it blinks" 6 60
 		out="$(run sdbootutil enroll --method=fido2 2>&1)"
 		r="$?"
 		[ $r -eq 0 ] || {
