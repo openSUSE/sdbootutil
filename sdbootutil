@@ -4485,8 +4485,10 @@ check_enrolled()
 	local kind="${2:?}"
 	local header="${3:?}"
 
-	[ "$header" != "$(luks_header "$dev")" ] && have_slot "$dev" "$kind" || \
-		err "systemd-cryptenroll reported no error, but $dev was not enrolled with $kind"
+	[ "$header" != "$(luks_header "$dev")" ] && have_slot "$dev" "$kind" || {
+		warn "systemd-cryptenroll reported no error, but $dev was not enrolled with $kind"
+		return 1
+	}
 }
 
 has_signed_pcr_policy()
@@ -4666,7 +4668,7 @@ enroll_tpm2()
 	       "${extra_args[@]}" \
 	       --tpm2-pcrlock=/var/lib/systemd/pcrlock.json \
 	       "$dev" || return 1
-	check_enrolled "$dev" "tpm2" "$header"
+	check_enrolled "$dev" "tpm2" "$header" || return 1
 
 	# Not all PCR predictions match the current system state and
 	# will be excluded from the policy. Trigger an update on the
@@ -4690,7 +4692,7 @@ enroll_fido2()
 	header="$(luks_header "$dev")"
 
 	systemd-cryptenroll --wipe-slot=fido2 --fido2-device=auto "${extra_args[@]}" "$dev" || return 1
-	check_enrolled "$dev" "fido2" "$header"
+	check_enrolled "$dev" "fido2" "$header" || return 1
 }
 
 enroll_password()
@@ -4710,7 +4712,7 @@ enroll_password()
 	header="$(luks_header "$dev")"
 
 	NEWPASSWORD="$pw" systemd-cryptenroll --wipe-slot=password --password "${extra_args[@]}" "$dev" || return 1
-	check_enrolled "$dev" "password" "$header"
+	check_enrolled "$dev" "password" "$header" || return 1
 }
 
 enroll_recovery_key()
@@ -4774,7 +4776,7 @@ enroll_recovery_key()
 		shred "$tmp_key_file"
 	fi
 
-	check_enrolled "$dev" "recovery" "$header"
+	check_enrolled "$dev" "recovery" "$header" || return 1
 
 	# If we enroll a recovery key first, we can use the generated
 	# key as a recovery PIN later when we enroll a TPM2[+PIN]
@@ -4851,6 +4853,8 @@ enroll()
 
 	info "Enrolling devices ($arg_method): ${tracked_devices[*]}"
 
+	cp -a /etc/crypttab "$tmpdir/crypttab"
+
 	# Prepare /etc/crypttab and update initrd if required
 	case "$arg_method" in
 		"tpm2"|"tpm2+pin")
@@ -4924,9 +4928,23 @@ enroll()
 		fi
 	fi
 
+	local failed=
 	for dev in "${tracked_devices[@]}"; do
-		enroll_device "$dev" "$pin_or_pw"
+		enroll_device "$dev" "$pin_or_pw" || { failed="$dev"; break; }
 	done
+
+	# A device that keeps the option in /etc/crypttab but has no
+	# slot for it falls back to the password prompt during the
+	# boot, hiding the failed enrollment.  The initrd embeds
+	# /etc/crypttab, so it needs to be generated again
+	if [ -n "$failed" ]; then
+		if ! cmp -s "$tmpdir/crypttab" /etc/crypttab; then
+			info "Restoring /etc/crypttab"
+			cp -a "$tmpdir/crypttab" /etc/crypttab
+			install_all_kernels "$root_snapshot"
+		fi
+		err "Failed to enroll ($arg_method): $failed"
+	fi
 }
 
 unenroll_all_pcrlock()
