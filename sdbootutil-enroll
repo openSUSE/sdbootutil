@@ -90,6 +90,21 @@ get_credential tpm2 "sdbootutil-enroll.tpm2"
 fido2=
 get_credential fido2 "sdbootutil-enroll.fido2"
 
+# Without a single credential there is nothing to enroll, and the
+# keyslot that disk-encryption-tool left behind would be wiped without
+# anything to replace it.  Not wiping it does not make the machine
+# bootable either, as that key is random and is never shown to anyone,
+# but it is still the better end: the key is in the keyring while this
+# boot lasts, so it can be piped out and enrolled by hand.  A device
+# with no keyslot at all is lost even with the key in hand.
+#
+# This is not an error: the service is enabled by the image, while the
+# credentials come from the deployment
+[ -n "$rk$pw$tpm2_pin$tpm2$fido2" ] || {
+	echo "No enrollment method requested. The device is still opened only by the key that disk-encryption-tool generated, readable from %user:cryptenroll until this boot ends" > /dev/stderr
+	exit 0
+}
+
 # A method that fails must not be mistaken for one that worked: the
 # keyslot that disk-encryption-tool left behind is wiped at the end of
 # this script, and it is the last one that still opens the device
