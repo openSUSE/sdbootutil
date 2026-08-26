@@ -4970,7 +4970,18 @@ enroll()
 	# public and private key if missing, before the initrd is
 	# regenerated below, as the public key is installed inside it
 	if { [ "$arg_method" = "tpm2" ] || [ "$arg_method" = "tpm2+pin" ]; } && [ -z "$arg_no_measure_pcr" ]; then
-		create_measure_pcr_keys || :
+		# A new key pair must reach the initrd, as the validator
+		# checks the signature of the prediction with the public
+		# key installed there.  The rebuild below is driven by
+		# /etc/crypttab, that can be already correct (an image
+		# where the device is enrolled after the deployment, or
+		# a re-enrollment), so ask for it here.  Otherwise the
+		# prediction is signed with a key that the initrd does
+		# not know, and measure-pcr-validator.service powers the
+		# machine off
+		if create_measure_pcr_keys; then
+			arg_no_reuse_initrd=1
+		fi
 	fi
 
 	# If the crypttab file changed (that is expected), we need to
