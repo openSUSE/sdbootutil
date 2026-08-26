@@ -104,13 +104,34 @@ enroll_systemd_firstboot() {
 }
 
 write_issue_file() {
-	local recovery_key="$1"
-	local issuefile="/run/issue.d/90-recovery-key.issue"
+	local content="$1"
+	# The recovery key and the recovery PIN are different secrets
+	# that can both be produced by the same run, so they cannot
+	# share a file: the second call would truncate the first
+	local name="${2:-90-recovery-key}"
+	local issuefile="/run/issue.d/$name.issue"
 
-	[ -x '/usr/sbin/issue-generator' ] && issuefile="/run/issue.d/90-recovery-key.conf"
+	if [ -x '/usr/sbin/issue-generator' ]; then
+		issuefile="/run/issue.d/$name.conf"
+	fi
 	mkdir -p "/run/issue.d"
-	echo "$recovery_key" > "$issuefile"
-	[ -x '/usr/sbin/issue-generator' ] && run issue-generator
+	echo "$content" > "$issuefile"
+	# Not a trailing `[ -x ... ] && run issue-generator`: as the
+	# last command of the function that returns 1 when the generator
+	# is not installed
+	if [ -x '/usr/sbin/issue-generator' ]; then
+		run issue-generator
+	fi
+}
+
+# `systemd-pcrlock` generates a recovery PIN for the NV index when
+# nothing supplies one, and sdbootutil only prints it, so without this
+# the credential needed to re-authorize the policy later is lost with
+# the captured output.  When a recovery key was enrolled first it is
+# reused as the PIN, and then there is nothing new to show
+write_recovery_pin() {
+	grep -q "^Recovery PIN:" <<< "$1" || return 0
+	write_issue_file "$1" 91-recovery-pin
 }
 
 enroll_post() {
@@ -165,19 +186,22 @@ do_enroll() {
 			d --infobox "Enrolling TPM2+PIN ..." 3 40
 			out="$(SDB_ADD_INITIAL_COMPONENT=1 PIN="$crypt_tpm_pin" run sdbootutil enroll --method=tpm2+pin 2>&1)"
 			r="$?"
-			[ $r -eq 0 ] || {
+			if [ $r -ne 0 ]; then
 				d --msgbox "Error (TPM2+PIN): $out" 0 0
 				error=1
-			}
-
+			else
+				write_recovery_pin "$out"
+			fi
 		else
 			d --infobox "Enrolling TPM2 ..." 3 40
 			out="$(SDB_ADD_INITIAL_COMPONENT=1 run sdbootutil enroll --method=tpm2 2>&1)"
 			r="$?"
-			[ $r -eq 0 ] || {
+			if [ $r -ne 0 ]; then
 				d --msgbox "Error (TPM2): $out" 0 0
 				error=1
-			}
+			else
+				write_recovery_pin "$out"
+			fi
 		fi
 	fi
 
