@@ -4218,27 +4218,6 @@ get_device_password()
 	echo "$pw"
 }
 
-# systemd-cryptenroll needs to authorize the new slot with a
-# credential that the device already accepts: a password (that it
-# reads from %user:cryptenroll) or a token that can unlock it.  With
-# neither it falls back to its own prompt, and when there is no
-# terminal to answer it the enrollment blocks forever
-require_unlock()
-{
-	local dev="${1:?}"
-
-	# Note that the password is not used here.  The side effect of
-	# get_device_password is what matters: a valid one is left in
-	# %user:cryptenroll for systemd-cryptenroll to find
-	if [ -n "$(get_device_password "$dev")" ] || [ -n "$unlock_method" ] || [ -t 0 ]; then
-		return 0
-	fi
-
-	warn "No valid password found for $dev, and there is no terminal to ask for one"
-	warn "Provide it in the %user:cryptenroll kernel keyring entry"
-	return 1
-}
-
 get_volume_key()
 {
 	local dev="$1"
@@ -4671,17 +4650,25 @@ remove_crypttab_option()
 	dbg_cat "/etc/crypttab"
 }
 
-set_unlock_method()
+# systemd-cryptenroll needs to authorize the new slot with a
+# credential that the device already accepts: a password (that it
+# reads from %user:cryptenroll) or a token that can unlock it.  With
+# neither it falls back to its own prompt, and when there is no
+# terminal to answer it the enrollment blocks forever
+require_unlock()
 {
-	local dev="$1"
+	local dev="${1:?}"
 
 	unlock_method=
 
-	# If %user:cryptenroll is set, use it as an automatic
-	# unlocker, if not, try the TPM2 or the FIDO2 key
-	local keyid
-	keyid="$(keyctl id %user:cryptenroll 2> /dev/null)" || true
-	[ -z "$keyid" ] || return 0
+	# A password that the device accepts comes first, as a TPM2 or
+	# a FIDO2 slot can be there and still not unlock: the policy
+	# can be stale after a firmware update (which is a reason to
+	# enroll again), and the token can be unplugged.  The password
+	# is not used here, the side effect of get_device_password is
+	# what matters: a valid one is left in %user:cryptenroll,
+	# where systemd-cryptenroll looks for it
+	[ -z "$(get_device_password "$dev")" ] || return 0
 
 	# Do not use TPM2 slot for enrolling TPM2
 	if [ "$arg_method" != "tpm2" ] && [ "$arg_method" != "tpm2+pin" ] && have_slot "$dev" "tpm2"; then
@@ -4692,6 +4679,16 @@ set_unlock_method()
 		info "Unlocking using FIDO2"
 		unlock_method="--unlock-fido2-device=auto"
 	fi
+
+	# A terminal means that there is somebody that can answer the
+	# prompt from systemd-cryptenroll
+	if [ -z "$unlock_method" ] && [ ! -t 0 ]; then
+		warn "No valid password found for $dev, and there is no terminal to ask for one"
+		warn "Provide it in the %user:cryptenroll kernel keyring entry"
+		return 1
+	fi
+
+	return 0
 }
 
 enroll_tpm2()
@@ -4711,14 +4708,12 @@ enroll_tpm2()
 		warn "Could not find /var/lib/systemd/pcrlock.json"
 	fi
 
-	set_unlock_method "$dev"
+	# Make sure that systemd-cryptenroll can authorize the new
+	# slot, with the password in cryptenroll or with a token
+	require_unlock "$dev" || return 1
 	if [ -n "$unlock_method" ]; then
 		extra_args+=("$unlock_method")
 	fi
-
-	# Make sure that the LUKS2 password is in cryptenroll.  If
-	# not, systemd-cryptenroll will ask one
-	require_unlock "$dev" || return 1
 
 	# Unless an empty --tpm2-public-key is passed,
 	# systemd-cryptenroll loads "tpm2-pcr-public-key.pem" from the
@@ -4755,14 +4750,12 @@ enroll_fido2()
 	info "Enrolling with FIDO2: $dev"
 
 	local extra_args=()
-	set_unlock_method "$dev"
+	# Make sure that systemd-cryptenroll can authorize the new
+	# slot, with the password in cryptenroll or with a token
+	require_unlock "$dev" || return 1
 	if [ -n "$unlock_method" ]; then
 		extra_args+=("$unlock_method")
 	fi
-
-	# Make sure that the LUKS2 password is in cryptenroll.  If
-	# not, systemd-cryptenroll will ask one
-	require_unlock "$dev" || return 1
 
 	local header
 	header="$(luks_header "$dev")"
@@ -4779,14 +4772,12 @@ enroll_password()
 	info "Enrolling with password: $dev"
 
 	local extra_args=()
-	set_unlock_method "$dev"
+	# Make sure that systemd-cryptenroll can authorize the new
+	# slot, with the password in cryptenroll or with a token
+	require_unlock "$dev" || return 1
 	if [ -n "$unlock_method" ]; then
 		extra_args+=("$unlock_method")
 	fi
-
-	# Make sure that the LUKS2 password is in cryptenroll.  If
-	# not, systemd-cryptenroll will ask one
-	require_unlock "$dev" || return 1
 
 	local header
 	header="$(luks_header "$dev")"
@@ -4802,14 +4793,12 @@ enroll_recovery_key()
 	info "Enrolling with recovery key: $dev"
 
 	local extra_args=()
-	set_unlock_method "$dev"
+	# Make sure that systemd-cryptenroll can authorize the new
+	# slot, with the password in cryptenroll or with a token
+	require_unlock "$dev" || return 1
 	if [ -n "$unlock_method" ]; then
 		extra_args+=("$unlock_method")
 	fi
-
-	# Make sure that the LUKS2 password is in cryptenroll.  If
-	# not, systemd-cryptenroll will ask one
-	require_unlock "$dev" || return 1
 
 	# If no recovery key is provided, systemd-cryptenroll will
 	# generate one
