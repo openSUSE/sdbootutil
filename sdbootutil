@@ -46,7 +46,9 @@ arg_secure_boot=
 arg_sync=
 arg_only_default=
 arg_default_snapshot=
-arg_ask_key_pin_or_pw=
+arg_ask_key=
+arg_ask_pin=
+arg_ask_pw=
 arg_method=
 arg_no_measure_pcr=
 arg_measure_pcr=
@@ -528,12 +530,28 @@ keyctl_add_with_timeout()
 	local key="$1"
 	local value="$2"
 
+	# Installers do not agree on the keyring: yast-bootloader,
+	# disk-encryption-tool and jeos-firstboot use @u, but
+	# yast-storage-ng uses @s.  `keyctl padd` only updates an entry
+	# that is already in the *target* keyring, and `keyctl link`
+	# displaces (and destroys) a homonym entry of the destination,
+	# so any fixed keyring damages one of them.  `keyctl pupdate`
+	# rewrites the payload where the entry already lives
+	local keyid
+	if keyid="$(keyctl id %user:"$key" 2> /dev/null)"; then
+		info "Updating key $key"
+		echo -n "$value" | keyctl pupdate "$keyid" || \
+			warn "Failed to update the key $key"
+		# The entry belongs to somebody else, so neither its
+		# permissions nor its lifetime are changed here
+		return 0
+	fi
+
 	info "Creating key $key with timeout"
 	# When we create a new key with sudo, we do not create a new
 	# login session, so the key is not accessible to the owner
 	# See https://mjg59.dreamwidth.org/37333.html
-	local keyid
-	keyid="$(echo -n "$value" | keyctl padd user "$key" @s)"
+	keyid="$(echo -n "$value" | keyctl padd user "$key" @u)"
 	# Remove permission from the possesor.  For some reason that I
 	# do not understand, this can fail in YaST when called via
 	# cheetah
@@ -542,10 +560,10 @@ keyctl_add_with_timeout()
 		return 0
 	}
 	keyctl timeout "$keyid" 120
-	keyctl link "$keyid" @u
-	# systemd tools are doing `keyctl request user "$key"`, and
-	# for some reason this means that the key must still be in the
-	# session keyring, so we cannot do `keyctl unlink "$keyid" @s`
+	# systemd tools are doing `keyctl request user "$key"`, and for
+	# some reason this means that the key must also be reachable
+	# from the session keyring
+	keyctl link "$keyid" @s
 }
 
 ask_password()
@@ -4019,14 +4037,14 @@ generate_tpm2_predictions_pcrlock()
 	# register a recovery PIN the installer (sdbootutil-enroll,
 	# YaST) will call this script deploying in the %u keyring
 	# "sdbootutil[-pin]" entry.  For re-enrollments we can use the
-	# same entry, the PIN environment variable, or the
-	# --ask-{key,pin,pw} parameter.
+	# same entry, the PIN environment variable, or the --ask-pin
+	# parameter.
 	local pin
 	local extra=()
 	local keyid keyid_int
 	keyid="$(keyctl id %user:sdbootutil 2> /dev/null)" || true
 	keyid_int="$(keyctl id %user:sdbootutil-pin 2> /dev/null)" || true
-	if [ -n "$arg_ask_key_pin_or_pw" ]; then
+	if [ -n "$arg_ask_pin" ]; then
 		# When enrolling, we should ask two times
 		if [ -n "$arg_method" ]; then
 			info "The recovery PIN is used when the TPM2 policy needs to be updated"
@@ -4183,9 +4201,14 @@ get_device_password()
 	fi
 
 	# Ask the password only as a last resort, and only if
-	# --measure-pcr is set
-	if [ -z "$pw" ] && { [ -n "$arg_measure_pcr" ] || [ -n "$arg_ask_key_pin_or_pw" ]; }; then
+	# --measure-pcr is set.  Any --ask-* also means that there is
+	# someone in front of a terminal willing to type it
+	if [ -z "$pw" ] && { [ -n "$arg_measure_pcr" ] || [ -n "$arg_ask_key$arg_ask_pin$arg_ask_pw" ]; }; then
 		ask_password "Password for $dev" pw
+		valid_password "$dev" "$pw" || {
+			warn "The password does not unlock $dev"
+			pw=''
+		}
 	fi
 
 	if [ -n "$pw" ] && [ -z "$in_keyring" ]; then
@@ -4195,25 +4218,39 @@ get_device_password()
 	echo "$pw"
 }
 
+# systemd-cryptenroll needs to authorize the new slot with a
+# credential that the device already accepts: a password (that it
+# reads from %user:cryptenroll) or a token that can unlock it.  With
+# neither it falls back to its own prompt, and when there is no
+# terminal to answer it the enrollment blocks forever
+require_unlock()
+{
+	local dev="${1:?}"
+
+	# Note that the password is not used here.  The side effect of
+	# get_device_password is what matters: a valid one is left in
+	# %user:cryptenroll for systemd-cryptenroll to find
+	if [ -n "$(get_device_password "$dev")" ] || [ -n "$unlock_method" ] || [ -t 0 ]; then
+		return 0
+	fi
+
+	warn "No valid password found for $dev, and there is no terminal to ask for one"
+	warn "Provide it in the %user:cryptenroll kernel keyring entry"
+	return 1
+}
+
 get_volume_key()
 {
 	local dev="$1"
 	local pw out
 	pw="$(get_device_password "$dev")"
-	out="$(cryptsetup luksDump --batch-mode --dump-master-key "$dev" 2> /dev/null<<<"$pw")" || {
-		# If luksDump fails, remove the password from the
-		# keyring.  Can be that the password was wrong, and
-		# systemd-cryptenroll ask later for the password.
-		# Both passwords can appear in the keyring separated
-		# by NULL
-		keyctl revoke %user:cryptenroll &> /dev/null || true
-		keyctl reap &> /dev/null || true
-
-		# Try one more time
-		pw="$(get_device_password "$dev")"
-		# The error is signaled by an empty volume key
-		out="$(cryptsetup luksDump --batch-mode --dump-master-key "$dev" 2> /dev/null<<<"$pw")" || return 0
-	}
+	# The error is signaled by an empty volume key.  There is no
+	# retry: the password was already validated against the device,
+	# so a second call returns the same one.  Revoking
+	# %user:cryptenroll to force a different answer is not an
+	# option either, as it can hold the password of another device
+	[ -n "$pw" ] || return 0
+	out="$(cryptsetup luksDump --batch-mode --dump-master-key "$dev" 2> /dev/null<<<"$pw")" || return 0
 	echo "$out" | sed -n '/MK dump:/,$p' | sed -E 's/MK dump:|[[:blank:]]+//g' | sed -z 's/\n//g'
 }
 
@@ -4681,7 +4718,7 @@ enroll_tpm2()
 
 	# Make sure that the LUKS2 password is in cryptenroll.  If
 	# not, systemd-cryptenroll will ask one
-	get_device_password "$dev" &> /dev/null
+	require_unlock "$dev" || return 1
 
 	# Unless an empty --tpm2-public-key is passed,
 	# systemd-cryptenroll loads "tpm2-pcr-public-key.pem" from the
@@ -4725,7 +4762,7 @@ enroll_fido2()
 
 	# Make sure that the LUKS2 password is in cryptenroll.  If
 	# not, systemd-cryptenroll will ask one
-	get_device_password "$dev" &> /dev/null
+	require_unlock "$dev" || return 1
 
 	local header
 	header="$(luks_header "$dev")"
@@ -4749,7 +4786,7 @@ enroll_password()
 
 	# Make sure that the LUKS2 password is in cryptenroll.  If
 	# not, systemd-cryptenroll will ask one
-	get_device_password "$dev" &> /dev/null
+	require_unlock "$dev" || return 1
 
 	local header
 	header="$(luks_header "$dev")"
@@ -4772,14 +4809,14 @@ enroll_recovery_key()
 
 	# Make sure that the LUKS2 password is in cryptenroll.  If
 	# not, systemd-cryptenroll will ask one
-	get_device_password "$dev" &> /dev/null
+	require_unlock "$dev" || return 1
 
 	# If no recovery key is provided, systemd-cryptenroll will
 	# generate one
 	local key keyid keyid_int
 	keyid="$(keyctl id %user:sdbootutil 2> /dev/null)" || true
 	keyid_int="$(keyctl id %user:sdbootutil-pin 2> /dev/null)" || true
-	if [ -n "$arg_ask_key_pin_or_pw" ]; then
+	if [ -n "$arg_ask_key" ]; then
 		ask_new_password "recovery key" key
 	elif [ -n "$KEY" ]; then
 		key="$KEY"
@@ -4854,8 +4891,15 @@ enroll_recovery_key()
 	if [ -z "$keyid" ] && [ -z "$unlock_method" ]; then
 		keyctl_add_with_timeout "cryptenroll" "$key"
 	fi
-	# ... and to --method=tpm2[+pin] via a private keyring
-	keyctl_add_with_timeout "sdbootutil-pin" "$key"
+	# ... and to --method=tpm2[+pin] via a private keyring.  An
+	# entry that is already there holds the recovery PIN that
+	# protects the pcrlock NV index, and it is not overwritten:
+	# that PIN cannot be recovered from anywhere else
+	if [ -z "$keyid_int" ]; then
+		keyctl_add_with_timeout "sdbootutil-pin" "$key"
+	elif [ "$key" != "$(keyctl pipe "$keyid_int")" ]; then
+		warn "The recovery key and the recovery PIN are now different"
+	fi
 }
 
 enroll_device()
@@ -4953,11 +4997,15 @@ enroll()
 
 	# For the PIN (tpm2+pin) or password (password), we can get it
 	# from the %u keyring "sdbootutil" entry, the PIN or PW
-	# environment variable, or introduced by the user
+	# environment variable, or introduced by the user.  Like
+	# --ask-key in enroll_recovery_key, an explicit --ask-pin or
+	# --ask-pw takes precedence over the other sources
 	local pin_or_pw keyid
 	if [ "$arg_method" = "tpm2+pin" ]; then
 		keyid="$(keyctl id %user:sdbootutil 2> /dev/null)" || true
-		if [ -n "$PIN" ]; then
+		if [ -n "$arg_ask_pin" ]; then
+			ask_new_password "TPM2 PIN" pin_or_pw
+		elif [ -n "$PIN" ]; then
 			pin_or_pw="$PIN"
 		elif [ -n "$keyid" ]; then
 			pin_or_pw="$(keyctl pipe "$keyid")"
@@ -4966,7 +5014,9 @@ enroll()
 		fi
 	elif [ "$arg_method" = "password" ]; then
 		keyid="$(keyctl id %user:sdbootutil 2> /dev/null)" || true
-		if [ -n "$PW" ]; then
+		if [ -n "$arg_ask_pw" ]; then
+			ask_new_password "password" pin_or_pw
+		elif [ -n "$PW" ]; then
 			pin_or_pw="$PW"
 		elif [ -n "$keyid" ]; then
 			pin_or_pw="$(keyctl pipe "$keyid")"
@@ -5290,7 +5340,9 @@ while true ; do
 		--secure-boot) arg_secure_boot=1; shift ;;
 		--only-default) arg_only_default=1; shift ;;
 		--default-snapshot) arg_default_snapshot=1; shift ;;
-		--ask-key|--ask-pin|--ask-pw) arg_ask_key_pin_or_pw=1; shift ;;
+		--ask-key) arg_ask_key=1; shift ;;
+		--ask-pin) arg_ask_pin=1; shift ;;
+		--ask-pw) arg_ask_pw=1; shift ;;
 		--method) arg_method="$2"; shift 2 ;;
 		--no-measure-pcr) arg_no_measure_pcr=1; shift ;;
 		--measure-pcr) arg_measure_pcr=1; shift ;;
