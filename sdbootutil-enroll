@@ -4,13 +4,22 @@ get_credential() {
 	local var="${1:?}"
 	local name="${2:?}"
 	local keyid
+	local value=''
 	keyid="$(keyctl id %user:"$name" 2> /dev/null)" || true
 
+	# A plain `read` splits on IFS and stops at the first newline,
+	# so it silently mangles a password that has leading or
+	# trailing blanks, or more than one line.  Reading until NUL
+	# keeps the payload verbatim
 	if [ -n "$CREDENTIALS_DIRECTORY" ] && [ -e "$CREDENTIALS_DIRECTORY/$name" ]; then
-		read -r "$var" < "$CREDENTIALS_DIRECTORY/$name"
+		IFS= read -r -d '' value < "$CREDENTIALS_DIRECTORY/$name"
 	elif [ -n "$keyid" ]; then
-		read -r "$var" <<<"$(keyctl pipe "$keyid")"
+		IFS= read -r -d '' value < <(keyctl pipe "$keyid")
 	fi
+
+	# Only the single trailing newline that a credential file
+	# usually ends with is removed
+	printf -v "$var" '%s' "${value%$'\n'}"
 }
 
 have_luks2() {
