@@ -4589,12 +4589,22 @@ is_same_device()
 	local dev1="$1"
 	local dev2="$2"
 
-	# If the device name is UUID=, convert as a real device name
-	[[ "$dev1" = "UUID="* ]] && dev1="$(blkid --uuid "${dev1#"UUID="}")"
-	[[ "$dev2" = "UUID="* ]] && dev2="$(blkid --uuid "${dev2#"UUID="}")"
+	# If the device name is a specification, convert it as a real
+	# device name.  crypttab(5) documents only "UUID=", but
+	# systemd-cryptsetup-generator resolves these four (and only
+	# these four) into /dev/disk/by-*
+	local spec="^(UUID|PARTUUID|LABEL|PARTLABEL)="
+	[[ "$dev1" =~ $spec ]] && dev1="$(blkid --list-one --output device --match-token "$dev1")"
+	[[ "$dev2" =~ $spec ]] && dev2="$(blkid --list-one --output device --match-token "$dev2")"
 
 	dev1="$(readlink -f "$dev1")"
 	dev2="$(readlink -f "$dev2")"
+
+	# A name that does not resolve into a block device is not the
+	# same device as anything else.  Without this any two of them
+	# match, as the device number is empty when `stat` fails, and
+	# 0:0 for the image file that crypttab also accepts
+	[ -b "$dev1" ] && [ -b "$dev2" ] || return 1
 
 	local id1 id2
 	id1="$(stat -c "%t:%T" "$dev1")"
