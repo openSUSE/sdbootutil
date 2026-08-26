@@ -22,11 +22,27 @@ have_luks2() {
 have_luks2 || return 0
 
 enroll_systemd_firstboot() {
-	[ -e /usr/bin/systemd-cryptenroll ] || return 0
-	crypt_keyid="$(keyctl id %user:cryptenroll 2> /dev/null)" || return 0
-	[ -n "$crypt_keyid" ] || return 0
-
 	welcome_screen_with_console_switch
+
+	# There is a LUKS2 device, so returning quietly here means a
+	# machine that keeps asking for the password that the installer
+	# set, with nothing to say why.  The dialog times out because
+	# firstboot also runs unattended, when every other answer comes
+	# from a credential.  `d` is not used for it: dialog exits 255
+	# when the time is over, and that is the same code as ESC, so it
+	# would ask "Do you really want to quit?"
+	[ -e /usr/bin/systemd-cryptenroll ] || {
+		d_styled --timeout 60 --msgbox $"systemd-cryptenroll is not installed, so the encrypted devices cannot be enrolled." 0 0 || :
+		return 0
+	}
+	# The key that disk-encryption-tool adds lives only in the memory
+	# of the boot that created it, so a firstboot that is delayed to
+	# a later boot finds nothing here
+	crypt_keyid="$(keyctl id %user:cryptenroll 2> /dev/null)" || true
+	[ -n "$crypt_keyid" ] || {
+		d_styled --timeout 60 --msgbox $"The password of the encrypted devices is not available, so they cannot be enrolled. Use 'jeos-config enroll' to do it later." 0 0 || :
+		return 0
+	}
 
 	local has_fido2=${JEOS_HAS_FIDO2:-}
 	local has_tpm2=
@@ -221,11 +237,16 @@ do_enroll() {
 
 	if [ "$error" -eq 1 ]; then
 		d --msgbox "One or more enrollment methods failed. Resolve the issue and re-try with 'jeos-config enroll'" 0 0
-	else
+	elif [ -n "$with_recovery_key$crypt_pw$with_tpm2$with_fido2" ]; then
 		# Clean the enrollment key.  disk-encryption-tool
 		# creates it in the keyslot 0 with the name
 		# "enrollment-key", that is showed by
 		# systemd-cryptenroll as "other"
+		#
+		# Only when something else was enrolled: "Done" can leave
+		# the menu with nothing selected under jeos-config, and
+		# then that keyslot is still the only one that opens the
+		# device
 		local slots
 		while read -r dev; do
 			slots=$(systemd-cryptenroll "$dev")
@@ -236,11 +257,36 @@ do_enroll() {
 	fi
 }
 
+# A password that does not open the device is only noticed by the
+# enrollment itself, one initrd rebuild later, and is reported as an
+# enrollment failure
+valid_password() {
+	local pw="$1" dev
+
+	[ -n "$pw" ] || return 1
+	while read -r dev; do
+		# Without --disable-external-tokens an enrolled TPM2 or
+		# FIDO2 token opens the device and any password is
+		# reported as valid
+		cryptsetup luksOpen --test-passphrase --disable-external-tokens "$dev" <<<"$pw" &> /dev/null && return 0
+	done < <(sdbootutil list-devices)
+	return 1
+}
+
 enroll_jeos_config() {
 	is_jeos_config=1
-	d --insecure --passwordbox  $"Enter decryption password" 0 0
-	[ -n "$result" ] || return 0
-	echo -n "$result" | keyctl padd user cryptenroll @u &> /dev/null
+	while true; do
+		d --insecure --passwordbox  $"Enter decryption password" 0 0
+		[ -n "$result" ] || return 0
+		valid_password "$result" && break
+		d_styled --yesno $"The password does not open any encrypted device. Retry?" 0 0 || return 0
+	done
+	# Everything that comes next takes the password from here, so
+	# without it the enrollment can only fail, once per method
+	echo -n "$result" | keyctl padd user cryptenroll @u &> /dev/null || {
+		d --msgbox $"Failed to store the password in the kernel keyring" 0 0
+		return 0
+	}
 
 	enroll_systemd_firstboot
 	do_enroll
