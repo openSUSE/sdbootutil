@@ -3,6 +3,14 @@
 shopt -s extglob nullglob
 set -e
 
+# snapper gives the plugins /dev/null on stdin, but only when the
+# request goes through snapperd.  With `snapper --no-dbus` (what
+# transactional-update uses, and what the installer uses before D-Bus
+# is up) the plugin is a direct child of the client and inherits its
+# terminal.  sdbootutil reads that terminal as "somebody can type a
+# password", which is never true for a plugin
+exec < /dev/null
+
 # Check whether it's a transactional system
 is_transactional()
 {
