@@ -31,6 +31,8 @@ BuildRequires:  cargo-packaging
 BuildRequires:  libopenssl-devel
 BuildRequires:  systemd-rpm-macros
 Requires:       %{name}-dracut-measure-pcr
+# 2.4.0 for --disable-external-tokens, used to validate a password
+Requires:       cryptsetup >= 2.4.0
 Requires:       dracut-pcr-signature
 Requires:       e2fsprogs
 Requires:       efibootmgr
