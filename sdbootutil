@@ -108,12 +108,30 @@ tracked_devices=()
 
 rollback=()
 
+# Lifetime of the keys that sdbootutil adds to the kernel keyring.  It
+# is re-armed when the script exits, so it measures how long a secret
+# outlives the run that published it, and never expires in the middle
+# of one
+keyctl_timeout=600
+created_keys=()
+
 declare -A eventlog
 
 tmpdir=$(mktemp -d -t sdbootutil.XXXXXX)
 cleanup()
 {
 	local i
+
+	# Restart the countdown of the keys that this run created, so
+	# that it is not spent by the run itself.  Only the keys that we
+	# created are touched: shortening the lifetime of an entry that
+	# an installer left behind can make it disappear under the
+	# installer
+	for i in "${created_keys[@]}"; do
+		keyctl timeout "$i" "$keyctl_timeout" 2> /dev/null || \
+			warn "Failed to set the timeout of the key $i"
+	done
+
 	for i in "${rollback[@]}"; do
 		if [ -e "$i.bak" ]; then
 			info "Restoring $i"
@@ -555,11 +573,19 @@ keyctl_add_with_timeout()
 	# Remove permission from the possesor.  For some reason that I
 	# do not understand, this can fail in YaST when called via
 	# cheetah
-	keyctl setperm "$keyid" 0x003f0000 2> /dev/null || {
-		warn "Failed to change the timeout for $key"
-		return 0
-	}
-	keyctl timeout "$keyid" 120
+	# Returning here would leave the secret in the keyring with no
+	# expiry at all, which is worse than the wrong permissions
+	keyctl setperm "$keyid" 0x003f0000 2> /dev/null || \
+		warn "Failed to change the permissions of $key"
+	# The countdown starts here only as a backstop for a run that is
+	# killed before `cleanup` can restart it.  Every consumer is
+	# behind a slow step (dracut, `systemd-pcrlock make-policy`) or
+	# in the next invocation: `sdbootutil-enroll` chains
+	# --method=recovery-key and --method=tpm2, and the recovery key
+	# that the first one leaves here is what authorizes the new slot
+	# in the second one
+	keyctl timeout "$keyid" "$keyctl_timeout"
+	created_keys+=("$keyid")
 	# systemd tools are doing `keyctl request user "$key"`, and for
 	# some reason this means that the key must also be reachable
 	# from the session keyring
