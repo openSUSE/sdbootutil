@@ -4470,6 +4470,25 @@ have_slot()
 	grep -q "$kind" < <(systemd-cryptenroll "$dev")
 }
 
+luks_header()
+{
+	cryptsetup luksDump --dump-json-metadata "${1:?}"
+}
+
+# systemd-cryptenroll exits successfully even when it did not enroll
+# anything.  A slot of the expected kind is not evidence by itself, as
+# it can come from a previous enrollment, so the LUKS2 header is
+# compared with the one collected before the enrollment
+check_enrolled()
+{
+	local dev="${1:?}"
+	local kind="${2:?}"
+	local header="${3:?}"
+
+	[ "$header" != "$(luks_header "$dev")" ] && have_slot "$dev" "$kind" || \
+		err "systemd-cryptenroll reported no error, but $dev was not enrolled with $kind"
+}
+
 has_signed_pcr_policy()
 {
 	# A "tpm2_pubkey" field in the token means that a shard of the
@@ -4636,21 +4655,18 @@ enroll_tpm2()
 		warn "Ignoring $pcr_oracle_key for the enrollment. Remove it, and the private key, if pcr-oracle is not used anymore"
 	fi
 
+	local header
+	header="$(luks_header "$dev")"
+
 	# Note that the PCRs are now not stored in the LUKS2 header
-	if NEWPIN="$tpm2_pin" systemd-cryptenroll \
-		 --wipe-slot=tpm2 \
-		 --tpm2-device=auto \
-		 --tpm2-public-key= \
-		 "${extra_args[@]}" \
-		 --tpm2-pcrlock=/var/lib/systemd/pcrlock.json \
-		 "$dev"; then
-		# systemd-cryptenroll exits successfully even if the
-		# token was not enrolled.  Manually check if the
-		# device has a tpm2 slot enrolled
-		systemd-cryptenroll "$dev" | grep -q "tpm2"
-	else
-		return 1
-	fi
+	NEWPIN="$tpm2_pin" systemd-cryptenroll \
+	       --wipe-slot=tpm2 \
+	       --tpm2-device=auto \
+	       --tpm2-public-key= \
+	       "${extra_args[@]}" \
+	       --tpm2-pcrlock=/var/lib/systemd/pcrlock.json \
+	       "$dev" || return 1
+	check_enrolled "$dev" "tpm2" "$header"
 
 	# Not all PCR predictions match the current system state and
 	# will be excluded from the policy. Trigger an update on the
@@ -4670,7 +4686,11 @@ enroll_fido2()
 		extra_args+=("$unlock_method")
 	fi
 
-	systemd-cryptenroll --wipe-slot=fido2 --fido2-device=auto "${extra_args[@]}" "$dev"
+	local header
+	header="$(luks_header "$dev")"
+
+	systemd-cryptenroll --wipe-slot=fido2 --fido2-device=auto "${extra_args[@]}" "$dev" || return 1
+	check_enrolled "$dev" "fido2" "$header"
 }
 
 enroll_password()
@@ -4686,7 +4706,11 @@ enroll_password()
 		extra_args+=("$unlock_method")
 	fi
 
-	NEWPASSWORD="$pw" systemd-cryptenroll --wipe-slot=password --password "${extra_args[@]}" "$dev"
+	local header
+	header="$(luks_header "$dev")"
+
+	NEWPASSWORD="$pw" systemd-cryptenroll --wipe-slot=password --password "${extra_args[@]}" "$dev" || return 1
+	check_enrolled "$dev" "password" "$header"
 }
 
 enroll_recovery_key()
@@ -4715,6 +4739,9 @@ enroll_recovery_key()
 	elif [ -n "$keyid" ]; then
 		key="$(keyctl pipe "$keyid")"
 	fi
+
+	local header
+	header="$(luks_header "$dev")"
 
 	local generated_key=
 	# This function will be called for every device.  Let systemd
@@ -4746,6 +4773,8 @@ enroll_recovery_key()
 		cryptsetup luksChangeKey --key-slot "$keyslot" --force-password "$dev" "$tmp_key_file" <<<"$tmp_key"
 		shred "$tmp_key_file"
 	fi
+
+	check_enrolled "$dev" "recovery" "$header"
 
 	# If we enroll a recovery key first, we can use the generated
 	# key as a recovery PIN later when we enroll a TPM2[+PIN]
