@@ -4129,31 +4129,66 @@ generate_tpm2_predictions_pcrlock()
 	fi
 }
 
+valid_password()
+{
+	local dev="${1:?}"
+	local pw="$2"
+
+	[ -n "$pw" ] || return 1
+	# Without --disable-external-tokens an enrolled TPM2 or FIDO2
+	# token opens the device and any password is reported as valid
+	cryptsetup luksOpen --test-passphrase --disable-external-tokens "$dev" <<<"$pw" &> /dev/null
+}
+
 get_device_password()
 {
-	local dev="$1"
-	local pw keyid
-	# If we are enrolling for the first time, sdbootutil-pin can
-	# contain the recovery PIN, that cannot be used to unlock the
-	# device (unless later it is done an enrollment of a new
-	# recovery key)
-	keyid="$(keyctl id %user:sdbootutil 2> /dev/null)" || true
-	keyid_ce="$(keyctl id %user:cryptenroll 2> /dev/null)" || true
-	if [ -n "$PW" ]; then
-		pw="$PW"
-	elif [ -n "$KEY" ]; then
-		pw="$KEY"
-	elif [ -n "$keyid_ce" ]; then
-		pw="$(keyctl pipe "$keyid_ce")"
-	elif [ -n "$keyid" ]; then
-		pw="$(keyctl pipe "$keyid")"
-	elif [ -n "$arg_measure_pcr" ] || [ -n "$arg_ask_key_pin_or_pw" ]; then
-		# Ask the password only as a last resort, and only if
-		# --measure-pcr is set
+	local dev="${1:?}"
+	local pw='' keyid candidate
+	local from_keyring=()
+	local candidates=()
+
+	# %user:cryptenroll is read first because systemd-cryptenroll
+	# reads it on its own, so when it already unlocks the device
+	# there is nothing to add.  It can hold several passwords, one
+	# per device, separated by NUL
+	if keyid="$(keyctl id %user:cryptenroll 2> /dev/null)"; then
+		mapfile -d '' -t from_keyring < <(keyctl pipe "$keyid")
+	fi
+
+	# PW, KEY and %user:sdbootutil hold the *new* secret for the
+	# password, recovery-key and tpm2+pin methods, and during the
+	# first enrollment %user:sdbootutil can contain the recovery
+	# PIN, so every candidate is validated before it is used.
+	# Adding a wrong one is not harmless: keyctl replaces the
+	# payload, so it would drop a valid password
+	[ -z "$PW" ] || candidates+=("$PW")
+	[ -z "$KEY" ] || candidates+=("$KEY")
+	if keyid="$(keyctl id %user:sdbootutil 2> /dev/null)"; then
+		candidates+=("$(keyctl pipe "$keyid")")
+	fi
+
+	local in_keyring=
+	for candidate in "${from_keyring[@]}"; do
+		valid_password "$dev" "$candidate" || continue
+		pw="$candidate"
+		in_keyring=1
+		break
+	done
+	if [ -z "$pw" ]; then
+		for candidate in "${candidates[@]}"; do
+			valid_password "$dev" "$candidate" || continue
+			pw="$candidate"
+			break
+		done
+	fi
+
+	# Ask the password only as a last resort, and only if
+	# --measure-pcr is set
+	if [ -z "$pw" ] && { [ -n "$arg_measure_pcr" ] || [ -n "$arg_ask_key_pin_or_pw" ]; }; then
 		ask_password "Password for $dev" pw
 	fi
 
-	if [ -n "$pw" ]; then
+	if [ -n "$pw" ] && [ -z "$in_keyring" ]; then
 		keyctl_add_with_timeout "cryptenroll" "$pw"
 	fi
 
@@ -4646,7 +4681,7 @@ enroll_tpm2()
 
 	# Make sure that the LUKS2 password is in cryptenroll.  If
 	# not, systemd-cryptenroll will ask one
-	get_device_password &> /dev/null
+	get_device_password "$dev" &> /dev/null
 
 	# Unless an empty --tpm2-public-key is passed,
 	# systemd-cryptenroll loads "tpm2-pcr-public-key.pem" from the
@@ -4688,6 +4723,10 @@ enroll_fido2()
 		extra_args+=("$unlock_method")
 	fi
 
+	# Make sure that the LUKS2 password is in cryptenroll.  If
+	# not, systemd-cryptenroll will ask one
+	get_device_password "$dev" &> /dev/null
+
 	local header
 	header="$(luks_header "$dev")"
 
@@ -4708,6 +4747,10 @@ enroll_password()
 		extra_args+=("$unlock_method")
 	fi
 
+	# Make sure that the LUKS2 password is in cryptenroll.  If
+	# not, systemd-cryptenroll will ask one
+	get_device_password "$dev" &> /dev/null
+
 	local header
 	header="$(luks_header "$dev")"
 
@@ -4726,6 +4769,10 @@ enroll_recovery_key()
 	if [ -n "$unlock_method" ]; then
 		extra_args+=("$unlock_method")
 	fi
+
+	# Make sure that the LUKS2 password is in cryptenroll.  If
+	# not, systemd-cryptenroll will ask one
+	get_device_password "$dev" &> /dev/null
 
 	# If no recovery key is provided, systemd-cryptenroll will
 	# generate one
