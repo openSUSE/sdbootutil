@@ -4463,9 +4463,11 @@ extend_pcr()
 }
 
 # Create the key pair that signs the PCR 15 prediction, if it is not
-# already there.  Returns 0 only when a new key pair was created: the
-# public key is copied into the initrd by dracut (module-setup.sh), so
-# any initrd generated before this point cannot validate PCR 15
+# already there.  The public key is copied into the initrd by dracut
+# (module-setup.sh), so any initrd generated before a new pair cannot
+# validate PCR 15, and the callers have to tell the three outcomes
+# apart: 0 a new pair was created, 1 it was already there, 2 it could
+# not be created
 create_measure_pcr_keys()
 {
 	local private="/var/lib/sdbootutil/measure-pcr-private.pem"
@@ -4473,16 +4475,31 @@ create_measure_pcr_keys()
 
 	[ ! -f "$private" ] || [ ! -f "$public" ] || return 1
 
+	# A private key can be there and still be unusable: openssl
+	# creates the file before it writes to it, so an interrupted or
+	# failed run leaves an empty one behind.  Only the "-f" test
+	# above guarded this, and it kept skipping the generation while
+	# the public key was never written, on every run from then on
+	if [ -f "$private" ] && ! openssl rsa -in "$private" -noout &> /dev/null; then
+		warn "Replacing $private, which cannot be read"
+		rm -f "$private"
+	fi
+
 	if [ ! -f "$private" ]; then
 		info "Creating the key pair that signs the PCR 15 prediction"
 		# A public key that comes from a different private key
 		# cannot validate anything
 		rm -f "$public"
-		openssl genrsa -out "$private" 4096
+		# The half-written file is removed, so that the next run
+		# does not find it and take it for a usable key
+		openssl genrsa -out "$private" 4096 || { rm -f "$private"; return 2; }
 	fi
 	# Writes "writing RSA key" in stderr and -noout is not doing
 	# what I was expecting
-	[ -f "$public" ] || openssl rsa -in "$private" -pubout -out "$public" 2> /dev/null
+	[ -f "$public" ] || openssl rsa -in "$private" -pubout -out "$public" 2> /dev/null || {
+		rm -f "$public"
+		return 2
+	}
 }
 
 generate_tpm2_predictions_pcr_15()
@@ -4555,9 +4572,18 @@ generate_tpm2_predictions_pcr_15()
 	# /etc/crypttab there is nothing to sign the prediction with,
 	# and an unsigned prediction also halts the boot
 	local private="/var/lib/sdbootutil/measure-pcr-private.pem"
-	if create_measure_pcr_keys; then
-		warn "The public key is only added to the initrd by 'sdbootutil mkinitrd'"
-	fi
+	# "|| rc=$?" and not a bare call, that with "set -e" would end
+	# the script on any return that is not 0
+	local rc=0
+	create_measure_pcr_keys || rc="$?"
+	case "$rc" in
+		0) warn "The public key is only added to the initrd by 'sdbootutil mkinitrd'" ;;
+		# Not fatal here on purpose.  The signing below fails
+		# too, and that is the path that removes the stale
+		# prediction and its signature from the ESP, which the
+		# next boot would otherwise still find and trust
+		2) warn "The key pair that signs the PCR 15 prediction cannot be created" ;;
+	esac
 
 	rm -f /var/lib/sdbootutil/measure-pcr-prediction
 	rm -f /var/lib/sdbootutil/measure-pcr-prediction.sha256
@@ -5288,6 +5314,42 @@ enroll()
 			have_tpm2 || err "No TPM2 found"
 			have_pcrlock || err "No systemd-pcrlock found"
 			! in_lockout || err "The TPM2 is in lockout. Use 'tpm2_dictionarylockout -c [ -p passwd ]' to continue"
+			# For predicting PCR 15 we need to sign a file.
+			# Create the public and private key if missing,
+			# before the initrd is regenerated below, as the
+			# public key is installed inside it
+			if [ -z "$arg_no_measure_pcr" ]; then
+				# "|| rc=$?" and not a bare call, that
+				# with "set -e" would end the script on
+				# any return that is not 0
+				local rc=0
+				create_measure_pcr_keys || rc="$?"
+				case "$rc" in
+					# A new key pair must reach the
+					# initrd, as the validator checks
+					# the signature of the prediction
+					# with the public key installed
+					# there.  The rebuild below is
+					# driven by /etc/crypttab, that can
+					# be already correct (an image where
+					# the device is enrolled after the
+					# deployment, or a re-enrollment),
+					# so ask for it here.  Otherwise the
+					# prediction is signed with a key
+					# that the initrd does not know, and
+					# measure-pcr-validator.service
+					# powers the machine off
+					0) arg_no_reuse_initrd=1 ;;
+					# Fatal, and here rather than a few
+					# lines below, so that it happens
+					# before /etc/crypttab is touched
+					# and there is nothing to undo.
+					# Carrying on would enroll the TPM2
+					# against a prediction that cannot
+					# be signed
+					2) err "The key pair that signs the PCR 15 prediction cannot be created" ;;
+				esac
+			fi
 			for dev in "${tracked_devices[@]}"; do
 				add_crypttab_option "$dev" 'tpm2-device=auto'
 				[ -n "$arg_no_measure_pcr" ] || add_crypttab_option "$dev" 'tpm2-measure-pcr=yes'
@@ -5301,24 +5363,6 @@ enroll()
 			done
 			;;
 	esac
-
-	# For predicting PCR 15 we need to sign a file.  Create the
-	# public and private key if missing, before the initrd is
-	# regenerated below, as the public key is installed inside it
-	if { [ "$arg_method" = "tpm2" ] || [ "$arg_method" = "tpm2+pin" ]; } && [ -z "$arg_no_measure_pcr" ]; then
-		# A new key pair must reach the initrd, as the validator
-		# checks the signature of the prediction with the public
-		# key installed there.  The rebuild below is driven by
-		# /etc/crypttab, that can be already correct (an image
-		# where the device is enrolled after the deployment, or
-		# a re-enrollment), so ask for it here.  Otherwise the
-		# prediction is signed with a key that the initrd does
-		# not know, and measure-pcr-validator.service powers the
-		# machine off
-		if create_measure_pcr_keys; then
-			arg_no_reuse_initrd=1
-		fi
-	fi
 
 	# If the crypttab file changed (that is expected), we need to
 	# generate a new initrd
