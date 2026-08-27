@@ -185,11 +185,15 @@ to manage entires on snapshot creation and removal, as well as when
 the default subvolume is set.
 
 Kernel package installation and removal also trigger calls to
-`sdbootutil` via [file
-triggers](https://github.com/lnussel/sdbootutil/blob/main/kernelhooks.lua).
-Unfortunately the file trigger method seems to be unreliable with zypper.
-Moreover, file triggers can't make an rpm transaction fail
-(https://github.com/rpm-software-management/rpm/issues/2581).
+`sdbootutil`, through the [kernel-install
+plugin](https://github.com/lnussel/sdbootutil/blob/main/50-sdbootutil.install)
+that `kernel-install` runs when the layout is `bls`.
+
+This replaced an earlier [rpm file
+trigger](https://github.com/lnussel/sdbootutil/blob/main/kernelhooks.lua),
+which was unreliable with zypper and could not make an rpm transaction
+fail (https://github.com/rpm-software-management/rpm/issues/2581). That
+file is still in the tree but is no longer installed by the spec.
 
 Secure boot support
 ------------------------
