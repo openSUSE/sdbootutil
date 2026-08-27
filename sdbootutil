@@ -134,6 +134,10 @@ tracked_devices=()
 
 rollback=()
 
+# Set by `enroll` while /etc/crypttab already asks for an unlock method
+# that no keyslot backs yet.  Cleared once the enrollment succeeded
+restore_crypttab=
+
 # Lifetime of the keys that sdbootutil adds to the kernel keyring.  It
 # is re-armed when the script exits, so it measures how long a secret
 # outlives the run that published it, and never expires in the middle
@@ -171,6 +175,28 @@ cleanup()
 			rm -f "$i"
 		fi
 	done
+	# A device that keeps the option in /etc/crypttab but has no slot
+	# for it falls back to the password prompt during the boot,
+	# hiding the failed enrollment.  The initrd embeds /etc/crypttab,
+	# so it has to be generated again.
+	#
+	# This is here and not in `enroll` because every fatal path after
+	# the options are added has to undo them, and there are several:
+	# `install_all_kernels`, `generate_tpm2_predictions` (the
+	# prediction that cannot be signed), and a PIN that cannot be
+	# asked because there is no terminal.  After the rollback above,
+	# so that the initrds are rebuilt from the restored file instead
+	# of being undone by it
+	if [ -n "$restore_crypttab" ] && ! cmp -s "$tmpdir/crypttab" /etc/crypttab; then
+		info "Restoring /etc/crypttab"
+		cp -a "$tmpdir/crypttab" /etc/crypttab
+		# In a subshell because `err` is an `exit`, and from
+		# inside the trap that would skip the rest of this
+		# function without even removing $tmpdir
+		( install_all_kernels "$root_snapshot" ) || \
+			warn "The initrd still carries the /etc/crypttab of the failed enrollment"
+	fi
+
 	dbg "Cleaning temporary directory $tmpdir"
 	rm -rf "$tmpdir"
 
@@ -5306,7 +5332,10 @@ enroll()
 
 	info "Enrolling devices ($arg_method): ${tracked_devices[*]}"
 
+	# From here on /etc/crypttab can ask for a method that no keyslot
+	# backs yet, and the trap puts it back if anything below fails
 	cp -a /etc/crypttab "$tmpdir/crypttab"
+	restore_crypttab=1
 
 	# Prepare /etc/crypttab and update initrd if required
 	case "$arg_method" in
@@ -5429,18 +5458,12 @@ enroll()
 		enroll_device "$dev" "$pin_or_pw" || { failed="$dev"; break; }
 	done
 
-	# A device that keeps the option in /etc/crypttab but has no
-	# slot for it falls back to the password prompt during the
-	# boot, hiding the failed enrollment.  The initrd embeds
-	# /etc/crypttab, so it needs to be generated again
-	if [ -n "$failed" ]; then
-		if ! cmp -s "$tmpdir/crypttab" /etc/crypttab; then
-			info "Restoring /etc/crypttab"
-			cp -a "$tmpdir/crypttab" /etc/crypttab
-			install_all_kernels "$root_snapshot"
-		fi
-		err "Failed to enroll ($arg_method): $failed"
-	fi
+	# /etc/crypttab is put back by the trap
+	[ -z "$failed" ] || err "Failed to enroll ($arg_method): $failed"
+
+	# The slots are in place, so the options in /etc/crypttab are
+	# backed now and must stay
+	restore_crypttab=
 }
 
 unenroll_all_pcrlock()
