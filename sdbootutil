@@ -48,7 +48,9 @@ arg_only_default=
 arg_default_snapshot=
 arg_ask_key=
 arg_ask_pin=
+arg_ask_recovery_pin=
 arg_ask_pw=
+arg_ask_current_pw=
 arg_method=
 arg_no_measure_pcr=
 arg_measure_pcr=
@@ -115,6 +117,10 @@ rollback=()
 keyctl_timeout=600
 created_keys=()
 
+# Purposes already reported by deprecated_keyring_secret, so a system
+# with several devices does not repeat the same warning per device
+warned_keyring_secret=
+
 declare -A eventlog
 
 tmpdir=$(mktemp -d -t sdbootutil.XXXXXX)
@@ -175,11 +181,11 @@ helpandquit()
 		  --secure-boot		When installing the bootloader, use the shim
 		  --only-default	Only list the default entry
 		  --default-snapshot	[SNAPSHOT] refers to the default snapshot
-		  --ask-key		Ask recovery Key when initial enrollment
-		                        (or randomly generated)
-		  --ask-pin		Ask recovery PIN for re-enrollment or ask TPM2 PIN
-		                        when initial enrollment
-		  --ask-pw		Ask password when initial enrollment
+		  --ask-key		Ask the new recovery key (or randomly generated)
+		  --ask-pin		Ask the new TPM2 PIN, and the recovery PIN
+		  --ask-recovery-pin	Ask only the recovery PIN
+		  --ask-pw		Ask the new password
+		  --ask-current-pw	Ask the password that already opens the devices
 		  --method		"tpm2", "tpm2+pin", "fido2", "password", "recovery-key"
 		  --no-measure-pcr	During enrollment, do not include PCR 15 protection
 		  --measure-pcr		Force update of PCR 15 prediction for LUKS2 volume key
@@ -313,13 +319,30 @@ helpandquit()
 		update-predictions
 		           Update TPM2 predictions
 
+		Secrets:
+		Each one is taken from the --ask-X parameter, the X variable
+		or the %u:sdbootutil-x keyring entry, in that order:
+
+		                  parameter          variable      keyring (%u)
+		Current password  --ask-current-pw   CURRENT_PW    cryptenroll
+		New recovery key  --ask-key          KEY           sdbootutil-key
+		New password      --ask-pw           PW            sdbootutil-pw
+		TPM2 PIN          --ask-pin          PIN           sdbootutil-tpm2-pin
+		Recovery PIN      --ask-recovery-pin RECOVERY_PIN  sdbootutil-recovery-pin
+
+		The TPM2 PIN is typed at every boot; the recovery PIN
+		re-authorizes the pcrlock NVIndex, and PIN also names it when
+		there is no TPM2 PIN (--method=tpm2, update-predictions).
+		--ask-pin asks both.  With no source, the recovery key and
+		the recovery PIN are generated and printed.
+
+		Prefer the keyring, it expires and the environment does not.
+		%u:sdbootutil (any secret, read last) and %u:sdbootutil-pin
+		(now -recovery-pin) are deprecated.
+
 		Variables:
 		SYSTEMD_COLORS	Set 0 to disable colored output
-		KEY		Set / use recovery key (initial enrollment; %u:sdbootutil)
-		PW		Set / use password / recovery key (initial enrollment; %u:sdbootutil)
-		PIN		Set / use TPM2 PIN (initial enrollment; %u:sdbootutil)
-		PIN		Use recovery PIN (re-enrollment; %u:sdbootutil)
-		                (%u:cryptenroll for changes via systemd-cryptenroll)
+		CURRENT_PW, KEY, PW, PIN and RECOVERY_PIN are in Secrets:
 
 		Misc:
 		Ignoring Devices	A LUKS2 device can be un-tracked (ignored)
@@ -541,6 +564,41 @@ reset_rollback()
 is_transactional()
 {
 	findmnt --fstab / -O ro &> /dev/null
+}
+
+# %user:sdbootutil is a single entry that is read as a different secret
+# depending on the method (the new recovery key, the new password, the
+# TPM2 PIN, the recovery PIN of the pcrlock NVIndex), so a value left
+# there for one purpose is used for another one.  Each purpose has now
+# its own entry, and this one is still read, last, only for the
+# installers that have not moved yet
+deprecated_keyring_secret()
+{
+	local purpose="${1:?}"
+	local name="${2:?}"
+	local old="${3:-sdbootutil}"
+
+	[[ "$warned_keyring_secret" != *"|$old>$name|"* ]] || return 0
+	warned_keyring_secret+="|$old>$name|"
+	warn "Reading the $purpose from %user:$old is deprecated. Use %user:$name"
+}
+
+# The recovery PIN used to live in %user:sdbootutil-pin, one character
+# away from the %user:sdbootutil-tpm2-pin that holds the PIN typed at
+# every boot.  They are different secrets, as the recovery one rewrites
+# the pcrlock policy, so the old name is deprecated but still read
+recovery_pin_keyid()
+{
+	local keyid
+
+	if keyid="$(keyctl id %user:sdbootutil-recovery-pin 2> /dev/null)"; then
+		echo "$keyid"
+	elif keyid="$(keyctl id %user:sdbootutil-pin 2> /dev/null)"; then
+		deprecated_keyring_secret "recovery PIN" "sdbootutil-recovery-pin" "sdbootutil-pin"
+		echo "$keyid"
+	else
+		return 1
+	fi
 }
 
 keyctl_add_with_timeout()
@@ -4066,15 +4124,32 @@ generate_tpm2_predictions_pcrlock()
 	# but we can do a re-enrollment using the recovery PIN.  To
 	# register a recovery PIN the installer (sdbootutil-enroll,
 	# YaST) will call this script deploying in the %u keyring
-	# "sdbootutil[-pin]" entry.  For re-enrollments we can use the
-	# same entry, the PIN environment variable, or the --ask-pin
-	# parameter.
+	# "sdbootutil-recovery-pin" entry (or the deprecated
+	# "sdbootutil-pin" and "sdbootutil" ones).  For re-enrollments we
+	# can use the same entry, the RECOVERY_PIN or PIN environment
+	# variables, or the --ask-recovery-pin parameter.
 	local pin
 	local extra=()
 	local keyid keyid_int
 	keyid="$(keyctl id %user:sdbootutil 2> /dev/null)" || true
-	keyid_int="$(keyctl id %user:sdbootutil-pin 2> /dev/null)" || true
-	if [ -n "$arg_ask_pin" ]; then
+	keyid_int="$(recovery_pin_keyid)" || true
+	# For "tpm2+pin" both $PIN and %user:sdbootutil hold the TPM2
+	# PIN that is typed at every boot, and that one must not be the
+	# recovery PIN too: it re-authorizes the NVIndex, so seeing the
+	# boot PIN once would be enough to rewrite the policy.  With
+	# --ask-pin the two are already asked separately, and both
+	# RECOVERY_PIN and %user:sdbootutil-recovery-pin name the
+	# recovery PIN, so all of them are still read.  Left with no
+	# source, systemd-pcrlock generates one and it is printed below
+	local pin_env="$PIN"
+	if [ "$arg_method" = "tpm2+pin" ]; then
+		pin_env=
+		keyid=
+	fi
+	# RECOVERY_PIN is unambiguous, so it wins over the overloaded
+	# PIN and is the only environment variable for "tpm2+pin"
+	[ -z "$RECOVERY_PIN" ] || pin_env="$RECOVERY_PIN"
+	if [ -n "$arg_ask_pin$arg_ask_recovery_pin" ]; then
 		# When enrolling, we should ask two times
 		if [ -n "$arg_method" ]; then
 			info "The recovery PIN is used when the TPM2 policy needs to be updated"
@@ -4083,13 +4158,14 @@ generate_tpm2_predictions_pcrlock()
 			ask_password "Recovery PIN" pin
 		fi
 		extra=("--recovery-pin=yes")
-	elif [ -n "$PIN" ]; then
-		pin="$PIN"
+	elif [ -n "$pin_env" ]; then
+		pin="$pin_env"
 		extra=("--recovery-pin=yes")
 	elif [ -n "$keyid_int" ]; then
 		pin="$(keyctl pipe "$keyid_int")"
 		extra=("--recovery-pin=yes")
 	elif [ -n "$keyid" ]; then
+		deprecated_keyring_secret "recovery PIN" "sdbootutil-recovery-pin"
 		pin="$(keyctl pipe "$keyid")"
 		extra=("--recovery-pin=yes")
 	else
@@ -4142,7 +4218,7 @@ generate_tpm2_predictions_pcrlock()
 		# Add the generated recovery PIN to the kernel
 		# keyring, so that it is available to `sdbootutil
 		# enroll --method=recovery-key`
-		keyctl_add_with_timeout "sdbootutil-pin" "$pin"
+		keyctl_add_with_timeout "sdbootutil-recovery-pin" "$pin"
 	fi
 
 	[ -e /var/lib/systemd/pcrlock.json ] || {
@@ -4203,17 +4279,26 @@ get_device_password()
 		mapfile -d '' -t from_keyring < <(keyctl pipe "$keyid")
 	fi
 
-	# PW, KEY and %user:sdbootutil hold the *new* secret for the
-	# password, recovery-key and tpm2+pin methods, and during the
-	# first enrollment %user:sdbootutil can contain the recovery
+	# CURRENT_PW is the only source that declares itself to be a
+	# *current* password, so it is tried first
+	[ -z "$CURRENT_PW" ] || candidates+=("$CURRENT_PW")
+
+	# PW, KEY and the %user:sdbootutil* entries hold the *new*
+	# secret for the password, recovery-key and tpm2+pin methods,
+	# and during the first enrollment they can contain the recovery
 	# PIN, so every candidate is validated before it is used.
 	# Adding a wrong one is not harmless: keyctl replaces the
-	# payload, so it would drop a valid password
+	# payload, so it would drop a valid password.  Because of the
+	# validation, %user:sdbootutil is not ambiguous here and it is
+	# not deprecated as a candidate
 	[ -z "$PW" ] || candidates+=("$PW")
 	[ -z "$KEY" ] || candidates+=("$KEY")
-	if keyid="$(keyctl id %user:sdbootutil 2> /dev/null)"; then
-		candidates+=("$(keyctl pipe "$keyid")")
-	fi
+	local name
+	for name in sdbootutil-pw sdbootutil-key sdbootutil-recovery-pin sdbootutil-pin sdbootutil; do
+		if keyid="$(keyctl id %user:"$name" 2> /dev/null)"; then
+			candidates+=("$(keyctl pipe "$keyid")")
+		fi
+	done
 
 	local in_keyring=
 	for candidate in "${from_keyring[@]}"; do
@@ -4231,9 +4316,10 @@ get_device_password()
 	fi
 
 	# Ask the password only as a last resort, and only if
-	# --measure-pcr is set.  Any --ask-* also means that there is
-	# someone in front of a terminal willing to type it
-	if [ -z "$pw" ] && { [ -n "$arg_measure_pcr" ] || [ -n "$arg_ask_key$arg_ask_pin$arg_ask_pw" ]; }; then
+	# --measure-pcr or --ask-current-pw are set.  Any other --ask-*
+	# also means that there is someone in front of a terminal
+	# willing to type it
+	if [ -z "$pw" ] && { [ -n "$arg_measure_pcr" ] || [ -n "$arg_ask_key$arg_ask_pin$arg_ask_recovery_pin$arg_ask_pw$arg_ask_current_pw" ]; }; then
 		ask_password "Password for $dev" pw
 		valid_password "$dev" "$pw" || {
 			warn "The password does not unlock $dev"
@@ -4858,17 +4944,23 @@ enroll_recovery_key()
 
 	# If no recovery key is provided, systemd-cryptenroll will
 	# generate one
-	local key keyid keyid_int
-	keyid="$(keyctl id %user:sdbootutil 2> /dev/null)" || true
-	keyid_int="$(keyctl id %user:sdbootutil-pin 2> /dev/null)" || true
+	local key keyid keyid_key keyid_int keyid_dep
+	keyid_key="$(keyctl id %user:sdbootutil-key 2> /dev/null)" || true
+	keyid_int="$(recovery_pin_keyid)" || true
+	keyid_dep="$(keyctl id %user:sdbootutil 2> /dev/null)" || true
 	if [ -n "$arg_ask_key" ]; then
 		ask_new_password "recovery key" key
 	elif [ -n "$KEY" ]; then
 		key="$KEY"
+	elif [ -n "$keyid_key" ]; then
+		key="$(keyctl pipe "$keyid_key")"
 	elif [ -n "$keyid_int" ]; then
+		# There is no recovery key, but there is a recovery PIN:
+		# make both the same one (see below)
 		key="$(keyctl pipe "$keyid_int")"
-	elif [ -n "$keyid" ]; then
-		key="$(keyctl pipe "$keyid")"
+	elif [ -n "$keyid_dep" ]; then
+		deprecated_keyring_secret "recovery key" "sdbootutil-key"
+		key="$(keyctl pipe "$keyid_dep")"
 	fi
 
 	local header
@@ -4877,7 +4969,8 @@ enroll_recovery_key()
 	local generated_key=
 	# This function will be called for every device.  Let systemd
 	# generate a secure recovery key only the first time if there
-	# is no recovery pin selected (%user:sdbootutil[-pin])
+	# is no recovery key or pin selected (%user:sdbootutil-key,
+	# %user:sdbootutil-recovery-pin)
 	if [ -z "$key" ]; then
 		# systemd-cryptenroll will put in stdout the recovery
 		# key, and the rest of the information in stderr
@@ -4941,7 +5034,7 @@ enroll_recovery_key()
 	# protects the pcrlock NV index, and it is not overwritten:
 	# that PIN cannot be recovered from anywhere else
 	if [ -z "$keyid_int" ]; then
-		keyctl_add_with_timeout "sdbootutil-pin" "$key"
+		keyctl_add_with_timeout "sdbootutil-recovery-pin" "$key"
 	elif [ "$key" != "$(keyctl pipe "$keyid_int")" ]; then
 		warn "The recovery key and the recovery PIN are now different"
 	fi
@@ -5052,30 +5145,38 @@ enroll()
 	fi
 
 	# For the PIN (tpm2+pin) or password (password), we can get it
-	# from the %u keyring "sdbootutil" entry, the PIN or PW
-	# environment variable, or introduced by the user.  Like
-	# --ask-key in enroll_recovery_key, an explicit --ask-pin or
-	# --ask-pw takes precedence over the other sources
-	local pin_or_pw keyid
+	# from the %u keyring "sdbootutil-tpm2-pin" / "sdbootutil-pw"
+	# entry, the PIN or PW environment variable, or introduced by the
+	# user.  Like --ask-key in enroll_recovery_key, an explicit
+	# --ask-pin or --ask-pw takes precedence over the other sources
+	local pin_or_pw keyid keyid_dep
 	if [ "$arg_method" = "tpm2+pin" ]; then
-		keyid="$(keyctl id %user:sdbootutil 2> /dev/null)" || true
+		keyid="$(keyctl id %user:sdbootutil-tpm2-pin 2> /dev/null)" || true
+		keyid_dep="$(keyctl id %user:sdbootutil 2> /dev/null)" || true
 		if [ -n "$arg_ask_pin" ]; then
 			ask_new_password "TPM2 PIN" pin_or_pw
 		elif [ -n "$PIN" ]; then
 			pin_or_pw="$PIN"
 		elif [ -n "$keyid" ]; then
 			pin_or_pw="$(keyctl pipe "$keyid")"
+		elif [ -n "$keyid_dep" ]; then
+			deprecated_keyring_secret "TPM2 PIN" "sdbootutil-tpm2-pin"
+			pin_or_pw="$(keyctl pipe "$keyid_dep")"
 		else
 			ask_new_password "TPM2 PIN" pin_or_pw
 		fi
 	elif [ "$arg_method" = "password" ]; then
-		keyid="$(keyctl id %user:sdbootutil 2> /dev/null)" || true
+		keyid="$(keyctl id %user:sdbootutil-pw 2> /dev/null)" || true
+		keyid_dep="$(keyctl id %user:sdbootutil 2> /dev/null)" || true
 		if [ -n "$arg_ask_pw" ]; then
 			ask_new_password "password" pin_or_pw
 		elif [ -n "$PW" ]; then
 			pin_or_pw="$PW"
 		elif [ -n "$keyid" ]; then
 			pin_or_pw="$(keyctl pipe "$keyid")"
+		elif [ -n "$keyid_dep" ]; then
+			deprecated_keyring_secret "password" "sdbootutil-pw"
+			pin_or_pw="$(keyctl pipe "$keyid_dep")"
 		else
 			ask_new_password "password" pin_or_pw
 		fi
@@ -5337,7 +5438,9 @@ define_options() {
 		[default-snapshot]=""
 		[ask-key]=""
 		[ask-pin]=""
+		[ask-recovery-pin]=""
 		[ask-pw]=""
+		[ask-current-pw]=""
 		[method]="_method"
 		[no-measure-pcr]=""
 		[measure-pcr]=""
@@ -5398,7 +5501,9 @@ while true ; do
 		--default-snapshot) arg_default_snapshot=1; shift ;;
 		--ask-key) arg_ask_key=1; shift ;;
 		--ask-pin) arg_ask_pin=1; shift ;;
+		--ask-recovery-pin) arg_ask_recovery_pin=1; shift ;;
 		--ask-pw) arg_ask_pw=1; shift ;;
+		--ask-current-pw) arg_ask_current_pw=1; shift ;;
 		--method) arg_method="$2"; shift 2 ;;
 		--no-measure-pcr) arg_no_measure_pcr=1; shift ;;
 		--measure-pcr) arg_measure_pcr=1; shift ;;
