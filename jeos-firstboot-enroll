@@ -18,6 +18,27 @@ have_luks2() {
 	lsblk --noheadings -o FSTYPE | grep -q crypto_LUKS
 }
 
+# A dialog is the only report this module has, and once it is dismissed
+# nothing is left: jeos-firstboot.service has "StandardOutput=tty" and
+# lets StandardError inherit it, so not even stderr reaches the journal.
+# The captured output of sdbootutil is the whole diagnostic of a failed
+# enrollment, and this is the last place where it still exists.
+#
+# `sdbootutil-enroll` needs none of this: it is a service, so its output
+# is already journaled
+#
+# Never fails the caller: a missing logger must not turn a reportable
+# problem into an unreported one
+log_enroll() {
+	logger -t jeos-firstboot-enroll -p "user.${1:?}" -- "$2" 2> /dev/null || :
+}
+
+# The same text in the dialog and in the journal
+report_error() {
+	log_enroll err "$1"
+	d --msgbox "$1" 0 0
+}
+
 # exit early without defining any helper functions if there are no luks devices
 have_luks2 || return 0
 
@@ -31,8 +52,11 @@ enroll_systemd_firstboot() {
 	# from a credential.  `d` is not used for it: dialog exits 255
 	# when the time is over, and that is the same code as ESC, so it
 	# would ask "Do you really want to quit?"
+	local msg
 	[ -e /usr/bin/systemd-cryptenroll ] || {
-		d_styled --timeout 60 --msgbox $"systemd-cryptenroll is not installed, so the encrypted devices cannot be enrolled." 0 0 || :
+		msg=$"systemd-cryptenroll is not installed, so the encrypted devices cannot be enrolled."
+		log_enroll err "$msg"
+		d_styled --timeout 60 --msgbox "$msg" 0 0 || :
 		return 0
 	}
 	# The key that disk-encryption-tool adds lives only in the memory
@@ -40,7 +64,9 @@ enroll_systemd_firstboot() {
 	# a later boot finds nothing here
 	crypt_keyid="$(keyctl id %user:cryptenroll 2> /dev/null)" || true
 	[ -n "$crypt_keyid" ] || {
-		d_styled --timeout 60 --msgbox $"The password of the encrypted devices is not available, so they cannot be enrolled. Use 'jeos-config enroll' to do it later." 0 0 || :
+		msg=$"The password of the encrypted devices is not available, so they cannot be enrolled. Use 'jeos-config enroll' to do it later."
+		log_enroll err "$msg"
+		d_styled --timeout 60 --msgbox "$msg" 0 0 || :
 		return 0
 	}
 
@@ -112,7 +138,7 @@ enroll_systemd_firstboot() {
 				d --msgbox $"Passwords don't match. Try again" 0 0
 			done
 		else
-			d --msgbox "Error: $result" 0 0
+			report_error "Error: $result"
 		fi
 	done
 
@@ -222,6 +248,12 @@ enroll_post() {
 
 do_enroll() {
 	local out r error=0
+
+	# What was chosen, so that the journal can answer "was anything
+	# enrolled at all, and what" without the person who ran firstboot
+	# having to remember the menu
+	log_enroll info "Enrolling:${with_recovery_key:+ recovery-key}${crypt_pw:+ password}${with_tpm2:+ tpm2}${crypt_tpm_pin:+ (with PIN)}${with_fido2:+ fido2}"
+
 	[ -z "$with_recovery_key" ] || {
 		# Note that if --no-reuse-initrd is used, then a new
 		# initrd will be created and will break the
@@ -235,7 +267,7 @@ do_enroll() {
 		out="$(run sdbootutil enroll --method=recovery-key "$extra" 2>&1)"
 		r="$?"
 		if [ $r -ne 0 ]; then
-			d --msgbox "Error (recovery-key): $out" 0 0
+			report_error "Error (recovery-key): $out"
 			error=1
 		else
 			write_issue_file "$out"
@@ -255,7 +287,7 @@ do_enroll() {
 		out="$(PW="$crypt_pw" run sdbootutil enroll --method=password "$extra" 2>&1)"
 		r="$?"
 		[ $r -eq 0 ] || {
-			d --msgbox "Error (password): $out" 0 0
+			report_error "Error (password): $out"
 			error=1
 		}
 	}
@@ -266,7 +298,7 @@ do_enroll() {
 			out="$(SDB_ADD_INITIAL_COMPONENT=1 PIN="$crypt_tpm_pin" run sdbootutil enroll --method=tpm2+pin 2>&1)"
 			r="$?"
 			if [ $r -ne 0 ]; then
-				d --msgbox "Error (TPM2+PIN): $out" 0 0
+				report_error "Error (TPM2+PIN): $out"
 				error=1
 			else
 				write_recovery_pin "$out"
@@ -276,7 +308,7 @@ do_enroll() {
 			out="$(SDB_ADD_INITIAL_COMPONENT=1 run sdbootutil enroll --method=tpm2 2>&1)"
 			r="$?"
 			if [ $r -ne 0 ]; then
-				d --msgbox "Error (TPM2): $out" 0 0
+				report_error "Error (TPM2): $out"
 				error=1
 			else
 				write_recovery_pin "$out"
@@ -293,13 +325,13 @@ do_enroll() {
 		out="$(run sdbootutil enroll --method=fido2 2>&1)"
 		r="$?"
 		[ $r -eq 0 ] || {
-			d --msgbox "Error (FIDO2): $out" 0 0
+			report_error "Error (FIDO2): $out"
 			error=1
 		}
 	}
 
 	if [ "$error" -eq 1 ]; then
-		d --msgbox "One or more enrollment methods failed. Resolve the issue and re-try with 'jeos-config enroll'" 0 0
+		report_error "One or more enrollment methods failed. Resolve the issue and re-try with 'jeos-config enroll'"
 	elif [ -n "$with_recovery_key$crypt_pw$with_tpm2$with_fido2" ]; then
 		# Clean the enrollment key that disk-encryption-tool
 		# created
@@ -312,10 +344,11 @@ do_enroll() {
 		while read -r dev; do
 			wipe_enrollment_key "$dev"
 			case "$?" in
-				1) d --msgbox "Keeping the enrollment key of $dev, as no other method can open it" 0 0 ;;
-				2) d --msgbox "Failed to remove the enrollment key of $dev" 0 0 ;;
+				1) report_error "Keeping the enrollment key of $dev, as no other method can open it" ;;
+				2) report_error "Failed to remove the enrollment key of $dev" ;;
 			esac
 		done < <(sdbootutil list-devices)
+		log_enroll info "Enrollment finished"
 	fi
 }
 
@@ -346,7 +379,7 @@ enroll_jeos_config() {
 	# Everything that comes next takes the password from here, so
 	# without it the enrollment can only fail, once per method
 	echo -n "$result" | keyctl padd user cryptenroll @u &> /dev/null || {
-		d --msgbox $"Failed to store the password in the kernel keyring" 0 0
+		report_error $"Failed to store the password in the kernel keyring"
 		return 0
 	}
 
