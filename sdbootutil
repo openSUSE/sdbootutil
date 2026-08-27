@@ -6,6 +6,30 @@ shopt -s nullglob
 
 export LC_ALL=C
 
+# The five secrets that can arrive in the environment.  A prefix
+# assignment scopes them to this process, but this script spawns
+# systemd-cryptenroll, systemd-pcrlock, cryptsetup and dracut, and a
+# child inherits the whole environment: every one of them would carry
+# the secret in /proc/PID/environ, readable for as long as it lives, and
+# dracut lives for minutes.  Copying the values into plain shell
+# variables and unsetting the exported ones keeps them in this process,
+# so the only thing a child sees is what is handed to it on purpose,
+# the way `enroll_password` passes NEWPASSWORD
+#
+# "unset" is what removes them from the export list; assigning an empty
+# value would still export the name
+#
+# This is here, and not with the other globals below, to be ahead of
+# the first child (`uname` a few lines down) and ahead of the `set -x`
+# that --start-trace-code turns on, which would otherwise write these
+# assignments to the log
+env_current_pw="$CURRENT_PW"
+env_key="$KEY"
+env_pw="$PW"
+env_pin="$PIN"
+env_recovery_pin="$RECOVERY_PIN"
+unset CURRENT_PW KEY PW PIN RECOVERY_PIN
+
 DEBUG_LOG="/var/log/sdbootutil.log"
 verbose=
 
@@ -4209,7 +4233,7 @@ generate_tpm2_predictions_pcrlock()
 	local keyid keyid_int
 	keyid="$(keyctl id %user:sdbootutil 2> /dev/null)" || true
 	keyid_int="$(recovery_pin_keyid)" || true
-	# For "tpm2+pin" both $PIN and %user:sdbootutil hold the TPM2
+	# For "tpm2+pin" both PIN and %user:sdbootutil hold the TPM2
 	# PIN that is typed at every boot, and that one must not be the
 	# recovery PIN too: it re-authorizes the NVIndex, so seeing the
 	# boot PIN once would be enough to rewrite the policy.  With
@@ -4217,14 +4241,14 @@ generate_tpm2_predictions_pcrlock()
 	# RECOVERY_PIN and %user:sdbootutil-recovery-pin name the
 	# recovery PIN, so all of them are still read.  Left with no
 	# source, systemd-pcrlock generates one and it is printed below
-	local pin_env="$PIN"
+	local pin_env="$env_pin"
 	if [ "$arg_method" = "tpm2+pin" ]; then
 		pin_env=
 		keyid=
 	fi
 	# RECOVERY_PIN is unambiguous, so it wins over the overloaded
 	# PIN and is the only environment variable for "tpm2+pin"
-	[ -z "$RECOVERY_PIN" ] || pin_env="$RECOVERY_PIN"
+	[ -z "$env_recovery_pin" ] || pin_env="$env_recovery_pin"
 	if [ -n "$arg_ask_pin$arg_ask_recovery_pin" ]; then
 		# When enrolling, we should ask two times
 		if [ -n "$arg_method" ]; then
@@ -4357,7 +4381,7 @@ get_device_password()
 
 	# CURRENT_PW is the only source that declares itself to be a
 	# *current* password, so it is tried first
-	[ -z "$CURRENT_PW" ] || candidates+=("$CURRENT_PW")
+	[ -z "$env_current_pw" ] || candidates+=("$env_current_pw")
 
 	# PW, KEY and the %user:sdbootutil* entries hold the *new*
 	# secret for the password, recovery-key and tpm2+pin methods,
@@ -4367,8 +4391,8 @@ get_device_password()
 	# payload, so it would drop a valid password.  Because of the
 	# validation, %user:sdbootutil is not ambiguous here and it is
 	# not deprecated as a candidate
-	[ -z "$PW" ] || candidates+=("$PW")
-	[ -z "$KEY" ] || candidates+=("$KEY")
+	[ -z "$env_pw" ] || candidates+=("$env_pw")
+	[ -z "$env_key" ] || candidates+=("$env_key")
 	local name
 	for name in sdbootutil-pw sdbootutil-key sdbootutil-recovery-pin sdbootutil-pin sdbootutil; do
 		if keyid="$(keyctl id %user:"$name" 2> /dev/null)"; then
@@ -5117,8 +5141,8 @@ enroll_recovery_key()
 	keyid_dep="$(keyctl id %user:sdbootutil 2> /dev/null)" || true
 	if [ -n "$arg_ask_key" ]; then
 		ask_new_password "recovery key" key
-	elif [ -n "$KEY" ]; then
-		key="$KEY"
+	elif [ -n "$env_key" ]; then
+		key="$env_key"
 	elif [ -n "$keyid_key" ]; then
 		key="$(keyctl pipe "$keyid_key")"
 	elif [ -n "$keyid_int" ]; then
@@ -5322,8 +5346,8 @@ enroll()
 		keyid_dep="$(keyctl id %user:sdbootutil 2> /dev/null)" || true
 		if [ -n "$arg_ask_pin" ]; then
 			ask_new_password "TPM2 PIN" pin_or_pw
-		elif [ -n "$PIN" ]; then
-			pin_or_pw="$PIN"
+		elif [ -n "$env_pin" ]; then
+			pin_or_pw="$env_pin"
 		elif [ -n "$keyid" ]; then
 			pin_or_pw="$(keyctl pipe "$keyid")"
 		elif [ -n "$keyid_dep" ]; then
@@ -5337,8 +5361,8 @@ enroll()
 		keyid_dep="$(keyctl id %user:sdbootutil 2> /dev/null)" || true
 		if [ -n "$arg_ask_pw" ]; then
 			ask_new_password "password" pin_or_pw
-		elif [ -n "$PW" ]; then
-			pin_or_pw="$PW"
+		elif [ -n "$env_pw" ]; then
+			pin_or_pw="$env_pw"
 		elif [ -n "$keyid" ]; then
 			pin_or_pw="$(keyctl pipe "$keyid")"
 		elif [ -n "$keyid_dep" ]; then
