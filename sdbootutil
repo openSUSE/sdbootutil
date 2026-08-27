@@ -4781,11 +4781,18 @@ check_enrolled()
 	local kind="${2:?}"
 	local header="${3:?}"
 
-	# An unchanged header means that nothing was written at all, and a
-	# changed one without a slot of this kind means that something
-	# else was.  Both are a failed enrollment
-	if [ "$header" = "$(luks_header "$dev")" ] || ! have_slot "$dev" "$kind"; then
-		warn "systemd-cryptenroll reported no error, but $dev was not enrolled with $kind"
+	# Both are a failed enrollment, but they are not the same
+	# failure and they are reported apart: the first one leaves the
+	# device exactly as it was, and the second one does not.  Only
+	# "/etc/crypttab" and the initrd are rolled back by the caller,
+	# never the LUKS2 header, so whatever was written stays
+	if [ "$header" = "$(luks_header "$dev")" ]; then
+		warn "systemd-cryptenroll reported no error, but it left the header of $dev untouched: nothing was enrolled with $kind"
+		return 1
+	fi
+
+	if ! have_slot "$dev" "$kind"; then
+		warn "systemd-cryptenroll reported no error and did change the header of $dev, but there is no $kind slot in it. The change is something else, and it is still there"
 		return 1
 	fi
 }
