@@ -708,7 +708,10 @@ ask_password()
 	# terminal, so without this check a non-interactive caller
 	# gets an empty password and no indication of why
 	[ -t 0 ] || err "\"$msg\" is required, but there is no terminal to ask for it"
-	read -r -s -p "$msg: " nameref_pw
+	# A closed terminal (^D) makes `read` fail, and as a bare command
+	# under `set -e` that ends the script without a word, while the
+	# case just above, no terminal at all, does explain itself
+	read -r -s -p "$msg: " nameref_pw || err "\"$msg\" was not provided"
 	echo >&2
 }
 
@@ -717,12 +720,21 @@ ask_new_password()
 	local msg="$1"
 	local -n nameref_pw="$2"
 	local pw1 pw2
-	ask_password "New $msg" pw1
-	ask_password "Re-type $msg" pw2
-	while [ "$pw1" != "$pw2" ]; do
-		warn "Inputs did't match!"
+	while :; do
 		ask_password "New $msg" pw1
 		ask_password "Re-type $msg" pw2
+		# Pressing only Enter is not an answer.  An empty
+		# password is enrolled by `systemd-cryptenroll` as a
+		# keyslot that nothing can open afterwards, and it
+		# reports success, and an empty TPM2 PIN makes it abort
+		# on an assertion
+		if [ -z "$pw1" ]; then
+			warn "The $msg cannot be empty!"
+		elif [ "$pw1" != "$pw2" ]; then
+			warn "Inputs did't match!"
+		else
+			break
+		fi
 	done
 	# shellcheck disable=SC2034
 	nameref_pw="$pw1"
