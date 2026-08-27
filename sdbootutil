@@ -4672,27 +4672,56 @@ have_tracked_devices()
 	[ "${#tracked_devices[@]}" -gt 0 ]
 }
 
+# A LUKS2 device is managed by sdbootutil when /etc/crypttab has a line
+# for it, unless that line carries the "x-sdbootutil.ignore" option.
+#
+# The decision is which crypttab line describes this device, and that is
+# what "is_same_device" answers, the same way that
+# "add_crypttab_option" asks it.  Searching the file for the name of the
+# device instead gets it wrong four ways: the match is not anchored to
+# the device field, so a mention inside a comment counts; "." and "-" in
+# a path are regular expression syntax; "/dev/sda2" is found in
+# "/dev/sda21"; and a line that names the device by "PARTUUID=",
+# "LABEL=" or "PARTLABEL=" is not found at all, which silently leaves
+# the device unmanaged
+is_tracked_device()
+{
+	local dev="${1:?}"
+	local name device key opts
+
+	# With no crypttab there is nothing that could exclude the
+	# device, and nothing that could name it either
+	[ -e /etc/crypttab ] || return 0
+
+	while read -r name device key opts; do
+		[[ "$name" != \#* ]] || continue
+		[ -n "$name" ] || continue
+		is_same_device "$dev" "$device" || continue
+		[[ "$opts" != *"x-sdbootutil.ignore"* ]] || {
+			dbg "Ignoring encrypted device $dev, un-tracked in /etc/crypttab"
+			return 1
+		}
+		return 0
+	done < /etc/crypttab
+
+	dbg "Ignoring encrypted device $dev, absent from /etc/crypttab"
+	return 1
+}
+
 detect_tracked_devices()
 {
-	# A LUKS2 device can be un-tracked (ignored) by sdbootutil if
-	# is present in /etc/crypttab and has the
-	# "x-sdbootutil.ignore" option
-	local dev fstype uuid
+	local dev fstype
 	! have_tracked_devices || return 0
 
 	dbg_cat "/etc/crypttab"
 
-	while read -r dev fstype uuid; do
+	while read -r dev fstype; do
 		[ "$fstype" = 'crypto_LUKS' ] || continue
 		cryptsetup isLuks --type luks2 "$dev" || continue
-		if [ -e /etc/crypttab ]; then
-			grep -E -q "(${dev}|${uuid})" /etc/crypttab || continue
-			grep -E -q "${dev}[[:space:]].*x-sdbootutil.ignore" /etc/crypttab && continue
-			grep -E -q "${uuid}[[:space:]].*x-sdbootutil.ignore" /etc/crypttab && continue
-		fi
+		is_tracked_device "$dev" || continue
 		dbg "Tracking encrypted device $dev"
 		tracked_devices+=("$dev")
-	done < <(lsblk --noheadings -o PATH,FSTYPE,UUID)
+	done < <(lsblk --noheadings -o PATH,FSTYPE)
 	have_tracked_devices
 }
 
