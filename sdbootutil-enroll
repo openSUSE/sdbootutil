@@ -76,6 +76,11 @@ write_recovery_pin()
 # slots is not enough here: another "other" is as transient as this one,
 # and the key of this one is random, never shown, and gone when the boot
 # ends, so a device left with only that is a device nobody can open
+#
+# Nothing is reported from here, so that this function can be the same
+# in jeos-firstboot-enroll, which has a dialog instead of a terminal.
+# Returns 1 when the slot was kept because nothing else opens the
+# device, and 2 when the wipe itself failed
 wipe_enrollment_key()
 {
 	local dev="${1:?}"
@@ -97,13 +102,10 @@ wipe_enrollment_key()
 
 	[ "${#transient[@]}" -ne 0 ] || return 0
 
-	[ "$usable" -gt 0 ] || {
-		echo "Keeping the enrollment key of $dev, as no other method can open it" > /dev/stderr
-		return 1
-	}
+	[ "$usable" -gt 0 ] || return 1
 
 	for slot in "${transient[@]}"; do
-		systemd-cryptenroll --wipe-slot="$slot" "$dev" || rc=1
+		systemd-cryptenroll --wipe-slot="$slot" "$dev" || rc=2
 	done
 
 	return "$rc"
@@ -270,7 +272,13 @@ fi
 # did.  The header is what decides, and it is read per device: a device
 # that "sdbootutil enroll" never reached still lists here
 while read -r dev; do
-	wipe_enrollment_key "$dev" || error=1
+	wipe_enrollment_key "$dev"
+	case "$?" in
+		1) echo "Keeping the enrollment key of $dev, as no other method can open it" > /dev/stderr
+		   error=1 ;;
+		2) echo "Failed to remove the enrollment key of $dev" > /dev/stderr
+		   error=1 ;;
+	esac
 done < <(sdbootutil list-devices)
 
 exit "$error"
