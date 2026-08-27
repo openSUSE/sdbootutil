@@ -29,7 +29,6 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 3. **Integration Scripts:**
    - `10-sdbootutil.snapper` - Snapper plugin for snapshot lifecycle hooks
-   - `kernelhooks.lua` - RPM file trigger for kernel package install/remove
    - `10-sdbootutil.tukit` - Tukit plugin for transactional systems
    - `50-sdbootutil.install` - kernel-install plugin script
 
@@ -57,11 +56,18 @@ Unlike standard systemd-boot which assumes one OS instance per kernel version, s
 - `delete-snapshot-pre`: Removes entries for deleted snapshot
 - `set-default-snapshot-post`: Sets bootloader default, adds entries (transactional systems only)
 
-**RPM Triggers** (`kernelhooks.lua`):
-- Monitors `/usr/lib/modules/{version}/vmlinuz` installations
-- Filters out legacy `/boot/vmlinuz-*` locations
-- Calls `sdbootutil add-kernel` / `remove-kernel` automatically
-- Note: File triggers can be unreliable with zypper
+**Kernel package install/remove** (`50-sdbootutil.install`, run by `kernel-install`):
+- Does nothing unless `KERNEL_INSTALL_LAYOUT` is `bls`
+- Calls `sdbootutil add-kernel` / `remove-kernel`, passing `--esp-path` and
+  `--entry-token` from the `kernel-install` environment
+- `add` refuses an image outside `/usr/lib/modules/{version}`, so legacy
+  `/boot/vmlinuz-*` locations are rejected rather than silently handled
+- This replaced an rpm file trigger; file triggers were unreliable with zypper
+  and cannot make an rpm transaction fail
+
+**`kernelhooks.lua`** - the old rpm file trigger. Still in the tree, but **not
+shipped**: the spec stopped installing it in `70013d1` (2023-07-26) and nothing
+references it. Kept for future work; it is not part of any current code path.
 
 **Transactional vs Non-Transactional:**
 - **Transactional (MicroOS):** Kernel entries added in `set-default-snapshot-post` after transaction completes
