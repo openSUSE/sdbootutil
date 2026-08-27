@@ -64,15 +64,25 @@ write_recovery_pin()
 [ ! -e "/var/lib/YaST2/reconfig_system" ] || exit 0
 have_luks2 || exit 0
 
+# The password that already opens the devices.  disk-encryption-tool
+# leaves the key it generated in %user:cryptenroll, which is also where
+# systemd-cryptenroll and sdbootutil look for it, so normally there is
+# nothing to provide.
+#
+# Neither this one nor the recovery PIN below is exported: an exported
+# secret is in the environment of every child process from here on, and
+# stays readable in /proc/PID/environ for as long as they live.  They
+# are passed as a prefix to the single command that needs them, like
+# the KEY, PW and PIN below
+current_pw=
+get_credential current_pw "sdbootutil-enroll.current-pw"
+
 # disk-encryption-tool-dracut uses "cryptenroll" for the keyring
 # parameter, if we use a different one we need to move it back to
 # "cryptenroll", to do the enrollment via sdbootutil without
 # requesting a password
-enroll_keyid="$(keyctl id %user:cryptenroll 2> /dev/null)" || exit 0
-[ -n "$enroll_keyid" ] || {
-	echo "Enrollment key not registered in the keyring. Aborting" > /dev/stderr
-	exit 1
-}
+enroll_keyid="$(keyctl id %user:cryptenroll 2> /dev/null)" || true
+[ -n "$enroll_keyid$current_pw" ] || exit 0
 
 # Proceed with the enrollment
 rk=
@@ -89,6 +99,14 @@ get_credential tpm2 "sdbootutil-enroll.tpm2"
 
 fido2=
 get_credential fido2 "sdbootutil-enroll.fido2"
+
+# The recovery PIN re-authorizes the pcrlock NVIndex when the
+# prediction stops matching the system.  Without one systemd-pcrlock
+# generates it, and it is only shown in the issue file.  Every method
+# gets it, not only the TPM2 ones: any of them can rebuild the initrd,
+# and sdbootutil regenerates the predictions when that happens
+recovery_pin=
+get_credential recovery_pin "sdbootutil-enroll.recovery-pin"
 
 # Without a single credential there is nothing to enroll, and the
 # keyslot that disk-encryption-tool left behind would be wiped without
@@ -119,13 +137,24 @@ error=0
 	if [ -z "$tpm2_pin" ] && [ -z "$tpm2" ] && [ -z "$fido2" ]; then
 		extra="--no-reuse-initrd"
 	fi
+	# Like ".pw" and ".tpm2+pin", this credential can carry the
+	# secret itself.  A plain "1" (or "yes"/"true") only requests the
+	# method, and then systemd generates a random recovery key
+	key=
+	case "$rk" in
+		1|yes|true) ;;
+		*) key="$rk" ;;
+	esac
 	# A failure leaves no key in the output, so the issue file would
 	# be empty.  With more than one device it can instead hold the
 	# key of the devices that were enrolled before the one that
 	# failed, which is worse: it announces a recovery key for a
 	# machine that cannot use it to boot
-	if recovery_key="$(sdbootutil enroll --method=recovery-key "$extra")"; then
-		write_issue_file "$recovery_key"
+	# Nothing is printed when the key was provided, and there is no
+	# point in announcing a secret that the deployment already knows
+	if recovery_key="$(CURRENT_PW="$current_pw" RECOVERY_PIN="$recovery_pin" \
+			   KEY="$key" sdbootutil enroll --method=recovery-key "$extra")"; then
+		[ -z "$recovery_key" ] || write_issue_file "$recovery_key"
 	else
 		echo "Failed to enroll the recovery key" > /dev/stderr
 		error=1
@@ -141,7 +170,8 @@ error=0
 	if [ -z "$tpm2_pin" ] && [ -z "$tpm2" ] && [ -z "$fido2" ]; then
 		extra="--no-reuse-initrd"
 	fi
-	PW="$pw" sdbootutil enroll --method=password "$extra" || {
+	CURRENT_PW="$current_pw" RECOVERY_PIN="$recovery_pin" \
+		PW="$pw" sdbootutil enroll --method=password "$extra" || {
 		echo "Failed to enroll the password" > /dev/stderr
 		error=1
 	}
@@ -149,7 +179,8 @@ error=0
 
 if [ -n "$tpm2_pin" ]; then
 	echo "Enrolling TPM2 with PIN"
-	if out="$(SDB_ADD_INITIAL_COMPONENT=1 PIN="$tpm2_pin" sdbootutil enroll --method=tpm2+pin)"; then
+	if out="$(CURRENT_PW="$current_pw" RECOVERY_PIN="$recovery_pin" \
+		  SDB_ADD_INITIAL_COMPONENT=1 PIN="$tpm2_pin" sdbootutil enroll --method=tpm2+pin)"; then
 		write_recovery_pin "$out"
 	else
 		echo "Failed to enroll the TPM2 with PIN" > /dev/stderr
@@ -157,7 +188,8 @@ if [ -n "$tpm2_pin" ]; then
 	fi
 elif [ -n "$tpm2" ]; then
 	echo "Enrolling TPM2"
-	if out="$(SDB_ADD_INITIAL_COMPONENT=1 sdbootutil enroll --method=tpm2)"; then
+	if out="$(CURRENT_PW="$current_pw" RECOVERY_PIN="$recovery_pin" \
+		  SDB_ADD_INITIAL_COMPONENT=1 sdbootutil enroll --method=tpm2)"; then
 		write_recovery_pin "$out"
 	else
 		echo "Failed to enroll the TPM2" > /dev/stderr
@@ -167,7 +199,8 @@ fi
 
 [ -z "$fido2" ] || {
 	echo "Enrolling a FIDO2 key"
-	sdbootutil enroll --method=fido2 || {
+	CURRENT_PW="$current_pw" RECOVERY_PIN="$recovery_pin" \
+		sdbootutil enroll --method=fido2 || {
 		echo "Failed to enroll the FIDO2 key" > /dev/stderr
 		error=1
 	}
