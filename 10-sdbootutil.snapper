@@ -88,6 +88,18 @@ set_update_predictions_timer()
 
 	# Set the transient service that will guarantee updating the
 	# prediction before the shutdown
+	#
+	# The two guards in ExecStop exit 0 on their own, instead of
+	# being the left side of a `&&` chain closed by `|| true`.  Not
+	# being at shutdown, or having nothing pending, is the ordinary
+	# case (the timer stops this service, see the ExecStart of
+	# sdbootutil-update-predictions.service) and must not mark the
+	# unit as failed.  But a `|| true` covering the whole chain also
+	# discarded the status of sdbootutil, and this is the one call
+	# that is supposed to guarantee the predictions before the
+	# reboot: if it could not update PCR 15, the next boot halts in
+	# measure-pcr-validator, and this journal entry is the only
+	# warning that it was coming
 	if ! systemctl --quiet is-active sdbootutil-update-predictions-shutdown.service; then
 		systemd-run --unit=sdbootutil-update-predictions-shutdown.service \
 			    --property=Description="Update TPM predictions before shutdown" \
@@ -98,7 +110,7 @@ set_update_predictions_timer()
 			    --property=Before=umount.target \
 			    --property=RequiresMountsFor="/ /var /run /tmp /boot/efi" \
 			    --property=TimeoutStopSec=120 \
-			    --property=ExecStop='/bin/bash -c "[ $(systemctl is-system-running) = stopping ] && [ -f /run/sdbootutil/update-predictions ] && /usr/bin/sdbootutil -v update-predictions || true"' \
+			    --property=ExecStop='/bin/bash -c "[ $(systemctl is-system-running) = stopping ] || exit 0; [ -f /run/sdbootutil/update-predictions ] || exit 0; exec /usr/bin/sdbootutil -v update-predictions"' \
 			    /bin/true
 	fi
 }
