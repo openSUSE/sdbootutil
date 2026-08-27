@@ -4728,10 +4728,13 @@ check_enrolled()
 	local kind="${2:?}"
 	local header="${3:?}"
 
-	[ "$header" != "$(luks_header "$dev")" ] && have_slot "$dev" "$kind" || {
+	# An unchanged header means that nothing was written at all, and a
+	# changed one without a slot of this kind means that something
+	# else was.  Both are a failed enrollment
+	if [ "$header" = "$(luks_header "$dev")" ] || ! have_slot "$dev" "$kind"; then
 		warn "systemd-cryptenroll reported no error, but $dev was not enrolled with $kind"
 		return 1
-	}
+	fi
 }
 
 has_signed_pcr_policy()
