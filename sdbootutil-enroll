@@ -61,11 +61,16 @@ write_recovery_pin()
 }
 
 # Remove the keyslot that disk-encryption-tool left behind, which it
-# marks with a token of its own that systemd-cryptenroll does not know
-# and so lists as "other".  A keyslot with no token at all is listed as
-# "password", so the two cannot be confused
+# marks with a token of its own, of type "enrollment-key", and only
+# when it generated the key itself: with a user-supplied key there is
+# no token, the keyslot is an ordinary passphrase and it is left alone
 #
-# The slot to remove is the one that carries that token, and not the
+# The type comes from the LUKS2 JSON and not from the "SLOT TYPE" table
+# that systemd-cryptenroll prints, where every token it does not know
+# is "other".  A Clevis or a tang binding also prints "other", and
+# wiping that removes somebody else's way into the device
+#
+# The slot to remove is the one that carries the token, and not the
 # slot 0: they are the same only when disk-encryption-tool was the first
 # to write to the header.  When it was not, wiping the slot 0 removes
 # the password of whoever owns the machine and keeps the transient key,
@@ -73,9 +78,9 @@ write_recovery_pin()
 #
 # And it is removed only once a slot that somebody can actually use is
 # left.  systemd-cryptenroll does refuse to empty a header, but counting
-# slots is not enough here: another "other" is as transient as this one,
-# and the key of this one is random, never shown, and gone when the boot
-# ends, so a device left with only that is a device nobody can open
+# slots is not enough here: the key of this one is random, never shown,
+# and gone when the boot ends, so a device left with only that is a
+# device nobody can open
 #
 # Nothing is reported from here, so that this function can be the same
 # in jeos-firstboot-enroll, which has a dialog instead of a terminal.
@@ -84,23 +89,31 @@ write_recovery_pin()
 wipe_enrollment_key()
 {
 	local dev="${1:?}"
-	local slot type
+	local slot header usable
 	local transient=()
-	local usable=0
 	local rc=0
 
-	while read -r slot type; do
-		# Skips the "SLOT TYPE" header and anything else that
-		# does not describe a keyslot
-		[[ "$slot" =~ ^[0-9]+$ ]] || continue
-		if [ "$type" = "other" ]; then
-			transient+=("$slot")
-		else
-			usable=$((usable + 1))
-		fi
-	done < <(systemd-cryptenroll "$dev")
+	# luksDump reads the metadata, so there is no password to give
+	header="$(cryptsetup luksDump --dump-json-metadata "$dev" 2> /dev/null)" || return 2
+
+	# The keyslots the tokens point at ($t) and the keyslots that
+	# exist ($s).  Only the intersection is wiped, as wiping a slot
+	# that is not there is just an error.  cryptsetup on its own does
+	# not produce that: it refuses to import a token naming a missing
+	# slot, and empties the "keyslots" of a token whose slot is
+	# killed.  But this header is written by several tools
+	# shellcheck disable=SC2016 # $t and $s are jq variables
+	local q='[.tokens[]? | select(.type == "enrollment-key") | .keyslots[]?] as $t
+		| [.keyslots | keys[]] as $s | '
+
+	mapfile -t transient < <(jq -r "$q"'($s - ($s - $t))[]' <<< "$header")
 
 	[ "${#transient[@]}" -ne 0 ] || return 0
+
+	# Everything else opens the device: a keyslot with no token is a
+	# passphrase, and one with a token of another type belongs to
+	# whoever enrolled it
+	usable="$(jq -r "$q"'($s - $t) | length' <<< "$header")" || return 2
 
 	[ "$usable" -gt 0 ] || return 1
 
