@@ -934,49 +934,89 @@ find_conf_file()
 	return 1
 }
 
-# An entry is usable only if it points to this kernel and every file
-# that it names is in the ESP.
+# The only place that knows how a type#1 entry is written: a key, a run
+# of blanks and the value, one pair per line, with comments and empty
+# lines in between.  The pairs are streamed instead of collected in an
+# associative array because a key can appear more than once: "initrd"
+# does whenever there is a microcode image, and the specification also
+# allows several "options"
 #
-# "$linux_dst" carries the checksum of the kernel, so a kernel rebuilt
-# without changing its version does not match the "linux" line of the
-# entry of the previous build.  And the presence of *some* initrd for
-# the version says nothing: the entry can name an initrd checksum that
-# was already cleaned up, and such an entry does not boot
+# A missing file is not an error.  Every caller here treats an entry
+# that says nothing and an entry that is not there in the same way
+entry_fields()
+{
+	local conf="${1:?}"
+	local key value
+
+	[ -f "$conf" ] || return 0
+
+	while read -r key value; do
+		[ -n "$key" ] || continue
+		[ "${key:0:1}" != '#' ] || continue
+		printf '%s %s\n' "$key" "$value"
+	done < "$conf"
+}
+
+# The values of one key, in the order in which they appear
+entry_field()
+{
+	local conf="${1:?}"
+	local field="${2:?}"
+	local key value
+
+	while read -r key value; do
+		[ "$key" = "$field" ] || continue
+		printf '%s\n' "$value"
+	done < <(entry_fields "$conf")
+}
+
+# Every file that the entry references, as a path relative to the boot
+# partition
+entry_files()
+{
+	local conf="${1:?}"
+	local key value
+
+	while read -r key value; do
+		case "$key" in
+			linux|initrd|devicetree) printf '%s\n' "$value" ;;
+		esac
+	done < <(entry_fields "$conf")
+}
+
+# An entry is usable only if it points to this kernel and every file
+# that it names is in the ESP
 entry_is_complete()
 {
 	local conf="${1:?}"
 	local linux_dst="${2:?}"
-	local key path
-	local linux_found=
-	local initrd_found=
+	local path
 
-	while read -r key path; do
-		case "$key" in
-			linux)
-				linux_found=1
-				[ "$path" = "$linux_dst" ] || {
-					dbg "$conf points to $path and not to $linux_dst"
-					return 1
-				}
-				;;
-			# "dstinitrd" is an array, so there can be
-			# several "initrd" lines
-			initrd) initrd_found=1 ;;
-			devicetree) ;;
-			*) continue ;;
-		esac
+	while read -r path; do
 		[ -e "${boot_root}${path}" ] || {
 			dbg "$conf points to the missing ${boot_root}${path}"
 			return 1
 		}
-	done < "$conf"
+	done < <(entry_files "$conf")
 
-	# "install_kernel" refuses to write an entry without an initrd, so
-	# one without it was not written by us and does not boot here
-	if [ -z "$linux_found" ] || [ -z "$initrd_found" ]; then
-		dbg "$conf has no linux or no initrd line"
+	# The presence of *some* initrd for the version says nothing: the
+	# entry can name an initrd checksum that was already cleaned up,
+	# and such an entry does not boot.  And "install_kernel" refuses
+	# to write an entry without an initrd, so one without it was not
+	# written by us and does not boot here either
+	[ -n "$(entry_field "$conf" initrd)" ] || {
+		dbg "$conf has no initrd line"
 		return 1
-	fi
+	}
+
+	# "$linux_dst" carries the checksum of the kernel, so a kernel
+	# rebuilt without changing its version does not match the "linux"
+	# line of the entry of the previous build
+	path="$(entry_field "$conf" linux)"
+	[ "$path" = "$linux_dst" ] || {
+		dbg "$conf points to ${path:-no kernel} and not to $linux_dst"
+		return 1
+	}
 }
 
 # There is no type#1 entry in the ESP.  Note that "nullglob" makes no
@@ -1185,13 +1225,12 @@ reuse_initrd()
 	fi
 
 	if [ "$find_conf_status" -eq 0 ]; then
-		local k v
-		while read -r k v; do
-			[ "$k" = 'initrd' ] || continue
+		local v
+		while read -r v; do
 			[ -f "${boot_root}$v" ] || continue
 			info "Found existing initrd $v"
 			dstinitrd+=("$v")
-		done < "$conf"
+		done < <(entry_field "$conf" initrd)
 		[ "${#dstinitrd[@]}" -eq 0 ] || return 0
 	fi
 
@@ -1998,25 +2037,21 @@ list_entries()
 		fi
 
 		local errors=()
-		if [ -n "$verbose" ] && [ -n "$conf" ] && [ -e "$conf" ]; then
-			local k
+		if [ -n "$verbose" ] && [ -n "$conf" ]; then
 			local v
-			while read -r k v; do
-				if [ "$k" = 'linux' ] || [ "$k" = 'initrd' ] || [ "$k" = 'devicetree' ]; then
-					if [ ! -e "$root$v" ]; then
-						errors+=("$root/$v does not exist")
-					fi
+			while read -r v; do
+				if [ ! -e "$root$v" ]; then
+					errors+=("$root/$v does not exist")
 				fi
-				[ -n "$have_snapshots" ] || break
-				if [ "$k" = 'options' ]; then
-					local snapshot
-					# shellcheck disable=SC2001
-					read -r snapshot <<<"$(echo "$v" | sed -e "s,.*rootflags=subvol=${subvol_prefix}/.snapshots/\([0-9]\+\)/snapshot.*,\1,")"
-					if [ ! -d "/.snapshots/$snapshot/snapshot" ]; then
-						errors+=("/.snapshot/$snapshot/snapshot does not exist")
-					fi
+			done < <(entry_files "$conf")
+			local snapshot
+			while [ -n "$have_snapshots" ] && read -r v; do
+				# shellcheck disable=SC2001
+				snapshot="$(echo "$v" | sed -e "s,.*rootflags=subvol=${subvol_prefix}/.snapshots/\([0-9]\+\)/snapshot.*,\1,")"
+				if [ ! -d "/.snapshots/$snapshot/snapshot" ]; then
+					errors+=("/.snapshot/$snapshot/snapshot does not exist")
 				fi
-			done < "$conf"
+			done < <(entry_field "$conf" options)
 		fi
 		if [ "${#errors[@]}" -gt 0 ]; then
 			echo -e "  ${color_red}${errors[*]}${color_end}" >&2
@@ -2052,7 +2087,7 @@ show_entry_fields()
 		if [ "${#arg_entry_keys[@]}" -eq 0 ] || [[ ${arg_entry_keys[*]} == *"all"* ]] || [[ ${arg_entry_keys[*]} == *"$k"* ]]; then
 			echo -e "$k\t$v"
 		fi
-	done < "$conf"
+	done < <(entry_fields "$conf")
 }
 
 update_entry_conf()
@@ -2435,16 +2470,16 @@ esp_root_drive_partno_dseq()
 extra_entry_needs_update()
 {
 	local entry="$1"
+	local nv v
 
 	# If we do not have a version in the entry file (or the entry
 	# file is missing), then we assume that an update is required
 	[ -n "$entry" ] || return 0
-	read -r _ nv < <(grep -ao '^version .*$' "$entry")
+	nv="$(entry_field "$entry" version)"
 	[ -n "$nv" ] || return 0
 
 	entry="${boot_root}/loader/entries/$(basename "$entry")"
-	[ -f "$entry" ] || return 0
-	read -r _ v < <(grep -ao '^version .*$' "$entry")
+	v="$(entry_field "$entry" version)"
 	[ -n "$v" ] || return 0
 
 	systemd-analyze compare-versions "$v" "<" "$nv" 2> /dev/null
