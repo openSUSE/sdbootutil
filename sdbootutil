@@ -934,6 +934,51 @@ find_conf_file()
 	return 1
 }
 
+# An entry is usable only if it points to this kernel and every file
+# that it names is in the ESP.
+#
+# "$linux_dst" carries the checksum of the kernel, so a kernel rebuilt
+# without changing its version does not match the "linux" line of the
+# entry of the previous build.  And the presence of *some* initrd for
+# the version says nothing: the entry can name an initrd checksum that
+# was already cleaned up, and such an entry does not boot
+entry_is_complete()
+{
+	local conf="${1:?}"
+	local linux_dst="${2:?}"
+	local key path
+	local linux_found=
+	local initrd_found=
+
+	while read -r key path; do
+		case "$key" in
+			linux)
+				linux_found=1
+				[ "$path" = "$linux_dst" ] || {
+					dbg "$conf points to $path and not to $linux_dst"
+					return 1
+				}
+				;;
+			# "dstinitrd" is an array, so there can be
+			# several "initrd" lines
+			initrd) initrd_found=1 ;;
+			devicetree) ;;
+			*) continue ;;
+		esac
+		[ -e "${boot_root}${path}" ] || {
+			dbg "$conf points to the missing ${boot_root}${path}"
+			return 1
+		}
+	done < "$conf"
+
+	# "install_kernel" refuses to write an entry without an initrd, so
+	# one without it was not written by us and does not boot here
+	if [ -z "$linux_found" ] || [ -z "$initrd_found" ]; then
+		dbg "$conf has no linux or no initrd line"
+		return 1
+	fi
+}
+
 # There is no type#1 entry in the ESP.  Note that "nullglob" makes no
 # difference between an empty and a missing directory, which is what
 # the caller expects: both mean that no kernel was installed yet
@@ -1634,14 +1679,10 @@ install_kernel()
 	local devicetree_src=
 	local devicetree_dst=
 
-	local initrds=("${boot_root}/$entry_token/$kernel_version/initrd-"*)
-	# "$dst" carries the checksum of the kernel, so a kernel that was
-	# rebuilt without changing its version is a file that is not in
-	# the ESP yet, even when the entry and the initrd of the previous
-	# build are still there
-	[ ! -e "${boot_root}${dst}" ] \
-		|| [ "${#initrds[@]}" -eq 0 ] \
-		|| ! find_conf_file "$kernel_version" "$snapshot" > /dev/null \
+	local conf
+	conf="$(find_conf_file "$kernel_version" "$snapshot")" || conf=
+	[ -z "$conf" ] \
+		|| ! entry_is_complete "$conf" "$dst" \
 		|| [ -n "$arg_no_reuse_initrd" ] \
 		|| [ -n "$arg_force" ] \
 		|| {
