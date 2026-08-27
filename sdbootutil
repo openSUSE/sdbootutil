@@ -4776,6 +4776,65 @@ has_signed_pcr_policy()
 		jq -e 'any(.tokens[]?; .type == "systemd-tpm2" and has("tpm2_pubkey"))' &> /dev/null
 }
 
+# A slot that can authorize a new one with nobody in front of the
+# machine.  A TPM2 slot with a PIN cannot: systemd-cryptenroll has to
+# unseal it, and it reads the current PIN from a terminal only.  Unlike
+# its FIDO2 and password paths it does not pass ASK_PASSWORD_ACCEPT_CACHED,
+# so %user:tpm2-pin is never consulted, and the only other source is
+# $CREDENTIALS_DIRECTORY/cryptenroll.tpm2-pin, which nothing sets here.
+# A FIDO2 token cannot either when it asks for its PIN, for user
+# verification, or just for a touch
+#
+# "have_slot" cannot tell these apart, as it only greps the list that
+# systemd-cryptenroll prints.  The LUKS2 token does say so
+slot_is_unattended()
+{
+	local dev="${1:?}"
+	local kind="${2:?}"
+	local type interactive
+
+	case "$kind" in
+		tpm2)
+			type="systemd-tpm2"
+			interactive='."tpm2-pin" // false'
+			;;
+		fido2)
+			type="systemd-fido2"
+			interactive='[."fido2-clientPin-required", ."fido2-up-required", ."fido2-uv-required"] | any'
+			;;
+		*)
+			return 1
+			;;
+	esac
+
+	local header
+	header="$(luks_header "$dev" 2> /dev/null)" || return 1
+
+	jq -e --arg type "$type" 'any(.tokens[]?; .type == $type)' <<< "$header" &> /dev/null || return 1
+
+	if jq -e --arg type "$type" "any(.tokens[]?; .type == \$type and ($interactive))" \
+	      <<< "$header" &> /dev/null; then
+		info "Not unlocking using ${kind^^}: the slot of $dev asks for a PIN or a touch"
+		return 1
+	fi
+}
+
+# Whether a slot of this kind can authorize a new one right now.  With
+# a terminal there is somebody who can answer the PIN prompt that
+# systemd-cryptenroll or the token itself raises, so any slot will do.
+# Without one, only a slot that unseals on its own
+can_unlock()
+{
+	local dev="${1:?}"
+	local kind="${2:?}"
+
+	if [ -t 0 ]; then
+		have_slot "$dev" "$kind"
+	else
+		slot_is_unattended "$dev" "$kind"
+	fi
+}
+
 in_lockout()
 {
 	command -v tpm2_getcap &> /dev/null || { warn "tpm2_getcap not found"; return 1; }
@@ -4921,11 +4980,11 @@ require_unlock()
 	[ -z "$(get_device_password "$dev")" ] || return 0
 
 	# Do not use TPM2 slot for enrolling TPM2
-	if [ "$arg_method" != "tpm2" ] && [ "$arg_method" != "tpm2+pin" ] && have_slot "$dev" "tpm2"; then
+	if [ "$arg_method" != "tpm2" ] && [ "$arg_method" != "tpm2+pin" ] && can_unlock "$dev" "tpm2"; then
 		info "Unlocking using TPM2"
 		unlock_method="--unlock-tpm2-device=auto"
 	# Same for FIDO2
-	elif [ "$arg_method" != "fido2" ] && have_slot "$dev" "fido2"; then
+	elif [ "$arg_method" != "fido2" ] && can_unlock "$dev" "fido2"; then
 		info "Unlocking using FIDO2"
 		unlock_method="--unlock-fido2-device=auto"
 	fi
