@@ -3677,8 +3677,17 @@ pcrlock_sdboot()
 			continue
 		}
 		n=$((n+1))
-		[ "$n" -le 8 ] || {
-			info "More than 8 variations for 710-kernel-cmdline-initrd-entry"
+		# `get_final_pcrs` drops a PCR with more than 8 predicted
+		# values (PolicyOR), and the values of a PCR are the
+		# product of the variations of every component that
+		# measures it, times two because of the separator.  This
+		# is the only component measuring PCR 9 under
+		# systemd-boot, so the budget is 2*n <= 8.  Measured: 4
+		# variations predict 8 values, 5 predict 10 and PCR 9 is
+		# dropped, losing the constraint over the kernel command
+		# line.  See bsc#1274948
+		[ "$n" -le 4 ] || {
+			info "More than 4 variations for 710-kernel-cmdline-initrd-entry"
 			continue
 		}
 		pcrlock_cmdline_initrd "initrd=$cmdline" "${boot_root}$initrd" "$n"
@@ -3690,11 +3699,21 @@ pcrlock_sdboot()
 	# required because disk-encryption-tool generates a new initrd
 	# during the first boot, making the event log impossible to
 	# align for systemd-pcrlock
-	n=0
+	#
+	# These variations land in the same component as the loop
+	# above, so "n" is not reset: the budget is shared and the
+	# component stays inside the PolicyOR limit.  This only runs
+	# from the installer (SDB_ADD_INITIAL_COMPONENT=1), where
+	# there is a single snapshot and the loop above has consumed
+	# almost nothing
 	if [ "$SDB_ADD_INITIAL_COMPONENT" = "1" ]; then
 		while read -r cmdline; do
 			read -r initrd
 			n=$((n+1))
+			[ "$n" -le 4 ] || {
+				info "More than 4 variations for 710-kernel-cmdline-initrd-entry (initial)"
+				continue
+			}
 			pcrlock_cmdline_initrd "initrd=$cmdline" "${tmpdir}$initrd" "0-$n"
 		done < <(jq --raw-output '.[] | ([(.initrd[0] | sub("/"; "\\"; "g")), .options] | join(" ")), .initrd[0]' "$initialentryfile")
 	fi
@@ -3775,13 +3794,20 @@ pcrlock_grub2_bls()
 	# because disk-encryption-tool generates a new initrd during
 	# the first boot, making the event log impossible to align for
 	# systemd-pcrlock
-	n=0
+	#
+	# These variations land in the same component as the loop
+	# above, so "n" is not reset: the budget is shared and the
+	# component stays inside the PolicyOR limit
 	if [ "$SDB_ADD_INITIAL_COMPONENT" = "1" ]; then
 		while read -r options; do
 			read -r linux
 			read -r initrd
 			read -r devicetree
 			n=$((n+1))
+			[ "$n" -le 8 ] || {
+				info "More than 8 variations for 650-grub2-bls-entry-cmdline (initial)"
+				continue
+			}
 			pcrlock_grub2_bls_cmdline "linux ${grub2_bls_drive}$linux $options" \
 						  "${grub2_bls_drive}$linux $options" \
 						  "initrd ${grub2_bls_drive}$initrd" \
@@ -3839,13 +3865,20 @@ pcrlock_grub2_bls()
 	# if there is a new kernel or initrd): [2x]2xn[x2]
 	#
 	# Solutions:
-	#  - GRUB2-BLS use BLI and drops `grubenv`
+	#  - GRUB2-BLS use BLI and drops `grubenv`  [done, GRUB2 2.14]
 	#  - MicroOS uses only systemd-boot
 	#  - PolicyOR limit is resolved in systemd-pcrlock
 	#  - Merge both 710 components, to decrease the variations
-	#  - Make n=2 (710-kernel-cmdline-initrd-entry)
+	#    [done, see below]
+	#  - Make n=2 (710-kernel-cmdline-initrd-entry)  [done, the cap
+	#    of the merged component below]
 	#
-	# For GRUB2 2.14 we drop grubenv with the BLI patches.
+	# With the first and the last one the product is 2 (separator)
+	# x 1 (641, `grubenv` is not rewritten anymore) x 2 (643) x 2
+	# (the merged 710) = 8, which is the limit.  The factor of 641
+	# is only 1 while the EFI variables are usable: with GRUB2
+	# 2.12, without efivars or with `--no-variables` the `grubenv`
+	# is written again on every `set-default` and PCR#9 is dropped.
 	#
 	# The merge solution makes sense.  The order would be:
 	#  - GRUB2: full sha256 of the kernel
@@ -3881,8 +3914,27 @@ pcrlock_grub2_bls()
 			continue
 		fi
 		n=$((n+1))
-		[ "$n" -le 4 ] || {
-			info "More than 4 variations for 710-grub2-bls-kernel-initrd-entry"
+		# `get_final_pcrs` drops a PCR with more than 8 predicted
+		# values (PolicyOR), and the values of a PCR are the
+		# product of the variations of every component that
+		# measures it, times two because of the separator.  For
+		# PCR 9 that is 2 * 641 * 643 * n.
+		#
+		# 641-grub2-bls-grubenv is 1: since GRUB2 2.14 the
+		# default entry and the timeout live in the EFI variables
+		# (see `set_default_grub2_bls`), so `grubenv` is never
+		# rewritten and its variation matches the shifted one.
+		#
+		# 643-grub2-bls-entry-files is 2 whenever an entry was
+		# added or removed since the last boot, which is exactly
+		# when the predictions are regenerated, so it has to be
+		# accounted for.
+		#
+		# That leaves 2 * 1 * 2 * n <= 8, so n <= 2.  Measured on
+		# grub2-bls with n=4: 8 values while 643 is stable, 16 as
+		# soon as it shifts.  See bsc#1274948
+		[ "$n" -le 2 ] || {
+			info "More than 2 variations for 710-grub2-bls-kernel-initrd-kernel-cmdline-initrd-entry"
 			continue
 		}
 		pcrlock_grub2_bls_kernel_initrd_cmdline_initrd \
@@ -3895,13 +3947,20 @@ pcrlock_grub2_bls()
 	# Generate variation for
 	# 710-grub2-bls-kernel-initrd-kernel-cmdline-initrd-entry for
 	# the same reason than before.
-	n=0
+	#
+	# These variations land in the same component as the loop
+	# above, so "n" is not reset: the budget is shared and the
+	# component stays inside the PolicyOR limit
 	if [ "$SDB_ADD_INITIAL_COMPONENT" = "1" ]; then
 		while read -r cmdline; do
 			read -r linux
 			read -r initrd
 			read -r devicetree
 			n=$((n+1))
+			[ "$n" -le 2 ] || {
+				info "More than 2 variations for 710-grub2-bls-kernel-initrd-kernel-cmdline-initrd-entry (initial)"
+				continue
+			}
 			pcrlock_grub2_bls_kernel_initrd_cmdline_initrd \
 				"${tmpdir}$linux" "${tmpdir}$initrd" \
 				"${devicetree:+${tmpdir}$devicetree}" \
