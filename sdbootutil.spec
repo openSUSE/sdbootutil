@@ -206,13 +206,26 @@ cat > /dev/null || :
 [ -e /sys/firmware/efi/efivars ] || exit 0
 [ -z "$TRANSACTIONAL_UPDATE" ] || exit 0
 [ -z "$VERBOSE_FILETRIGGERS" ] || echo "%{name}-%{version}-%{release}: updating bootloader"
+# The marker is set by the snapper plugin, that already scheduled a
+# deferred update-predictions for this transaction.  The plugin sets
+# it in the pre snapshot, so it is here before this trigger runs, and
+# the deferred service runs after the post snapshot, once the entries
+# that this trigger does not touch are in place.  Updating the
+# predictions here too builds the pcrlock policy and rewrites the TPM2
+# NVIndex a second time, inside the rpm transaction, and that first
+# policy is discarded by the deferred run seconds later.
+#
+# Without the snapper plugin there is no marker and no deferral, so
+# this trigger stays the only chance to update the predictions
+predictions=
+[ ! -e /run/sdbootutil/update-predictions ] || predictions=--disable-predictions
 if [ -e /etc/sysconfig/bootloader ]; then
 	. /etc/sysconfig/bootloader &> /dev/null
 	if [ "$LOADER_TYPE" = "grub2-bls" ] || [ "$LOADER_TYPE" = "systemd-boot" ]; then
-		sdbootutil update
+		sdbootutil update $predictions
 	fi
 else
-	sdbootutil update
+	sdbootutil update $predictions
 fi
 
 %preun
