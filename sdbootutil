@@ -4130,21 +4130,29 @@ get_final_pcrs()
 	local i
 	local -a list
 	local -A pcrs_policy_table
+	local -A pcrs_policyor_table
 	IFS=',' read -r -a list <<<"$pcrs_policy"
 	for i in "${list[@]}"; do
 		pcrs_policy_table[$i]=1
 	done
-
-	local -A pcrs_policy_missing_table
-	IFS=',' read -r -a list <<<"$pcrs"
+	IFS=',' read -r -a list <<<"$pcrs_policyor"
 	for i in "${list[@]}"; do
-		if [ -z "${pcrs_policy_table[$i]}" ]; then
-			pcrs_policy_missing_table[$i]=1
-		fi
+		pcrs_policyor_table[$i]=1
 	done
 
-	local pcrs_policy_missing
-	pcrs_policy_missing="$(IFS=","; echo "${!pcrs_policy_missing_table[*]}")"
+	# A PCR dropped by the PolicyOR limit is also absent from the
+	# policy, so it would be reported twice, and the first reason
+	# would be the wrong one.  The list is built in the order that
+	# the user requested: the keys of an associative array come out
+	# in hash order
+	local pcrs_policy_missing=
+	IFS=',' read -r -a list <<<"$pcrs"
+	for i in "${list[@]}"; do
+		[ -z "${pcrs_policy_table[$i]}" ] || continue
+		[ -z "${pcrs_policyor_table[$i]}" ] || continue
+		pcrs_policy_missing+="${pcrs_policy_missing:+,}$i"
+	done
+
 	# `systemd-pcrlock` can report that a PCR matches the event log
 	# and still predict a set of values that does not contain the
 	# current one, for example when a component is replayed in the
@@ -4161,8 +4169,12 @@ get_final_pcrs()
 			warn "The prediction for PCR $i does not contain the current value"
 	done
 
-	[ -z "$pcrs_policy_missing" ] || info "PCRs $pcrs_policy_missing dropped from the policy (component mapping)"
-	[ -z "$pcrs_policyor" ] || info "PCRs $pcrs_policyor dropped from the policy (PolicyOR)"
+	# Dropping a PCR silently removes protection that the user asked
+	# for, so it is a warning and not an `info`: `info` returns early
+	# unless `--verbose` was passed, and the enroll and installer
+	# paths are not verbose
+	[ -z "$pcrs_policy_missing" ] || warn "PCRs $pcrs_policy_missing dropped from the policy (component mapping)"
+	[ -z "$pcrs_policyor" ] || warn "PCRs $pcrs_policyor dropped from the policy (PolicyOR)"
 	[ "$pcrs" = "$pcrs_policy" ] || info "Final PCRs list ($pcrs -> $pcrs_policy)"
 
 	echo "$pcrs_policy"
