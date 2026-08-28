@@ -84,6 +84,7 @@ arg_rootfs_data=
 arg_esp_free_space=
 arg_devicetree_source=
 arg_force=
+arg_strict=
 arg_disable_predictions=
 have_snapshots=
 in_buildroot=
@@ -241,6 +242,8 @@ helpandquit()
 		  --measure-pcr		Force update of PCR 15 prediction for LUKS2 volume key
 		                        (requires LUKS2 password to accessing the volume key)
 		  --pcr			Comma seperated list of PCRs to enroll
+		                        (the ones that cannot be predicted are dropped,
+		                        unless --strict is used)
 		  --devices		Comma separated list of devices to enroll or unenroll
 		                        (by default all (not ignored) devices are [un]enrolled)
 		  --rootfs		During bootloader installation, select the kind of 'root'
@@ -259,6 +262,8 @@ helpandquit()
 		                        installation is aborted.
 		  --force		Force certain operations inside a transaction, and
 		                        force the regeneration of the TPM2 policy
+		  --strict		Every requested PCR must be part of the TPM2 policy,
+		                        or nothing is applied (like systemd-pcrlock --strict=)
 		  --disable-predictions	Disable automatic update predictions
 		  -v, --verbose		More verbose output
 		  --start-trace-code	Create /var/log/sdbootutil.log to trace the code.
@@ -4177,6 +4182,23 @@ get_final_pcrs()
 	[ -z "$pcrs_policyor" ] || warn "PCRs $pcrs_policyor dropped from the policy (PolicyOR)"
 	[ "$pcrs" = "$pcrs_policy" ] || info "Final PCRs list ($pcrs -> $pcrs_policy)"
 
+	# With `--strict` the requested list is taken literally: if some
+	# PCR cannot be predicted nothing is applied, and the reasons
+	# are in the warnings above.  This is what
+	# `systemd-pcrlock --strict=` does for the drops that it decides
+	# itself, extended here to the PolicyOR limit, which is our own
+	#
+	# Without it a reduced policy is applied.  The list usually
+	# comes from the configuration file or from the defaults, where
+	# it can legitimately name a PCR that this machine cannot
+	# predict, and refusing to update would leave the system with a
+	# stale policy after every kernel update
+	#
+	# `err` exits the command substitution that the caller uses, so
+	# the caller sees a failure and stops before creating any policy
+	[ -z "$arg_strict" ] || [ -z "$pcrs_policy_missing$pcrs_policyor" ] || \
+		err "Not all the requested PCRs can be predicted ($pcrs -> ${pcrs_policy:-none}). No policy is applied, run without --strict to accept the subset"
+
 	echo "$pcrs_policy"
 }
 
@@ -5799,6 +5821,7 @@ define_options() {
 		[esp-free-space]="_esp_free_space"
 		[devicetree-source]="_file"
 		[force]=""
+		[strict]=""
 		[disable-predictions]=""
 	)
 	opts_long=""
@@ -5862,6 +5885,7 @@ while true ; do
 		--esp-free-space) arg_esp_free_space="$2"; shift 2 ;;
 		--devicetree-source) arg_devicetree_source="$2"; shift 2 ;;
 		--force) arg_force=1; shift ;;
+		--strict) arg_strict=1; shift ;;
 		--disable-predictions) arg_disable_predictions=1; shift ;;
 		--) shift ; break ;;
 		*) echo "Internal error!" ; exit 1 ;;
