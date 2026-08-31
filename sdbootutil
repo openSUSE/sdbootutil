@@ -239,8 +239,8 @@ helpandquit()
 		  --ask-current-pw	Ask the password that already opens the devices
 		  --method		"tpm2", "tpm2+pin", "fido2", "password", "recovery-key"
 		  --no-measure-pcr	During enrollment, do not include PCR 15 protection
-		  --measure-pcr		Force update of PCR 15 prediction for LUKS2 volume key
-		                        (requires LUKS2 password to accessing the volume key)
+		  --measure-pcr		Update the PCR 15 prediction if needed
+		                        (the LUKS2 password will be asked)
 		  --pcr			Comma seperated list of PCRs to enroll
 		                        (the ones that cannot be predicted are dropped,
 		                        unless --strict is used)
