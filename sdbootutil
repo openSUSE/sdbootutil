@@ -4080,6 +4080,67 @@ predict_pcrs()
 	SYSTEMD_LOG_LEVEL=notice pcrlock --pcr="$pcrs" --json=short predict 2>"$tmpfile"
 }
 
+remove_pcr()
+{
+	local pcrs="$1"
+	local drop="$2"
+
+	local i
+	local -a list
+	local result=
+	IFS=',' read -r -a list <<<"$pcrs"
+	for i in "${list[@]}"; do
+		[ "$i" != "$drop" ] || continue
+		result+="${result:+,}$i"
+	done
+
+	echo "$result"
+}
+
+policy_missing_pcrs()
+{
+	# Requested PCRs that the current policy does not bind.  The
+	# policy stores the list, so nothing has to be tracked here
+	local pcrs="$1"
+
+	[ -e /var/lib/systemd/pcrlock.json ] || return 0
+
+	local i
+	local -A policy_pcrs
+	while read -r i; do
+		policy_pcrs[$i]=1
+	done < <(jq -r '.pcrValues[].pcr' < /var/lib/systemd/pcrlock.json)
+
+	local -a list
+	local missing=
+	IFS=',' read -r -a list <<<"$pcrs"
+	for i in "${list[@]}"; do
+		[ -z "${policy_pcrs[$i]}" ] || continue
+		missing+="${missing:+,}$i"
+	done
+
+	echo "$missing"
+}
+
+shim_changed()
+{
+	# The shim in the ESP is not the one that produced the current
+	# event log.  `shift_component` keeps the variation that the
+	# event log matches, and `lock-pe` regenerates the one for the
+	# binary that is installed now, so comparing both answers the
+	# question without tracking any state of our own
+	local dir=/var/lib/pcrlock.d/630-shim-efi-application.pcrlock.d
+
+	[ -e "$dir/generated.pcrlock" ] || return 1
+
+	local shifted
+	for shifted in "$dir"/shift-*.pcrlock; do
+		cmp -s "$shifted" "$dir/generated.pcrlock" || return 0
+	done
+
+	return 1
+}
+
 get_final_pcrs()
 {
 	local pcrs="$1"
@@ -4329,6 +4390,14 @@ generate_tpm2_predictions_pcrlock()
 	local post_hashes
 	post_hashes="$(get_predicted_hashes)"
 
+	# A PCR that cannot be predicted is dropped from the policy,
+	# and the reason is very often temporary: it is a statement
+	# about the current event log, that the next boot resolves.
+	# The components do not need to change for that to happen, so
+	# the hashes alone would reuse the reduced policy forever
+	local missing_pcrs
+	missing_pcrs="$(policy_missing_pcrs "$pcrs")"
+
 	if [ -n "$arg_force" ]; then
 		dbg "A new policy is forced (--force)"
 	elif [ ! -e /var/lib/systemd/pcrlock.json ]; then
@@ -4343,9 +4412,27 @@ generate_tpm2_predictions_pcrlock()
 		dbg "Missing /var/lib/sdbootutil/pcrlock-hashes"
 	elif ! echo "$post_hashes" | cmp -s - /var/lib/sdbootutil/pcrlock-hashes; then
 		dbg "The components changed since the current policy was created"
+	elif [ -n "$missing_pcrs" ]; then
+		dbg "The current policy does not cover the requested PCR $missing_pcrs"
 	else
 		info "Policy is up to date"
 		return 0
+	fi
+
+	# shim raises `SbatLevel` to the level built into the binary
+	# that it runs from, and measures it into PCR 7 before the
+	# volume is unlocked.  When the shim in the ESP is not the one
+	# that produced the current event log the new value is unknown
+	# here, so PCR 7 is left out of this policy and re-added by
+	# `sdbootutil-update-predictions.service` on the next boot,
+	# once the event log contains what was measured
+	if [[ ",$pcrs," == *",7,"* ]] && shim_changed; then
+		info "The shim in the ESP is a new one, PCR 7 is left out until the next boot"
+		pcrs="$(remove_pcr "$pcrs" 7)"
+
+		# `--strict` asks for all the requested PCRs or none
+		[ -z "$arg_strict" ] || \
+			err "The next SbatLevel measurement cannot be predicted, so PCR 7 cannot be part of the policy. No policy is applied, run without --strict to accept the subset"
 	fi
 
 	local final_pcrs
