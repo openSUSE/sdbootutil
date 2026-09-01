@@ -86,6 +86,7 @@ arg_devicetree_source=
 arg_force=
 arg_strict=
 arg_disable_predictions=
+arg_full=
 have_snapshots=
 in_buildroot=
 # Snapshot that owns the "/" subvolume, that is not always the one
@@ -265,6 +266,7 @@ helpandquit()
 		  --strict		Every requested PCR must be part of the TPM2 policy,
 		                        or nothing is applied (like systemd-pcrlock --strict=)
 		  --disable-predictions	Disable automatic update predictions
+		  --full		"status" reports every detail, not the summary
 		  -v, --verbose		More verbose output
 		  --start-trace-code	Create /var/log/sdbootutil.log to trace the code.
 		                        (verbose output is enabled)
@@ -311,6 +313,12 @@ helpandquit()
 
 		list-devices
 		           List encrypted devices that are tracked
+
+		status
+		           Report what the machine boots and whether the TPM2
+		           will open it.  Only reads, and prints no secret, so
+		           it is safe to attach to a bug report.  --full for
+		           every detail instead of the summary
 
 		show-entry VERSION [SNAPSHOT]
 		           Show fields for an entry with an specified kernel
@@ -5940,6 +5948,843 @@ unenroll()
 	fi
 }
 
+# Every full disk encryption report starts with the same two questions:
+# how is this machine encrypted, and is the TPM2 going to open it on the
+# next boot.  Answering them by hand means reading `cryptsetup luksDump`,
+# /etc/crypttab, /var/lib/systemd/pcrlock.json, /var/lib/pcrlock.d, the
+# LUKS2 tokens and the journal, and knowing how the four relate.  That is
+# the first exchange of every issue, and half of them are closed without
+# the answer ever arriving
+#
+# Everything here only reads, so it is safe to ask a reporter to run: no
+# policy is created, no keyring entry is written, the NVIndex is not
+# touched and not a single file changes.  It also has to say something
+# useful on a machine whose TPM2 is unusable, whose policy is missing, or
+# that is not enrolled at all, which is why so much of it reads "unknown"
+#
+# No secret is ever printed, only whether it exists.  The recovery PIN,
+# the recovery key and the volume key are named, never shown
+#
+# Each section prints as it is probed.  jq is used where it parses what
+# something else produced (the LUKS2 header, `bootctl list`, the pcrlock
+# policy, the measurement log) and nowhere else: a probe that dies half
+# way then costs one section instead of the whole report
+
+# The label is padded so that every value in the report starts at the
+# same column, which is what makes a wrong one easy to find.  Devices
+# indent their rows one level and pad two characters less, so the values
+# still line up with the rest
+status_row()
+{
+	printf '  %-17s%s\n' "${1}:" "$2"
+}
+
+status_subrow()
+{
+	printf '    %-15s%s\n' "${1}:" "$2"
+}
+
+# "yes" for a flag that is set, "no" for one that is not
+status_yn()
+{
+	[ -z "$1" ] && echo no || echo yes
+}
+
+# "a, b, c", empty for no arguments
+status_join()
+{
+	local out="" i
+
+	for i in "$@"; do
+		[ -n "$out" ] && out="$out, $i" || out="$i"
+	done
+	echo "$out"
+}
+
+# What the trailing warnings need, and the only thing that crosses from
+# one section to another.  They are set while their section prints
+status_policy_backend=
+status_policy_stale=
+status_tpm2_device=
+status_pin_reachable=
+
+status_crypttab_field()
+{
+	# The crypttab line that describes this device, if any.  Which
+	# line that is, is what "is_same_device" answers, the same way
+	# that "is_tracked_device" and "add_crypttab_option" ask it
+	local dev="${1:?}"
+	local field="${2:?}"
+	local name device key opts
+
+	[ -e /etc/crypttab ] || return 0
+
+	while read -r name device key opts; do
+		[[ "$name" != \#* ]] || continue
+		[ -n "$name" ] || continue
+		is_same_device "$dev" "$device" || continue
+		case "$field" in
+			name) echo "$name" ;;
+			options) echo "$opts" ;;
+		esac
+		return 0
+	done < /etc/crypttab
+}
+
+status_device()
+{
+	local dev="${1:?}"
+	local header name opts
+
+	# A header that cannot be read is not a reason to give up on the
+	# rest of the report.  It is the answer to "why does this device
+	# not open", so it is reported as such
+	header="$(luks_header "$dev" 2> /dev/null)" || header=""
+	name="$(status_crypttab_field "$dev" name)"
+	opts="$(status_crypttab_field "$dev" options)"
+
+	local tracked=1 ignored=
+	is_tracked_device "$dev" 2> /dev/null || tracked=
+	[[ "$opts" != *"x-sdbootutil.ignore"* ]] || ignored=1
+
+	# The keyslots come from the LUKS2 JSON and not from the "SLOT
+	# TYPE" column that `systemd-cryptenroll` prints, which calls
+	# everything it does not know "other".  A slot that no token
+	# points at is a plain password: that is the only thing that can
+	# still open the device when the TPM2 refuses to, so it is the
+	# one fact worth getting right
+	#
+	# A "tpm2_pubkey" in the token means that a shard of the sealed
+	# key is locked to a signed PCR policy, so unlocking also needs a
+	# tpm2-pcr-signature.json.  "tpm2_pcrlock" means the NVIndex
+	# policy instead.  They are two different backends and the
+	# difference decides where to look next
+	local slots=""
+	[ -z "$header" ] || slots="$(jq -r '
+		(.tokens // {}) as $tokens |
+		(.keyslots // {}) | keys[] | . as $slot |
+		($tokens | to_entries
+		         | map(select(.value.keyslots // [] | index($slot)))
+		         | first) as $token |
+		[ $slot,
+		  (if $token == null then "password"
+		   elif $token.value.type == "systemd-tpm2" then
+			(if ($token.value."tpm2-pin" // false) then "tpm2+pin" else "tpm2" end)
+		   elif $token.value.type == "systemd-fido2" then "fido2"
+		   elif $token.value.type == "systemd-recovery" then "recovery-key"
+		   else $token.value.type end),
+		  ($token.value.type // ""),
+		  (if $token == null then ""
+		   elif ($token.value | has("tpm2_pubkey")) then ", signed policy"
+		   elif ($token.value.tpm2_pcrlock // false) then ", pcrlock NVIndex"
+		   else "" end)
+		] | @tsv' <<<"$header")"
+
+	local slot method token extra methods=()
+	while IFS=$'\t' read -r slot method token extra; do
+		[ -n "$slot" ] || continue
+		methods+=("$method")
+	done <<<"$slots"
+
+	# Sorted and without repetitions, so that the same machine always
+	# reads the same way
+	local unique=()
+	[ "${#methods[@]}" -eq 0 ] || \
+		mapfile -t unique < <(printf '%s\n' "${methods[@]}" | sort -u)
+
+	# A device that only the TPM2 can open is one firmware update
+	# away from being unopenable, and that is worth saying out loud
+	local tpm2_only="" m
+	if [ "${#unique[@]}" -gt 0 ]; then
+		tpm2_only=1
+		for m in "${unique[@]}"; do
+			[[ "$m" == tpm2* ]] || tpm2_only=
+			[[ "$m" != tpm2* ]] || status_tpm2_device=1
+		done
+	fi
+
+	echo "  ${dev}${name:+ ($name)}"
+
+	# In the summary the tracking is only worth a line when it is not
+	# the plain "yes": an untracked or an ignored device is the
+	# explanation for a password prompt that nobody expected
+	if [ -n "$arg_full" ] || [ -n "$ignored" ] || [ -z "$tracked" ]; then
+		if [ -n "$ignored" ]; then
+			status_subrow "Tracked" "no (x-sdbootutil.ignore)"
+		elif [ -n "$tracked" ]; then
+			status_subrow "Tracked" "yes"
+		else
+			status_subrow "Tracked" "no (not in /etc/crypttab)"
+		fi
+	fi
+
+	[ -n "$header" ] || status_subrow "LUKS2 header" "CANNOT BE READ"
+
+	if [ "${#unique[@]}" -eq 0 ]; then
+		status_subrow "Unlocks with" "nothing"
+	else
+		status_subrow "Unlocks with" "$(status_join "${unique[@]}")"
+	fi
+
+	if [ -n "$arg_full" ]; then
+		if [[ "$opts" == *"tpm2-measure-pcr=yes"* ]]; then
+			status_subrow "PCR 15" "measured"
+		else
+			status_subrow "PCR 15" "not measured"
+		fi
+	fi
+
+	[ -z "$tpm2_only" ] || \
+		echo "    WARNING: only the TPM2 can open this device.  A firmware update, a bootloader update or a cleared TPM2 leaves it unopenable"
+
+	[ -z "$arg_full" ] || \
+		while IFS=$'\t' read -r slot method token extra; do
+			[ -n "$slot" ] || continue
+			echo "    slot ${slot}: ${method}${token:+ ($token)}${extra}"
+		done <<<"$slots"
+}
+
+status_devices()
+{
+	local dev fstype all=()
+
+	detect_tracked_devices > /dev/null 2>&1 || :
+
+	# Not only the tracked ones.  A device that is missing from
+	# /etc/crypttab, or that carries "x-sdbootutil.ignore", is
+	# precisely the kind of thing that explains a boot that asks for
+	# a password nobody expected, so it is listed and marked
+	while read -r dev fstype; do
+		[ "$fstype" = 'crypto_LUKS' ] || continue
+		cryptsetup isLuks --type luks2 "$dev" 2> /dev/null || continue
+		all+=("$dev")
+	done < <(lsblk --noheadings -o PATH,FSTYPE)
+
+	echo "Devices"
+	if [ "${#all[@]}" -eq 0 ]; then
+		echo "  none"
+		return 0
+	fi
+
+	for dev in "${all[@]}"; do
+		status_device "$dev"
+	done
+}
+
+status_policy()
+{
+	local policy=/var/lib/systemd/pcrlock.json
+	local esp_policy="${esp_root}${esp_dst}/pcrlock.json"
+
+	if [ -e "$policy" ]; then
+		status_policy_backend="pcrlock"
+	elif is_pcr_oracle; then
+		status_policy_backend="pcr-oracle"
+	fi
+
+	echo "TPM2 policy"
+	status_row "Backend" "${status_policy_backend:-none}"
+
+	[ -n "$status_policy_backend" ] || {
+		echo "  No policy: the TPM2 does not open any device"
+		return 0
+	}
+
+	# The two copies are meant to be identical: the one in the ESP is
+	# imported by `dracut-pcr-signature`, and the local one stores
+	# the sealed PIN that `systemd-pcrlock` needs to replace the
+	# NVIndex.  A machine with only one of them still boots, and
+	# fails the *next* update
+	local esp_state="missing"
+	if [ -e "$esp_policy" ]; then
+		if [ ! -e "$policy" ]; then
+			esp_state="only-in-esp"
+		elif cmp -s "$policy" "$esp_policy"; then
+			esp_state="same"
+		else
+			esp_state="different"
+		fi
+	fi
+
+	# `is_pcr_oracle` is also a backend, and it leaves no pcrlock.json
+	# behind.  Everything that is read out of that file is then
+	# unknown, which is not the same as absent
+	local have_policy="" bank="sha256"
+	if [ -e "$policy" ]; then
+		have_policy=1
+		bank="$(jq -r '.pcrBank // "sha256"' < "$policy")"
+	fi
+
+	if [ -n "$arg_full" ]; then
+		local nv_index=""
+		[ -z "$have_policy" ] || nv_index="$(jq -r '.nvIndex // empty' < "$policy")"
+		status_row "NVIndex" "${nv_index:-unknown}"
+		if [ -z "$have_policy" ]; then
+			status_row "PCR bank" "unknown"
+		else
+			status_row "PCR bank" "$bank"
+		fi
+		status_row "Copy in the ESP" "$esp_state"
+		if [ -z "$have_policy" ]; then
+			status_row "Shim changed" "unknown"
+		elif shim_changed; then
+			status_row "Shim changed" "yes"
+		else
+			status_row "Shim changed" "no"
+		fi
+	fi
+
+	# Rebuilt instead of echoed back, so that a list with an empty or
+	# a repeated field still reads the way the rest of the report does
+	local requested="" i
+	for i in ${FDE_SEAL_PCR_LIST//,/ }; do
+		[ -n "$i" ] || continue
+		[ -n "$requested" ] && requested="$requested,$i" || requested="$i"
+	done
+	status_row "Requested PCRs" "${requested:-none}"
+
+	echo "  Bound PCRs:"
+
+	[ -n "$have_policy" ] || {
+		echo "    none, the NVIndex is not bound to any PCR"
+		return 0
+	}
+
+	# For every bound PCR: how many alternative values the policy
+	# accepts, how far that is from the limit where the PCR gets
+	# dropped from the next policy, and whether the value the TPM2
+	# has right now is one of them.  The last one is exactly what the
+	# TPM2 checks when the NVIndex has to be re-authorized, and
+	# reading it costs two files and no credential at all
+	local values current mark match bound=""
+	while read -r i; do
+		bound=1
+		values="$(jq -r --argjson p "$i" '.pcrValues[] | select(.pcr == $p) | .values | length' < "$policy")"
+		if [ ! -r "/sys/class/tpm/tpm0/pcr-$bank/$i" ]; then
+			mark="?"
+			match="cannot be read"
+		else
+			# sysfs writes them in upper case, the policy in
+			# lower
+			current="$(tr 'A-Z' 'a-z' < "/sys/class/tpm/tpm0/pcr-$bank/$i")"
+			if jq -e --arg c "$current" --argjson p "$i" \
+			      '.pcrValues[] | select(.pcr == $p) | .values | index($c)' \
+			      < "$policy" > /dev/null; then
+				mark=" "
+				match="matches"
+			else
+				mark="!"
+				match="DOES NOT MATCH"
+			fi
+		fi
+		# The mark is what the eye finds first, so it is spent on
+		# the PCR that does not match and not on the ones that do
+		echo "   $mark PCR $i: $values value(s), $((8 - values)) before the PolicyOR limit, current value $match"
+	done < <(jq -r '.pcrValues[].pcr' < "$policy")
+
+	[ -n "$bound" ] || echo "    none, the NVIndex is not bound to any PCR"
+
+	status_policy_stale="$(policy_stale_pcrs)"
+
+	local missing_list
+	missing_list="$(policy_missing_pcrs "$FDE_SEAL_PCR_LIST")"
+	[ -n "$missing_list" ] || return 0
+
+	# The reason a PCR was dropped only comes out of a prediction,
+	# and `systemd-pcrlock predict` takes seconds.  It is run only
+	# when there is something to explain, so the ordinary report,
+	# where every requested PCR is bound, stays instant
+	local prediction="" pcrlock_status=0
+	info "Predicting PCRs to find out why $missing_list were dropped, this takes a few seconds"
+	prediction="$(SYSTEMD_LOG_LEVEL=warning pcrlock --pcr="$FDE_SEAL_PCR_LIST" --json=short predict 2> /dev/null)" || pcrlock_status=$?
+	[ "$pcrlock_status" -eq 0 ] || prediction=""
+
+	echo "  Requested but not bound:"
+	local reason
+	for i in ${missing_list//,/ }; do
+		if [ -z "$prediction" ]; then
+			reason="unknown, the prediction failed"
+		elif jq -e --argjson p "$i" '[.sha256[]? | select(.pcr == $p and (.values | length > 8))] | length > 0' \
+			<<<"$prediction" > /dev/null; then
+			reason="too many alternative values for the PolicyOR"
+		elif jq -e --argjson p "$i" '[.sha256[]? | select(.pcr == $p)] | length > 0' \
+			<<<"$prediction" > /dev/null; then
+			# It can be predicted now but the policy does not
+			# bind it, so the policy is simply older than the
+			# prediction
+			reason="predictable now, the policy is older than the components"
+		else
+			reason="no component matches the event log"
+		fi
+		echo "    PCR $i: $reason"
+	done
+}
+
+# Replay the sha256 PCR 15 events that systemd recorded for this boot,
+# and return the value that PCR 15 had once the last one was measured.
+# Empty when nothing was measured
+#
+# The measurements of interest are the volume keys, one per encrypted
+# device that carries `tpm2-measure-pcr=yes`, extended in the order in
+# which the devices were unlocked.  That order is what
+# measure-pcr-generator fixes, and it is why the prediction is tied to
+# the crypttab
+status_pcr15_replay()
+{
+	local log="${1:?}"
+	local value="0000000000000000000000000000000000000000000000000000000000000000"
+	local digest measured=
+
+	# The log is RFC 7464 JSON-seq, so every record is introduced by a
+	# 0x1e separator that jq refuses to read as JSON
+	while read -r digest; do
+		# TPM_Extend is a hash over the concatenation of the two
+		# binary digests.  `printf %b` writes the NUL bytes
+		# straight to the pipe, which a command substitution
+		# around the binary would have eaten
+		value="$(printf '%b' "$(sed 's/../\\x&/g' <<<"$value$digest")" | \
+				openssl dgst -sha256 -r | cut -d' ' -f1)"
+		measured=1
+	done < <(tr -d '\036' < "$log" | \
+			jq -r 'select(.pcr == 15 and .content.eventType == "volume-key")
+			       | .digests[] | select(.hashAlg == "sha256") | .digest' \
+			   2> /dev/null)
+
+	[ -z "$measured" ] || echo "$value"
+}
+
+status_pcr15()
+{
+	local prediction=/var/lib/sdbootutil/measure-pcr-prediction
+
+	echo "PCR 15"
+
+	if ! grep -q "tpm2-measure-pcr=yes" /etc/crypttab 2> /dev/null; then
+		status_row "Enabled" "no"
+		return 0
+	fi
+	status_row "Enabled" "yes"
+
+	if [ -n "$arg_full" ]; then
+		local present="MISSING" signed=", NOT SIGNED"
+		[ ! -e "$prediction" ] || present="present"
+		[ ! -e "$prediction.sha256" ] || signed=", signed"
+		status_row "Prediction" "$present$signed"
+
+		if [ -e /var/lib/sdbootutil/measure-pcr-public.pem ]; then
+			status_row "Public key" "yes"
+		else
+			status_row "Public key" "no"
+		fi
+
+		if [ -d /usr/lib/dracut/modules.d/50measure-pcr ]; then
+			status_row "Dracut module" "yes"
+		else
+			status_row "Dracut module" "no"
+		fi
+
+		# The prediction is tied to the crypttab it was made
+		# from: the order of the entries decides the order of the
+		# extensions, so a crypttab that changed invalidates it
+		local crypttab_sha1
+		if [ ! -e /etc/crypttab ] || [ ! -e /var/lib/sdbootutil/crypttab.sha1 ]; then
+			status_row "Crypttab" "unknown"
+		else
+			read -r crypttab_sha1 _ < <(sha1sum /etc/crypttab)
+			if grep -Fixq "$crypttab_sha1" /var/lib/sdbootutil/crypttab.sha1; then
+				status_row "Crypttab" "unchanged since the prediction"
+			else
+				status_row "Crypttab" "CHANGED after the prediction, the order of the extensions may differ"
+			fi
+		fi
+	fi
+
+	# The prediction has one line per digest, in the order that
+	# `generate_tpm2_predictions_pcr_15` writes them, and the second
+	# one is sha256
+	local predicted=""
+	[ ! -r "$prediction" ] || predicted="$(sed -n 2p "$prediction")"
+	predicted="${predicted,,}"
+
+	# Do *not* compare against the register in /sys.  The prediction
+	# describes PCR 15 right after the volume keys are measured, which
+	# is the only moment measure-pcr-validator looks at it, and after
+	# that anything is free to extend it further (systemd-pcrfs and
+	# systemd-pcrmachine do, on the systems that ship them).  A machine
+	# that booted perfectly then reads back a value that matches
+	# nothing, and reporting that as a mismatch is a false alarm
+	#
+	# Replay instead systemd's own record of what it measured in this
+	# boot, which is what the validator saw.  Its absence is not an
+	# error either: it lives in /run and only exists once something has
+	# been measured
+	local measured="" log=/run/log/systemd/tpm2-measure.log
+	[ ! -r "$log" ] || measured="$(status_pcr15_replay "$log")"
+
+	# Nothing measured at all is a different failure from a wrong
+	# measurement: it is what happens when the initrd carries no
+	# generator, or when the generator produced no drop-in for the
+	# device, and it leaves PCR 15 untouched instead of wrong
+	if [ -r "$log" ] && [ -z "$measured" ]; then
+		status_row "This boot" "NOTHING was measured into PCR 15"
+	elif [ -z "$predicted" ] || [ -z "$measured" ]; then
+		status_row "This boot" "cannot be told, systemd recorded no measurement"
+	elif [ "$predicted" = "$measured" ]; then
+		status_row "This boot" "measured as predicted"
+	else
+		status_row "This boot" "the measurement DOES NOT MATCH the prediction"
+	fi
+}
+
+status_recovery_pin()
+{
+	# Only whether the recovery PIN can be reached, never the PIN.
+	# Without it a policy that no longer matches the PCRs cannot be
+	# rewritten, and that is a dead end rather than an inconvenience
+	# (github issue 250)
+	local keyring="" environment="" issue="" f
+
+	! recovery_pin_keyid > /dev/null 2>&1 || keyring=1
+	[ -z "$env_recovery_pin$env_pin" ] || environment=1
+	for f in /run/issue.d/91-recovery-pin.issue /run/issue.d/91-recovery-pin.conf; do
+		[ ! -e "$f" ] || issue=1
+	done
+
+	[ -z "$keyring$environment$issue" ] || status_pin_reachable=1
+
+	echo "Recovery PIN (only whether it can be reached, never its value)"
+
+	if [ -n "$arg_full" ]; then
+		status_row "Kernel keyring" "$(status_yn "$keyring")"
+		status_row "Environment" "$(status_yn "$environment")"
+		status_row "Issue file" "$(status_yn "$issue")"
+		return 0
+	fi
+
+	local where=()
+	[ -z "$keyring" ] || where+=("kernel keyring")
+	[ -z "$environment" ] || where+=("environment")
+	[ -z "$issue" ] || where+=("issue file")
+
+	if [ "${#where[@]}" -eq 0 ]; then
+		status_row "Reachable" "no"
+	else
+		status_row "Reachable" "yes ($(status_join "${where[@]}"))"
+	fi
+}
+
+status_service()
+{
+	local unit="${1:?}"
+	local result exit_status timestamp
+
+	result="$(systemctl show -P Result "$unit" 2> /dev/null)" || result=""
+	exit_status="$(systemctl show -P ExecMainStatus "$unit" 2> /dev/null)" || exit_status=""
+	timestamp="$(systemctl show -P ExecMainExitTimestamp "$unit" 2> /dev/null)" || timestamp=""
+
+	# `Result` is "success" for a unit that never ran, and for one
+	# that systemd does not know about at all.  Reporting that as a
+	# success is worse than saying nothing: it answers "did the
+	# predictions get updated" with a yes.  The exit timestamp is
+	# what separates the two
+	[ -n "$timestamp" ] || { result=""; exit_status=""; }
+
+	echo "Last update-predictions"
+	status_row "Result" "${result:-never ran}${exit_status:+ (exit $exit_status)}"
+	status_row "Finished" "${timestamp:-never}"
+}
+
+# Every file that can configure this run, in the order that they are
+# read.  /etc/sysconfig/bootloader comes first and carries LOADER_TYPE,
+# SECURE_BOOT and UPDATE_NVRAM; the sdbootutil and fde-tools files come
+# afterwards, in the order that `load_config_file` uses.  They are all
+# sourced, so the last assignment of a name is the one that survives
+status_config_files=(/etc/sysconfig/bootloader
+		     /usr/etc/default/sdbootutil
+		     /etc/default/sdbootutil
+		     /usr/etc/default/fde-tools
+		     /etc/default/fde-tools
+		     /etc/sysconfig/fde-tools)
+
+# The last file that assigns this name, which is the one that decided
+# the value.  Empty when no file mentions it
+#
+# A grep and not a re-source: sourcing the files again to find out
+# where a value came from would run their code a second time, and
+# "status" only reads
+status_config_origin()
+{
+	local name="${1:?}" f origin=""
+
+	for f in "${status_config_files[@]}"; do
+		[ -e "$f" ] || continue
+		grep -qE "^[[:space:]]*(export[[:space:]]+)?$name=" "$f" 2> /dev/null || continue
+		origin="$f"
+	done
+	echo "$origin"
+}
+
+# The configuration this run ended up with, and where each value came
+# from.  A wrong PCR list or a ROOTFS that does not match the cmdline
+# explains an entry that does not boot, and neither is visible anywhere
+# else
+status_config()
+{
+	local read_files=() f
+	for f in "${status_config_files[@]}"; do
+		[ ! -e "$f" ] || read_files+=("$f")
+	done
+
+	echo "Configuration"
+	if [ "${#read_files[@]}" -eq 0 ]; then
+		status_row "Files read" "none, every value below is a default"
+	else
+		status_row "Files read" "$(status_join "${read_files[@]}")"
+	fi
+	status_row "Entry token" "${entry_token:-unknown}"
+	status_row "ESP directory" "${esp_root}${esp_dst}"
+
+	# Every line is the name of the setting, the CLI argument that
+	# overrides it ("-" when it has none and is only read from a
+	# file), and what the setting does.  The name alone is not always
+	# enough: SECURE_BOOT does not describe the firmware, it only asks
+	# for the shim to be installed, and nothing in sdbootutil decides
+	# it by looking at what the firmware enforces
+	local name arg note value origin cli where
+	while read -r name arg note; do
+		[ -n "$name" ] || continue
+		value="${!name}"
+		[ "$arg" = "-" ] && cli="" || cli="${!arg}"
+		origin="$(status_config_origin "$name")"
+
+		if [ -n "$cli" ]; then
+			where="from the command line"
+		elif [ "$name" = "ROOTFS" ] && is_rootfs_crypt; then
+			where="forced, the root device is encrypted"
+		elif [ -n "$origin" ] && [ -z "$value" ]; then
+			# A file that assigns an empty value is not the
+			# same as a name that no file mentions, even
+			# though both end up unset
+			where="empty in $origin"
+		elif [ -n "$origin" ]; then
+			where="from $origin"
+		else
+			where="not set anywhere, this is the default"
+		fi
+
+		printf '  %-25s%s\n' "${name}:" "${value:-(unset)}"
+		# What the setting does and where the value came from, on
+		# their own line: the name is not always enough, and both
+		# together do not fit in a terminal
+		echo "      $note; $where"
+	done <<-EOF
+		FDE_SEAL_PCR_LIST arg_pcr the PCRs to seal against
+		ROOTFS arg_rootfs how the cmdline names the root
+		ESP_FREE_SPACE arg_esp_free_space percentage of the ESP to keep free
+		DEVICETREE_SOURCE arg_devicetree_source device tree blob to copy
+		LOADER_TYPE - the boot loader to manage
+		SECURE_BOOT - "yes" installs the shim, whatever the firmware does
+		UPDATE_NVRAM - "no" keeps sdbootutil out of the EFI variables
+		LAST_WORKING_SNAPSHOTS - extra snapshots to keep in the prediction
+	EOF
+}
+
+# What the machine booted, and what it will boot next
+status_boot()
+{
+	echo "Boot loader"
+	status_row "Type" "$(bootloader_name 2> /dev/null || echo unknown)"
+
+	# The version in the ESP against the version that the system
+	# ships.  Both can be missing on their own: no bootloader
+	# installed yet, or a snapshot with no bootloader package
+	local deployed="" system="" path=""
+	deployed="$(bootloader_version 2> /dev/null)" || deployed=""
+	path="$(find_bootloader 2> /dev/null)" || path=""
+	# Only with a path: with an empty argument "bootloader_version"
+	# falls back to the copy in the ESP, and it would compare the
+	# deployed version against itself
+	[ -z "$path" ] || system="$(bootloader_version "$path" 2> /dev/null)" || system=""
+
+	if [ -z "$deployed" ]; then
+		status_row "In the ESP" "no bootloader found in the ESP"
+	elif [ -z "$system" ]; then
+		status_row "In the ESP" "$deployed, the version of the system cannot be read"
+	else
+		# The comparison goes to stdout ("261.2 == 261.2"), and
+		# only the exit status is wanted here
+		local cmp=0
+		systemd-analyze compare-versions "$deployed" "$system" > /dev/null 2>&1 || cmp="$?"
+		case "$cmp" in
+			11) status_row "In the ESP" "$deployed, newer than the $system of the system" ;;
+			12) status_row "In the ESP" "OUTDATED: $deployed in the ESP, $system in the system" ;;
+			*)  status_row "In the ESP" "up to date ($deployed)" ;;
+		esac
+	fi
+
+	# Its own copy of the entry list, and not "update_entries": that
+	# one writes "$entryfile", which the rest of the report reads for
+	# other purposes
+	local entries
+	entries="$(bootctl list --json=short 2> /dev/null)" || entries="[]"
+	[ -n "$entries" ] || entries="[]"
+
+	# `bootctl` builds "isSelected" by matching the entry ID against
+	# "LoaderEntrySelected", but grub2-bls writes the variable without
+	# the ".conf" suffix, so nothing matches there and "isSelected" is
+	# always null.  Compare both spellings against the variable, which
+	# `bli_efi_var_get` returns lower-cased (same workaround as in
+	# "list_entries")
+	local selected="" booted=""
+	selected="$(bli_efi_var_get "LoaderEntrySelected" 2> /dev/null)" || selected=""
+	booted="$(jq -r --arg s "$selected" \
+		     'first(.[] | select(.isSelected == true
+					 or (.id | ascii_downcase) == $s
+					 or (.id | ascii_downcase) == ($s + ".conf"))
+			   | .id) // empty' <<<"$entries")"
+	# No entry claims it, so report the raw variable: on a machine
+	# that booted something the ESP no longer offers, the name is the
+	# answer and "unknown" is not
+	[ -n "$booted" ] || booted="$selected"
+
+	# grub2-bls does not write the variable at all, so on those
+	# systems nothing above can answer.  Look instead for the entry
+	# that describes what is running: the kernel release, and the
+	# subvolume of the running snapshot where there are snapshots.
+	# Only when a single entry matches, because two entries that
+	# describe the same thing cannot be told apart from here
+	#
+	# This is where the entry booted from, unless it was rewritten
+	# since, so it is worth having but has to be labelled as a guess
+	local guess=""
+	if [ -z "$booted" ]; then
+		local subvol=""
+		[ -z "$have_snapshots" ] || subvol="${subvol_prefix}/.snapshots/${root_snapshot}/snapshot"
+		booted="$(jq -r --arg k "$(uname -r)" --arg s "$subvol" \
+			     '[.[] | select(.type? == "type1")
+				   | select((.version // "") | endswith($k))
+				   | select($s == "" or ((.options // "") | contains("rootflags=subvol=" + $s)))]
+			      | if length == 1 then .[0].id else empty end' <<<"$entries")"
+		[ -z "$booted" ] || guess=" (from the running kernel, the boot loader reported nothing)"
+	fi
+
+	if [ -n "$booted" ]; then
+		status_row "Booted entry" "$booted$guess"
+	else
+		status_row "Booted entry" "unknown, the boot loader reported none"
+	fi
+
+	# A one shot entry is consumed by the boot loader on the next
+	# boot, so while it is set it, and not the default, is what comes
+	# next
+	local oneshot="" default=""
+	oneshot="$(bli_efi_var_get "LoaderEntryOneShot" 2> /dev/null)" || oneshot=""
+	default="$(get_default_entry 2> /dev/null)" || default=""
+
+	if [ -n "$oneshot" ]; then
+		status_row "Next boot" "$oneshot (one shot, and then ${default:-the default})"
+	else
+		status_row "Next boot" "${default:-unknown, no default is set}"
+	fi
+
+	[ -z "$arg_full" ] || {
+		# Only the real entries: the list also carries what the
+		# boot loader adds by itself ("Reboot Into Firmware
+		# Interface" and the like), and counting those answers a
+		# question nobody asked
+		status_row "Entries" "$(jq -r '[.[] | select(.type? == "type1")] | length' <<<"$entries")"
+		local timeout=""
+		timeout="$(get_timeout 2> /dev/null)" || timeout=""
+		status_row "Menu timeout" "${timeout:-not set}"
+	}
+}
+
+status_system()
+{
+	echo "System"
+	status_row "ESP" "$esp_root"
+	# The state of the firmware, which is a different thing from the
+	# SECURE_BOOT of the configuration: that one only asks for the
+	# shim to be installed, and never looks at whether the firmware
+	# enforces anything
+	if is_secure_boot; then
+		status_row "Secure Boot" "enabled in the firmware"
+	else
+		status_row "Secure Boot" "disabled in the firmware"
+	fi
+	if is_shim_installed; then
+		status_row "Shim" "installed"
+	else
+		status_row "Shim" "not installed"
+	fi
+	if is_transactional; then
+		status_row "Transactional" "yes"
+	else
+		status_row "Transactional" "no"
+	fi
+	# The lockout is why a device that is enrolled and predicted
+	# correctly still does not open
+	if ! have_tpm2; then
+		status_row "TPM2" "no"
+	elif in_lockout 2> /dev/null; then
+		status_row "TPM2" "yes (IN LOCKOUT)"
+	else
+		status_row "TPM2" "yes"
+	fi
+}
+
+fde_status()
+{
+	status_system
+
+	[ -z "$arg_full" ] || { echo; status_config; }
+
+	echo
+	status_boot
+	echo
+	status_devices
+	echo
+	status_policy
+	echo
+	status_pcr15
+	echo
+	status_recovery_pin
+	echo
+	status_service sdbootutil-update-predictions.service
+
+	# A policy with no device behind it is not an error, but it is
+	# never what the reader assumes when they see "Backend: pcrlock".
+	# It is what a partial unenroll leaves, and it makes the whole
+	# TPM2 section describe something that opens nothing
+	[ -z "$status_policy_backend" ] || [ -n "$status_tpm2_device" ] || {
+		echo
+		warn "There is a TPM2 policy, but no device has a TPM2 keyslot. Nothing is opened by the TPM2, and everything above about the policy describes a leftover"
+	}
+
+	# The two cases of a stale PCR are opposite, and the difference is
+	# the whole answer: routine when the next `update-predictions`
+	# rewrites the policy, terminal when it cannot, because
+	# re-authorizing the NVIndex without a recovery PIN needs the
+	# current PCRs to satisfy the *old* policy (github issue 250)
+	[ -z "$status_policy_stale" ] || {
+		echo
+		if [ -n "$status_pin_reachable" ]; then
+			warn "PCR $status_policy_stale no longer match the policy. The next 'sdbootutil update-predictions' rewrites it, and a recovery PIN is reachable to authorize the new NVIndex"
+		else
+			warn "PCR $status_policy_stale no longer match the policy, and no recovery PIN is reachable"
+			warn "The PIN sealed in the TPM2 is the only one left, and reading it back needs the current PCRs to match the previous prediction, which is what just failed. This does not recover by itself: every 'update-predictions' from now on fails the same way"
+			warn "First make sure that a password opens the devices, then 'systemd-pcrlock remove-policy' and 'sdbootutil enroll --method=tpm2'"
+		fi
+	}
+
+	# Only for somebody reading it.  A report that is being collected
+	# is already redirected, and there the line is noise
+	[ -z "$interactive" ] || [ -n "$arg_full" ] || {
+		echo
+		echo "Run 'sdbootutil status --full' for the full report"
+	}
+}
+
 eval_bootctl()
 {
 	# XXX: bootctl should have json output for that too
@@ -5996,6 +6841,7 @@ define_commands() {
 		[list-entries]=""
 		[list-kernels]=""
 		[list-devices]=""
+		[status]=""
 		[show-entry]="kernel"
 		[update-entry]="kernel"
 		[update-all-entries]=""
@@ -6050,6 +6896,7 @@ define_options() {
 		[force]=""
 		[strict]=""
 		[disable-predictions]=""
+		[full]=""
 	)
 	opts_long=""
 	for opt in "${!options_with_arg[@]}"; do
@@ -6114,6 +6961,7 @@ while true ; do
 		--force) arg_force=1; shift ;;
 		--strict) arg_strict=1; shift ;;
 		--disable-predictions) arg_disable_predictions=1; shift ;;
+		--full) arg_full=1; shift ;;
 		--) shift ; break ;;
 		*) echo "Internal error!" ; exit 1 ;;
 	esac
@@ -6347,6 +7195,8 @@ case "$1" in
 		list_snapshots ;;
 	list-devices)
 		list_devices ;;
+	status)
+		fde_status ;;
 	show-entry)
 		show_entry_fields "${3:-$root_snapshot}" "$2" ;;
 	update-entry)
