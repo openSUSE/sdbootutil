@@ -15,7 +15,8 @@ set -euo pipefail
 # Read /etc/crypttab lines that contains tpm2-device and
 # tpm2-measure-pcr.  It will order the services as listed in this file
 after=""
-while read -r name _ _ opts; do
+while read -r name _ _ opts || [ -n "$name" ]; do
+	[ -n "$name" ] || continue
 	[[ "$name" = \#* ]] && continue
 	[[ "$opts" != *"tpm2-device="* ]] && continue
 	[[ "$opts" != *"tpm2-measure-pcr="* ]] && continue
@@ -39,7 +40,8 @@ done < /etc/crypttab
 
 # Do a similar loop for devices that can be unlocked by FIDO2 keys
 after=""
-while read -r name _ _ opts; do
+while read -r name _ _ opts || [ -n "$name" ]; do
+	[ -n "$name" ] || continue
 	[[ "$name" = \#* ]] && continue
 	[[ "$opts" != *"fido2-device="* ]] && continue
 	name="$(systemd-escape "$name")"
