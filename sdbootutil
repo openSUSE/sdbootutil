@@ -4148,6 +4148,71 @@ policy_missing_pcrs()
 	echo "$missing"
 }
 
+policy_stale_pcrs()
+{
+	# Bound PCRs whose current value is not one of the alternatives
+	# that the policy accepts.  This is exactly what the TPM2 checks
+	# when the recovery PIN has to be unsealed to re-authorize the
+	# NVIndex, and answering it here costs two reads and no
+	# credential at all
+	[ -e /var/lib/systemd/pcrlock.json ] || return 0
+
+	local bank
+	bank="$(jq -r '.pcrBank // "sha256"' < /var/lib/systemd/pcrlock.json)"
+
+	local i current stale=
+	while read -r i; do
+		# A PCR that the kernel does not export cannot be
+		# compared, and assuming the worst would invent a
+		# problem that may not be there
+		[ -r "/sys/class/tpm/tpm0/pcr-$bank/$i" ] || continue
+		# sysfs writes them in upper case, the policy in lower
+		current="$(tr 'A-Z' 'a-z' < "/sys/class/tpm/tpm0/pcr-$bank/$i")"
+		jq -e --arg c "$current" --argjson p "$i" \
+		   '.pcrValues[] | select(.pcr == $p) | .values | index($c)' \
+		   < /var/lib/systemd/pcrlock.json > /dev/null || \
+			stale+="${stale:+,}$i"
+	done < <(jq -r '.pcrValues[].pcr' < /var/lib/systemd/pcrlock.json)
+
+	echo "$stale"
+}
+
+# `systemd-pcrlock make-policy` has to authorize the NVIndex against
+# the policy that is already stored in it.  With a recovery PIN that is
+# a PolicySigned and no PCR takes part, but without one the PIN is first
+# unsealed from the TPM2, and that unseal is gated by the *previous*
+# prediction evaluated against the *current* PCR values.  So a PCR that
+# moved out of what the last policy accepted locks the update out: the
+# same failure comes back at every boot, and no amount of retrying or
+# regenerating the components changes it.  That is github issue 250,
+# where re-enrolling was the only way out and nobody could say why
+#
+# The strings come from `tpm2_policy_super_pcr()`: "None of the
+# alternative values" for a PCR that has several, and the retry message
+# when a single one keeps not matching.  systemd 258 (3ab04fbc4c) added
+# both, and older versions leave only the `Esys_PolicyOR` failure and
+# "Failed to submit super PCR policy"
+explain_pcrlock_policy_error()
+{
+	local errors="$1"
+	local pin="$2"
+
+	grep -qE "None of the alternative values|PCR values kept changing|Failed to submit super PCR policy|Failed to unseal PIN" "$errors" || return 0
+
+	# A recovery PIN was used, so the PCRs were not part of the
+	# authorization and this is a different problem.  Saying anything
+	# about PCRs here would only send the reader the wrong way
+	[ -z "$pin" ] || return 0
+
+	local stale
+	stale="$(policy_stale_pcrs)"
+
+	warn "The policy stored in the TPM2 cannot be re-authorized${stale:+: PCR $stale no longer match it}"
+	warn "No recovery PIN was available, so the one sealed in the TPM2 had to be used, and reading it back needs the current PCRs to match the previous prediction.  This does not recover by itself, every new run fails the same way"
+	warn "With the recovery PIN, re-run with --ask-recovery-pin (or RECOVERY_PIN=...)"
+	warn "Without it, the policy has to be created again: 'systemd-pcrlock remove-policy' and then 'sdbootutil enroll --method=tpm2'.  Until that is done the TPM2 does not open the device, so first make sure that a password does"
+}
+
 shim_changed()
 {
 	# The shim in the ESP is not the one that produced the current
@@ -4545,6 +4610,7 @@ generate_tpm2_predictions_pcrlock()
 
 	if [ "$pcrlock_status" -ne 0 ]; then
 		warn "Error creating the systemd-pcrlock policy!\n$(cat "$tmpfile")"
+		explain_pcrlock_policy_error "$tmpfile" "$pin"
 		return 1
 	elif echo "$output" | grep -q "recovery PIN"; then
 		local split
