@@ -5237,6 +5237,43 @@ is_same_device()
 	[ "$id1" = "$id2" ]
 }
 
+# /etc/crypttab belongs to whoever wrote it, so only the line of the
+# device being enrolled is ever rewritten: the comments, the blank lines
+# and the spacing of every other entry are copied back untouched.  Both
+# callers build the new file the same way and end here
+#
+# And it is installed only when a line really changed.  Replacing the
+# file with an identical copy still moves the mtime and, on a
+# transactional system, adds it to the snapshot, so a run with nothing
+# to do would leave the same trace as a run that enrolled a device
+replace_crypttab()
+{
+	local new="${1:?}"
+	local changed="$2"
+
+	[ -n "$changed" ] || {
+		rm -f "$new"
+		return 0
+	}
+
+	mv -Z "$new" /etc/crypttab
+	chmod 644 /etc/crypttab
+}
+
+# Copy a line of /etc/crypttab that this run does not modify.  The
+# header that sdbootutil used to write is the single exception: it
+# announces that the comments will be removed, which is exactly what
+# stopped being true, and dropping it is not a reason to rewrite the
+# file by itself
+copy_crypttab_line()
+{
+	local line="$1"
+	local new="$2"
+
+	[[ "$line" != "# File created by sdbootutil."* ]] || return 0
+	printf '%s\n' "$line" >> "$new"
+}
+
 add_crypttab_option()
 {
 	local dev="$1"
@@ -5247,33 +5284,43 @@ add_crypttab_option()
 
 	local crypttab
 	crypttab="$(mktemp -t crypttab.XXXXXX)"
-	echo "# File created by sdbootutil.  Comments will be removed" > "$crypttab"
-	echo "# Add the 'x-sdbootutil.ignore' option to un-track a device" >> "$crypttab"
 
 	local found=
+	local changed=
+	local line
 	local name
 	local device
 	local key
 	local opts
-	while read -r name device key opts; do
-		[[ "$name" = \#* ]] && continue
-		# An empty line has no fields, and would be written
-		# back as "  none "
-		[ -n "$name" ] || continue
-		if is_same_device "$dev" "$device" && [[ "$opts" != *"x-sdbootutil.ignore"* ]]; then
-			found=1
-			if [[ "$opts" != *"$option"* ]]; then
-				[ -z "$opts" ] && opts="$option" || opts="$opts,$option"
-				# crypttab has changed so initrd needs
-				# to be updated
-				arg_no_reuse_initrd=1
-			fi
+	# A file with no newline at the end still has a last entry
+	while IFS= read -r line || [ -n "$line" ]; do
+		read -r name device key opts <<<"$line"
+		# A comment, a blank line, another device, or one that
+		# asked not to be tracked
+		if [ -z "$name" ] || [[ "$name" = \#* ]] || \
+		   ! is_same_device "$dev" "$device" || \
+		   [[ "$opts" = *"x-sdbootutil.ignore"* ]]; then
+			copy_crypttab_line "$line" "$crypttab"
+			continue
 		fi
-		echo "$name $device ${key:-none} $opts" >> "$crypttab"
+
+		found=1
+		if [[ "$opts" = *"$option"* ]]; then
+			copy_crypttab_line "$line" "$crypttab"
+			continue
+		fi
+
+		[ -z "$opts" ] && opts="$option" || opts="$opts,$option"
+		# The key is written even when the entry did not have
+		# one: with an empty third field the options would be
+		# read as the key
+		printf '%s\n' "$name $device ${key:-none} $opts" >> "$crypttab"
+		changed=1
+		# crypttab has changed so initrd needs to be updated
+		arg_no_reuse_initrd=1
 	done < /etc/crypttab
 
-	mv -Z "$crypttab" /etc/crypttab
-	chmod 644 /etc/crypttab
+	replace_crypttab "$crypttab" "$changed"
 
 	# The enrollment alone does not make the device unlock at boot:
 	# when the option is not in /etc/crypttab (nor in the initrd
@@ -5295,32 +5342,33 @@ remove_crypttab_option()
 
 	local crypttab
 	crypttab="$(mktemp -t crypttab.XXXXXX)"
-	echo "# File created by sdbootutil.  Comments will be removed" > "$crypttab"
-	echo "# Add the 'x-sdbootutil.ignore' option to un-track a device" >> "$crypttab"
 
+	local changed=
+	local line
 	local name
 	local device
 	local key
 	local opts
-	while read -r name device key opts; do
-		[[ "$name" = \#* ]] && continue
-		# An empty line has no fields, and would be written
-		# back as "  none "
-		[ -n "$name" ] || continue
-		if is_same_device "$dev" "$device" && [[ "$opts" != *"x-sdbootutil.ignore"* ]] && [[ "$opts" = *"$option"* ]]; then
-			opts="${opts#"$option",}"
-			opts="${opts//,"$option"}"
-			opts="${opts//"$option"}"
-			# crypttab has changed so initrd needs to be
-			# updated
-			arg_no_reuse_initrd=1
+	while IFS= read -r line || [ -n "$line" ]; do
+		read -r name device key opts <<<"$line"
+		if [ -z "$name" ] || [[ "$name" = \#* ]] || \
+		   ! is_same_device "$dev" "$device" || \
+		   [[ "$opts" = *"x-sdbootutil.ignore"* ]] || \
+		   [[ "$opts" != *"$option"* ]]; then
+			copy_crypttab_line "$line" "$crypttab"
+			continue
 		fi
-		[ -n "$opts" ] && echo "$name $device ${key:-none} $opts" >> "$crypttab"
-		[ -z "$opts" ] && echo "$name $device ${key:-none}" >> "$crypttab"
+
+		opts="${opts#"$option",}"
+		opts="${opts//,"$option"}"
+		opts="${opts//"$option"}"
+		printf '%s\n' "$name $device ${key:-none}${opts:+ $opts}" >> "$crypttab"
+		changed=1
+		# crypttab has changed so initrd needs to be updated
+		arg_no_reuse_initrd=1
 	done < /etc/crypttab
 
-	mv -Z "$crypttab" /etc/crypttab
-	chmod 644 /etc/crypttab
+	replace_crypttab "$crypttab" "$changed"
 
 	dbg "Removed \"$option\" for \"$dev\" to /etc/crypttab"
 	dbg_cat "/etc/crypttab"
