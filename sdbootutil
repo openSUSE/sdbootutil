@@ -4060,6 +4060,30 @@ get_predicted_hashes()
 	find /var/lib/pcrlock.d/ -name "*.pcrlock" -type f -exec jq -r '.records[].digests[] | select(.hashAlg == "sha256") | .digest' {} + | sort -u
 }
 
+component_pcrs()
+{
+	# PCRs that a component measures, read from the `.pcrlock` files
+	# that describe it.  A component is either a single file or a
+	# directory of variations, and both forms can appear in any of
+	# the `systemd-pcrlock` directories, so all of them are collected
+	local component="$1"
+
+	local d f
+	local -a files=()
+	for d in /etc/pcrlock.d /run/pcrlock.d /var/lib/pcrlock.d \
+		 /usr/local/lib/pcrlock.d /usr/lib/pcrlock.d; do
+		for f in "$d/$component.pcrlock" "$d/$component.pcrlock.d"/*.pcrlock; do
+			# A mask is an empty file, and `jq` fails on it
+			[ -s "$f" ] || continue
+			files+=("$f")
+		done
+	done
+
+	[ "${#files[@]}" -gt 0 ] || return 0
+
+	jq -r '.records[] | .pcr // empty' "${files[@]}" 2>/dev/null | sort -nu
+}
+
 mask_unmatched_components()
 {
 	# `systemd-pcrlock` drops from the protection mask every PCR
@@ -4079,9 +4103,9 @@ mask_unmatched_components()
 	# priority and the masking by file name.  A symlink to
 	# /dev/null is also understood as a mask, but the SELinux
 	# policy does not allow `lnk_file` in the pcrlock directory.
-	# Only the components provided by the system are masked: the
-	# ones generated here are expected to align, and if they do not
-	# the problem is somewhere else.
+	# Only the components provided by the system are masked: a
+	# component generated here already lives in the directory with
+	# more priority, so there is nothing left to hide it with.
 	#
 	# The mask describes the current event log, so it is dropped
 	# after a reboot by `clean_pcrlock_d`, like the shifted
@@ -4089,11 +4113,39 @@ mask_unmatched_components()
 	#
 	# Returns 0 if something was masked, so the caller knows that
 	# the prediction is stale
+	local pcrs="$1"
+
+	local i
+	local -a list
+	local -A requested
+	IFS=',' read -r -a list <<<"$pcrs"
+	for i in "${list[@]}"; do
+		requested[$i]=1
+	done
+
 	local component masked=1
 	while read -r component; do
 		[ -e "/usr/lib/pcrlock.d/$component.pcrlock" ] || \
 		    [ -d "/usr/lib/pcrlock.d/$component.pcrlock.d" ] || {
-			warn "Component $component cannot be found in the event log"
+			# A component generated here has no lower priority
+			# copy to hide, so it cannot be masked.  It is only
+			# a problem when it takes part in a PCR that is
+			# being sealed: `600-gpt` for example cannot align
+			# in the boot that rewrites the partition table (a
+			# disk image grown to the size of the disk, or
+			# `systemd-repart`), because the firmware measured
+			# the table as it was before, and PCR 5 is not in
+			# any of the default lists
+			local affected=
+			for i in $(component_pcrs "$component"); do
+				[ -n "${requested[$i]+_}" ] || continue
+				affected+="${affected:+,}$i"
+			done
+			if [ -z "$affected" ]; then
+				info "Component $component cannot be found in the event log, no sealed PCR is affected"
+			else
+				warn "Component $component cannot be found in the event log, PCR $affected cannot be predicted"
+			fi
 			continue
 		}
 		[ ! -e "/var/lib/pcrlock.d/$component.pcrlock" ] || continue
@@ -4263,7 +4315,7 @@ get_final_pcrs()
 
 	# Predict again if some component was masked, as the previous
 	# prediction was done with it in place
-	if mask_unmatched_components; then
+	if mask_unmatched_components "$pcrs"; then
 		pcrlock_status=0
 		output="$(predict_pcrs "$pcrs")" || pcrlock_status=$?
 
