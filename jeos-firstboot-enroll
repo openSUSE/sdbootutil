@@ -249,6 +249,18 @@ enroll_post() {
 do_enroll() {
 	local out r error=0
 
+	# `sdbootutil` writes the secrets it generates (the recovery key,
+	# the recovery PIN) in stdout, and every diagnostic in stderr, so
+	# the two are captured apart.  Merging them with "2>&1" is what
+	# would hand a secret to `report_error` the moment an enrollment
+	# fails after having printed one, and half of that report is the
+	# `logger` call in `log_enroll`, which reaches the journal on disk
+	# and stays there.  The dialog is fine, it dies with the tty, but
+	# both get the same text.  What has to be reported is the
+	# diagnostic, and that is stderr
+	local errfile
+	errfile="$(mktemp -t jeos-firstboot-enroll.XXXXXX)"
+
 	# What was chosen, so that the journal can answer "was anything
 	# enrolled at all, and what" without the person who ran firstboot
 	# having to remember the menu
@@ -264,10 +276,10 @@ do_enroll() {
 			extra="--no-reuse-initrd"
 		fi
 		d --infobox "Enrolling recovery-key ..." 3 40
-		out="$(run sdbootutil enroll --method=recovery-key "$extra" 2>&1)"
+		out="$(run sdbootutil enroll --method=recovery-key "$extra" 2> "$errfile")"
 		r="$?"
 		if [ $r -ne 0 ]; then
-			report_error "Error (recovery-key): $out"
+			report_error "Error (recovery-key): $(cat "$errfile")"
 			error=1
 		else
 			write_issue_file "$out"
@@ -284,10 +296,10 @@ do_enroll() {
 			extra="--no-reuse-initrd"
 		fi
 		d --infobox "Enrolling password ..." 3 40
-		out="$(PW="$crypt_pw" run sdbootutil enroll --method=password "$extra" 2>&1)"
+		out="$(PW="$crypt_pw" run sdbootutil enroll --method=password "$extra" 2> "$errfile")"
 		r="$?"
 		[ $r -eq 0 ] || {
-			report_error "Error (password): $out"
+			report_error "Error (password): $(cat "$errfile")"
 			error=1
 		}
 	}
@@ -295,20 +307,20 @@ do_enroll() {
 	if [ -n "$with_tpm2" ]; then
 		if [ -n "$crypt_tpm_pin" ]; then
 			d --infobox "Enrolling TPM2+PIN ..." 3 40
-			out="$(SDB_ADD_INITIAL_COMPONENT=1 PIN="$crypt_tpm_pin" run sdbootutil enroll --method=tpm2+pin 2>&1)"
+			out="$(SDB_ADD_INITIAL_COMPONENT=1 PIN="$crypt_tpm_pin" run sdbootutil enroll --method=tpm2+pin 2> "$errfile")"
 			r="$?"
 			if [ $r -ne 0 ]; then
-				report_error "Error (TPM2+PIN): $out"
+				report_error "Error (TPM2+PIN): $(cat "$errfile")"
 				error=1
 			else
 				write_recovery_pin "$out"
 			fi
 		else
 			d --infobox "Enrolling TPM2 ..." 3 40
-			out="$(SDB_ADD_INITIAL_COMPONENT=1 run sdbootutil enroll --method=tpm2 2>&1)"
+			out="$(SDB_ADD_INITIAL_COMPONENT=1 run sdbootutil enroll --method=tpm2 2> "$errfile")"
 			r="$?"
 			if [ $r -ne 0 ]; then
-				report_error "Error (TPM2): $out"
+				report_error "Error (TPM2): $(cat "$errfile")"
 				error=1
 			else
 				write_recovery_pin "$out"
@@ -322,10 +334,10 @@ do_enroll() {
 		# the output that is captured here, so the user needs
 		# to be warned in advance
 		d --infobox "Enrolling FIDO2 ...\n\nConfirm the presence on the security token when it blinks" 6 60
-		out="$(run sdbootutil enroll --method=fido2 2>&1)"
+		out="$(run sdbootutil enroll --method=fido2 2> "$errfile")"
 		r="$?"
 		[ $r -eq 0 ] || {
-			report_error "Error (FIDO2): $out"
+			report_error "Error (FIDO2): $(cat "$errfile")"
 			error=1
 		}
 	}
@@ -350,6 +362,8 @@ do_enroll() {
 		done < <(sdbootutil list-devices)
 		log_enroll info "Enrollment finished"
 	fi
+
+	rm -f "$errfile"
 }
 
 # A password that does not open the device is only noticed by the
