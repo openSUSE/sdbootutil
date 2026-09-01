@@ -17,6 +17,47 @@ is_transactional()
 	findmnt --fstab / -O ro >/dev/null
 }
 
+# On transactional systems the boot entries are written after the
+# transaction is closed (see set_default_snapshot), so
+# `/usr/bin/sdbootutil` is the version that was installed *before* the
+# update.  A bug in it cannot be repaired by the very update that
+# carries the fix: the broken version is the one that installs the
+# kernel and writes the entry, and it will keep doing so on every
+# later update, until the user updates sdbootutil alone, reboots into
+# that snapshot and only then updates the rest (bsc#1233378).
+#
+# Use instead the sdbootutil of the snapshot that is about to become
+# the default.  At this point the transaction is closed and the
+# snapshot is complete and read-only, so its copy is the version that
+# was tested together with the kernel and the systemd that it will
+# boot with.  Only the script is taken from the snapshot: it is
+# executed by the running system, against the running system's
+# /boot/efi, so nothing is written from inside the transaction and a
+# discarded transaction still leaks nothing into the ESP.
+#
+# On rollback this picks an *older* sdbootutil, which is the intended
+# behaviour and not an accident: the entries should be written by the
+# version of the system that is going to boot.
+#
+# The fallback is deliberately limited to "there is nothing to
+# delegate to" (no snapshot binary, or a non transactional system,
+# where /usr/bin/sdbootutil is already the updated one).  If the
+# delegated call runs and fails, that failure is kept: retrying with
+# the old version would run exactly the code this is meant to avoid,
+# over an ESP that the new version may have written half way.
+sdbootutil_bin()
+{
+	local num="$1"
+	local bin="/.snapshots/$num/snapshot/usr/bin/sdbootutil"
+
+	if is_transactional && [ -x "$bin" ]; then
+		echo >&2 "Using sdbootutil from snapshot $num"
+		echo "$bin"
+	else
+		echo "/usr/bin/sdbootutil"
+	fi
+}
+
 # Updating predictions is getting slower.  The predict operation is
 # not fast as it is done two times: one to filtering the PCRs and the
 # other for creating the policy.
@@ -164,23 +205,26 @@ set_default_snapshot()
 	local path="$1"
 	local fs="$2"
 	local num="$3"
+	local sdbootutil
 
 	[ "$path" = "/" ] || return 0
 	[ "$fs" = btrfs ] || return 1
+
+	sdbootutil="$(sdbootutil_bin "$num")"
 
 	if is_transactional; then
 		# In transactional systems the boot entries are added
 		# here, once the transaction is complete and tukit
 		# decides to keep it
-		/usr/bin/sdbootutil add-all-kernels --disable-predictions "$num"
+		"$sdbootutil" add-all-kernels --disable-predictions "$num"
 
 		if [ -e /usr/lib/module-init-tools/regenerate-initrd-posttrans ]; then
 			/usr/lib/module-init-tools/regenerate-initrd-posttrans
 		fi
 	fi
 
-	/usr/bin/sdbootutil set-default-snapshot --disable-predictions "$num"
-	/usr/bin/sdbootutil update --disable-predictions --sync "$num"
+	"$sdbootutil" set-default-snapshot --disable-predictions "$num"
+	"$sdbootutil" update --disable-predictions --sync "$num"
 
 	set_update_predictions_timer
 }
@@ -230,5 +274,16 @@ cmd="$1"
 shift
 [ -n "$cmd" ] || cmd=help
 if [ "${#commands[$cmd]}" -gt 0 ]; then
-	${commands[$cmd]} "$@" || :
+	# The plugin never fails the snapper (and so the tukit) call,
+	# but it should not fail in silence either: a failing
+	# `add-all-kernels` was how bsc#1233378 went unnoticed, with the
+	# transaction reporting success and the missing entry only
+	# showing up at the next boot.
+	#
+	# `set -e` inside the handlers is what keeps this safe: if
+	# add-all-kernels fails, set_default_snapshot returns before
+	# calling `set-default-snapshot`, so the bootloader keeps
+	# pointing to the previous entry and the system still boots.
+	${commands[$cmd]} "$@" || \
+		echo >&2 "sdbootutil plugin: '$cmd' failed, the boot entries may be incomplete"
 fi
