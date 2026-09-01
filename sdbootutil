@@ -3224,6 +3224,10 @@ snapshot_ids_for_prediction()
 	# prediction.  The order is important, so the most relevant
 	# should be presented first
 
+	# Without snapshots there is no snapper to ask, and calling it
+	# only prints "snapper: command not found" twice per run
+	[ -n "$have_snapshots" ] || return 0
+
 	# Get the numbers for the last three snapshots
 	[ -s "$snapperfile" ] || update_snapper
 
@@ -3281,7 +3285,17 @@ select_entries_for_prediction()
 	local ids
 	ids="$(snapshot_ids_for_prediction)"
 
-	update_entries_for_snapshot "$(regex_snapshot_ids_for_prediction)"
+	if [ -n "$have_snapshots" ]; then
+		update_entries_for_snapshot "$(regex_snapshot_ids_for_prediction)"
+	else
+		# There is no snapshot to select, and asking for one
+		# ("rootflags=subvol=/.snapshots//snapshot") matches no
+		# entry at all.  The prediction would then be done
+		# without the kernel, the initrd and the command line,
+		# and `systemd-pcrlock` drops the PCRs that those
+		# components describe
+		update_entries_for_this_system
+	fi
 
 	# Extend the entry file with a "priority" field, based on the
 	# ordered snapshot IDs, and "kernel" field, based on the
@@ -3307,7 +3321,19 @@ select_entries_for_prediction()
 	#   - If the snapshot contains multiple kernel, the higher
 	#     version has more priority
 	#
-	jq --arg ids "$ids" 'def priority(id): id as $id | $ids | split(" ") | index($id); map(. + {"priority": priority(.version | scan("(\\d+)@") | .[]), "kernel": .version | scan(".*@(?:(\\d+).(\\d+).(\\d+)-(\\d+))") | map(. | tonumber)})' < "$entryfile" > "${entryfile}.ext"
+	# Without snapshots
+	#   - The version of the entry has no "N@" prefix, so there is
+	#     no snapshot to order by and every entry shares the same
+	#     priority.  Only the kernel version separates them, the
+	#     higher one first
+	#
+	local filter
+	if [ -n "$have_snapshots" ]; then
+		filter='def priority(id): id as $id | $ids | split(" ") | index($id); map(. + {"priority": priority(.version | scan("(\\d+)@") | .[]), "kernel": .version | scan(".*@(?:(\\d+).(\\d+).(\\d+)-(\\d+))") | map(. | tonumber)})'
+	else
+		filter='map(([.version // "" | scan("(\\d+)\\.(\\d+)\\.(\\d+)-(\\d+)")] | first) as $kernel | . + {"priority": 0, "kernel": (($kernel // []) | map(tonumber))})'
+	fi
+	jq --arg ids "$ids" "$filter" < "$entryfile" > "${entryfile}.ext"
 	mv "${entryfile}.ext" "$entryfile"
 	dbg "Added priority and kernel version to entry file (for prediction)"
 	dbg_cat "$entryfile"
