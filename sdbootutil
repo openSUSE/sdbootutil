@@ -1549,6 +1549,28 @@ removable_entries()
 		cut -f6
 }
 
+# Collect the files in the ESP that no boot entry references anymore.
+#
+# This is a best effort sweep, and it is never the point of the
+# operation that calls it: the kernel is already installed, or the
+# entries are already removed.  Its exit status must not decide whether
+# the caller continues, or a failed sweep aborts `install_kernel()`
+# after the entry is in place but before the PCR predictions are
+# scheduled, and the next boot cannot unseal.  Hence the "return 0".
+#
+# The reason is worth keeping, though.  `bootctl` reports the ordinary
+# "Cleaning <esp>" line in stderr too, so stderr is captured and only
+# shown when the sweep actually failed
+bootctl_cleanup()
+{
+	dbg "Calling bootctl cleanup"
+
+	local output
+	output="$(bootctl -q cleanup 2>&1)" || \
+		warn "Failed to clean up ${boot_root}${output:+: $output}"
+	return 0
+}
+
 # Try to make room in the ESP for "required_size" KB.  Note that the
 # caller collects the exit status (`make_free_space ... || err ...`),
 # so `set -e` is not active here and every failure must be reported,
@@ -1579,9 +1601,7 @@ make_free_space()
 	# If there is already free space, shortcut the code
 	[ "$wanted_size" -gt "$free_space" ] || return 0
 
-	# "Cleaning /boot/efi" message is presented via stderr
-	dbg "Calling bootctl cleanup"
-	bootctl -q cleanup 2> /dev/null || warn "Failed to clean up ${boot_root}"
+	bootctl_cleanup
 
 	# Remove the entries one by one, from the least to the most
 	# valuable one, until there is enough space.  It is re-evaluated
@@ -1967,7 +1987,7 @@ install_kernel()
 
 	# Do a final cleanup, as sometimes we are replacing an old
 	# initrd
-	bootctl -q cleanup 2> /dev/null
+	bootctl_cleanup
 
 	# This action will require to update the PCR predictions
 	update_predictions=1
@@ -2045,8 +2065,7 @@ cleanup_entries()
 		}
 	done < <(jq -r '.[] | .id, .path, (.version | capture("((?<snapshot>[0-9]*)@)?(?<kernel>.*)")) as $v | $v.snapshot, $v.kernel' "$entryfile")
 
-	dbg "Calling bootctl cleanup"
-	bootctl -q cleanup 2> /dev/null
+	bootctl_cleanup
 
 	# Guarantee ESP_FREE_SPACE.  Not being able to reach it is not
 	# an error here: nothing is going to be installed
