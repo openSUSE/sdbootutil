@@ -15,11 +15,19 @@ ExecCondition=/usr/bin/sh -c '[ -e /etc/crypttab ] && grep -q tpm2-device /etc/c
 # creates it with the correct SELinux label.  Without components there
 # is nothing to back up
 ExecStartPre=/usr/bin/sh -c 'mkdir -p "/tmp/$INVOCATION_ID"; [ ! -d /var/lib/pcrlock.d ] || cp -a /var/lib/pcrlock.d "/tmp/$INVOCATION_ID/pcrlock.d"'
+# stdout is discarded, and this is not a detail: `sdbootutil` reports
+# everything in stderr, and uses stdout only for data.  Here the data
+# can be a recovery PIN that `systemd-pcrlock` generated because nothing
+# supplied one, and there is nobody reading the output of a service, so
+# the single effect of keeping it would be to copy that PIN into the
+# journal, on disk, for as long as the journal is kept.  A recovery PIN
+# is meant to be shown once and to live in the keyring and in the tmpfs
+# issue file, never in a file that survives the reboot
 ExecStart=/usr/bin/sh -c '\
     systemctl --quiet is-active sdbootutil-update-predictions-shutdown.service && systemctl stop sdbootutil-update-predictions-shutdown.service; \
     while true; do \
         rm -f /run/sdbootutil/update-predictions; \
-        /usr/bin/sdbootutil -v update-predictions || exit $?; \
+        /usr/bin/sdbootutil -v update-predictions > /dev/null || exit $?; \
 	[ -f /run/sdbootutil/update-predictions ] || break; \
     done'
 ExecStopPost=/usr/bin/sh -c '\
