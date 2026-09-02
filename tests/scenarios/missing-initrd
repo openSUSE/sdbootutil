@@ -1,0 +1,39 @@
+#!/bin/bash
+# scenario: missing-initrd
+# An initrd deleted from the ESP has to be put back
+#
+# The positive counterpart of orphan-initrd: that one proves the harness
+# notices the damage, this one proves sdbootutil repairs it.  It is the
+# state a machine is left in when the ESP filled up mid-update, and the
+# reason install_kernel() re-checks the files so late instead of trusting
+# the entry to be complete.
+#
+# The initrd has to be one that only the running subvolume references.
+# add-all-kernels installs the kernels of one snapshot, so an initrd
+# shared with another snapshot would still be missing for that one
+# afterwards, and the run would be measuring a gap rather than this path
+subvol="$(findmnt --noheadings -o FSROOT --target / | head -n1)"
+subvol="${subvol#/}"
+
+initrd="$(bootctl list --json=short | jq -r --arg s "$subvol" '
+	[.[] | select(.type=="type1")] as $all |
+	[$all[] | select($s == "" or ((.options // "") | contains("subvol=" + $s))) |
+	 (.initrd // [])[]] as $mine |
+	[$all[] | select($s != "" and (((.options // "") | contains("subvol=" + $s)) | not)) |
+	 (.initrd // [])[]] as $theirs |
+	first($mine[] | select(. as $i | $theirs | index($i) | not)) // empty')"
+
+[ -n "$initrd" ] || { echo "no initrd is referenced only by the running subvolume"; exit 77; }
+echo "removing $initrd"
+rm -f "$ESP$initrd"
+
+"$SDBOOTUTIL" --esp-path "$ESP" --no-variables --disable-predictions -v add-all-kernels
+
+# What has to hold is that the entry resolves again, not that the same
+# file came back: a regenerated initrd hashes differently and the entry
+# is rewritten to point at the new name.  Both are a repair
+echo "the entry now references:"
+bootctl list --json=short | jq -r --arg s "$subvol" \
+	'.[] | select(.type=="type1") |
+	 select($s == "" or ((.options // "") | contains("subvol=" + $s))) |
+	 "  \(.id) -> \((.initrd // []) | join(" "))"'

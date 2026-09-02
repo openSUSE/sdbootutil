@@ -1,0 +1,244 @@
+#!/bin/bash
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: Copyright 2026 SUSE LLC
+#
+# Run a scenario against one or more debug guests and report what it did
+# to the boot and FDE state.
+#
+# Every scenario runs against a *copy* of the ESP, made with `cp -a` and
+# handed to bootctl and sdbootutil through SYSTEMD_ESP_PATH and
+# --esp-path.  Nothing a scenario does can stop the guest from booting,
+# so a failing run is a report and not a recovery job.  The state that
+# is not under the ESP -- /etc/crypttab, the LUKS headers, the pcrlock
+# policy -- is read from the real system and never written.
+#
+# Usage:
+#   tests/run [OPTIONS] SCENARIO
+#
+#   -g, --guest ADDR  Guest to run on, repeatable.  Without it the list
+#                     comes from $FDE_TEST_GUESTS or from tests/guests,
+#                     one address per line, "#" comments allowed
+#   -p, --push        Copy the working-tree sdbootutil to the guest and
+#                     use it, instead of the installed one
+#   -k, --keep        Leave the scratch directory on the guest
+#   -l, --list        List the available scenarios and exit
+#
+# A scenario is a shell script in tests/scenarios/ that runs on the
+# guest with $ESP and $SDBOOTUTIL set.  Setting EXPECT=fail in it marks
+# a negative control: the run passes only when the invariants break.
+# Exiting 77 means the scenario does not apply to that guest, which is
+# reported as a skip and not as a failure.
+
+set -euo pipefail
+
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+top="$(dirname "$here")"
+
+# The guests are not in the repository.  They are throwaway VMs whose
+# addresses change with the next libvirt lease, and an address says
+# nothing about the code: committing one only guarantees that whoever
+# reads this later runs against a machine that is not theirs.
+#
+# Unreachable guests are skipped with a note rather than failing the
+# run, they are not always up
+read_guests()
+{
+	local line addr=()
+
+	if [ -n "${FDE_TEST_GUESTS:-}" ]; then
+		read -ra addr <<<"${FDE_TEST_GUESTS//,/ }"
+		printf '%s\n' "${addr[@]}"
+		return 0
+	fi
+
+	[ -f "$here/guests" ] || return 0
+	while read -r line; do
+		line="${line%%#*}"
+		line="${line//[[:space:]]/}"
+		[ -n "$line" ] || continue
+		printf '%s\n' "$line"
+	done < "$here/guests"
+}
+
+ssh_opts=(
+	-o UserKnownHostsFile=/dev/null
+	-o StrictHostKeyChecking=no
+	-o ConnectTimeout=5
+	-o BatchMode=yes
+	-i "$top/id_detc"
+)
+
+guests=()
+push=""
+keep=""
+
+die()
+{
+	echo "$*" >&2
+	exit 1
+}
+
+on()
+{
+	local ip="$1"; shift
+	ssh "${ssh_opts[@]}" "root@$ip" "$@" 2>&1 | grep -v "^Warning: Permanently added" || :
+}
+
+# Like on(), but the exit status is the command's.  on() pipes through
+# grep to drop the host-key notice, which would swallow it
+on_q()
+{
+	local ip="$1"; shift
+	ssh "${ssh_opts[@]}" "root@$ip" "$@" &> /dev/null
+}
+
+reachable()
+{
+	on_q "$1" true
+}
+
+list_scenarios()
+{
+	local f
+	for f in "$here"/scenarios/*; do
+		[ -f "$f" ] || continue
+		printf '  %-24s %s\n' "${f##*/}" \
+			"$(sed -ne '3{s/^# *//;p}' "$f")"
+	done
+}
+
+run_guest()
+{
+	local ip="$1"
+	local scenario="$2"
+
+	echo "===== $ip ====="
+	if ! reachable "$ip"; then
+		echo "unreachable, skipped"
+		return 0
+	fi
+
+	local scratch="/var/tmp/fde-test"
+	local sdbootutil="/usr/bin/sdbootutil"
+
+	# Redirecting the ESP keeps a scenario away from the boot path,
+	# but not away from the TPM2: sdbootutil regenerates the
+	# predictions at the end of every command that touched the ESP,
+	# and that rewrites the real NVIndex.  --disable-predictions is
+	# what holds it back, so a build that does not know the option
+	# must not be driven at all.  The guests do not all run the same
+	# sdbootutil and the rpm version string does not say which
+	if [ -z "$push" ] && grep -q 'SDBOOTUTIL' "$here/scenarios/$scenario"; then
+		if ! on_q "$ip" "grep -q disable-predictions $sdbootutil"; then
+			echo "the installed sdbootutil has no --disable-predictions;"
+			echo "re-run with --push to use the working tree. Skipped."
+			return 0
+		fi
+	fi
+
+	on "$ip" "rm -rf $scratch && mkdir -p $scratch"
+	scp -q "${ssh_opts[@]}" "$here/fde-state" "root@$ip:$scratch/fde-state"
+	scp -q "${ssh_opts[@]}" "$here/scenarios/$scenario" "root@$ip:$scratch/scenario"
+	if [ -n "$push" ]; then
+		scp -q "${ssh_opts[@]}" "$top/sdbootutil" "root@$ip:$scratch/sdbootutil"
+		on "$ip" "chmod +x $scratch/sdbootutil"
+		sdbootutil="$scratch/sdbootutil"
+	fi
+
+	# The scenario runs as its own process, not sourced: it is allowed
+	# to `exit` (77 to opt out of a guest) and that must end the
+	# scenario, not the wrapper that still has to capture and check.
+	# `set -e` is deliberately not used around it either -- a scenario
+	# that fails half way is more informative through the captures
+	# than through an early exit
+	local out
+	out="$(on "$ip" "
+		set -u
+		export ESP=$scratch/esp
+		export SDBOOTUTIL=$sdbootutil
+		# The real ESP has to be resolved before SYSTEMD_ESP_PATH
+		# points bootctl at a copy that does not exist yet
+		cp -a \"\$(bootctl --print-esp-path)\" \$ESP
+		export SYSTEMD_ESP_PATH=\$ESP
+
+		$scratch/fde-state capture > $scratch/before
+
+		echo '--- scenario ---'
+		bash $scratch/scenario; scenario_status=\$?
+		echo \"--- scenario exit \$scenario_status ---\"
+
+		$scratch/fde-state capture > $scratch/after
+		echo '--- check ---'
+		$scratch/fde-state check; check_status=\$?
+		echo '--- diff ---'
+		$scratch/fde-state diff $scratch/before $scratch/after || :
+		echo \"--- check=\$check_status scenario=\$scenario_status ---\"
+	")"
+
+	echo "$out"
+
+	# EXPECT is read from the file rather than reported back, because a
+	# scenario that exits early never gets to say what it wanted
+	local expect=pass check ran
+	if grep -qE '^EXPECT=fail' "$here/scenarios/$scenario"; then
+		expect=fail
+	fi
+	check="$(sed -ne 's/^--- check=\([0-9]*\) .*/\1/p' <<<"$out" | tail -1)"
+	ran="$(sed -ne 's/^--- check=[0-9]* scenario=\([0-9]*\) ---/\1/p' <<<"$out" | tail -1)"
+	[ -n "$check" ] || { echo "RESULT: ERROR (no verdict from the guest)"; return 1; }
+
+	# Not every scenario applies to every guest, and saying so is
+	# not the same as failing.  77 is the autotools convention
+	if [ "${ran:-0}" -eq 77 ]; then
+		echo "RESULT: SKIP (does not apply to this guest)"
+		return 0
+	fi
+
+	# A scenario that died did not exercise anything, so the
+	# invariants still holding says nothing.  Reporting that as a
+	# pass is how a harness quietly stops testing
+	if [ "${ran:-0}" -ne 0 ]; then
+		echo "RESULT: ERROR (the scenario itself failed with status $ran, nothing was exercised)"
+		return 1
+	fi
+
+	if [ "$expect" = "fail" ]; then
+		[ "$check" -ne 0 ] && { echo "RESULT: PASS (negative control broke the invariants, as intended)"; return 0; }
+		echo "RESULT: FAIL (negative control did not break anything, the harness is blind to it)"
+		return 1
+	fi
+	[ "$check" -eq 0 ] && { echo "RESULT: PASS"; return 0; }
+	echo "RESULT: FAIL"
+	return 1
+}
+
+while [ $# -gt 0 ]; do
+	case "$1" in
+		-g|--guest) guests+=("$2"); shift 2 ;;
+		-p|--push)  push=1; shift ;;
+		-k|--keep)  keep=1; shift ;;
+		-l|--list)  list_scenarios; exit 0 ;;
+		-h|--help)  sed -ne '/^# Usage:/,/^$/{s/^#\( \|$\)//;p}' "$0"; exit 0 ;;
+		-*)         die "Unknown option $1" ;;
+		*)          break ;;
+	esac
+done
+
+scenario="${1:-}"
+[ -n "$scenario" ] || { echo "Available scenarios:"; list_scenarios; exit 1; }
+[ -f "$here/scenarios/$scenario" ] || die "No such scenario: $scenario"
+# A scenario that does not parse reaches every guest, runs nothing and
+# reports an error on each of them.  Cheaper to find out here
+bash -n "$here/scenarios/$scenario" || die "Scenario $scenario does not parse"
+if [ "${#guests[@]}" -eq 0 ]; then
+	mapfile -t guests < <(read_guests)
+fi
+[ "${#guests[@]}" -gt 0 ] || die "No guest to run on. Name one with -g, set FDE_TEST_GUESTS, or list them in $here/guests"
+
+rc=0
+for ip in "${guests[@]}"; do
+	run_guest "$ip" "$scenario" || rc=1
+	[ -n "$keep" ] || on "$ip" "rm -rf /var/tmp/fde-test" > /dev/null
+	echo
+done
+exit "$rc"

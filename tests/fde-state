@@ -1,0 +1,837 @@
+#!/bin/bash
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: Copyright 2026 SUSE LLC
+#
+# Capture and check the boot and FDE state of a running system.
+#
+# Two properties decide whether a machine still comes up and still
+# opens its disks.  Neither is visible from a single command, and both
+# break silently -- the report arrives at the firmware prompt, one
+# reboot too late:
+#
+#   I1  ESP consistency.  Every registered entry points at a kernel and
+#       an initrd that are present, no snapshot that must boot has lost
+#       its entry, nothing is left behind in the ESP that no entry
+#       refers to, and the reserve of free space is respected.
+#
+#   I2  Unlock continuity.  Every device that the TPM2 is supposed to
+#       open is still covered by a policy that matches the PCRs as they
+#       are now, and the PCR 15 prediction still describes the devices
+#       that are in `/etc/crypttab`.
+#
+# It deliberately does NOT use sdbootutil.  A harness written in terms
+# of the tool under test cannot detect that tool regressing: whatever
+# the tool believes about the system it would report back unchanged.
+# The state is read from the system itself -- bootctl, cryptsetup,
+# snapper, systemd-pcrlock's on-disk policy, sysfs and /etc/crypttab.
+#
+# It prints no secret: LUKS tokens contribute their structure (type,
+# keyslots, bound PCRs, the public policy digest) and never the sealed
+# blob, so a capture is safe to attach to a bug report.
+#
+# Usage:
+#   fde-state capture           Print the normalized state, one key per line
+#   fde-state check             Verify I1 and I2, exit 1 on any failure
+#   fde-state diff OLD NEW      Compare two captures, ignoring volatile keys
+#
+# A capture is sorted "key=value" text so that plain diff(1) is the
+# report.  Keys under "vol/" hold values that legitimately change on
+# every boot or every write (PCR contents, free space); `diff` drops
+# them, they are captured only to make a report self-contained.
+
+set -euo pipefail
+export LC_ALL=C
+
+esp=""
+boot=""
+have_snapshots=""
+statefile=""
+
+warn()
+{
+	echo "$*" >&2
+}
+
+emit()
+{
+	printf '%s=%s\n' "$1" "${2-}" >> "$statefile"
+}
+
+init()
+{
+	esp="$(bootctl --print-esp-path 2> /dev/null)" || esp=""
+	[ -n "$esp" ] || { warn "No ESP detected"; exit 2; }
+	boot="$(bootctl --print-boot-path 2> /dev/null)" || boot="$esp"
+	[ ! -d /.snapshots ] || ! command -v snapper > /dev/null || have_snapshots=1
+}
+
+# The Boot Loader Interface variables, read straight from sysfs rather
+# than through bootctl, so that a bootloader which reports them wrongly
+# is visible here instead of being normalized away
+efi_var()
+{
+	local f="/sys/firmware/efi/efivars/${1:?}-4a67b082-0a4c-41cf-b6c7-440b29bb8c4f"
+	[ -r "$f" ] || return 0
+	# The first four bytes are the variable attributes, the rest is
+	# UTF-16LE
+	dd "if=$f" bs=2 skip=2 status=none | tr -d '\0'
+}
+
+entries_json()
+{
+	bootctl list --json=short 2> /dev/null || echo '[]'
+}
+
+
+##############################################################################
+# capture
+##############################################################################
+
+capture_esp()
+{
+	emit "esp/path" "$esp"
+	emit "esp/boot" "$boot"
+
+	local f rel sum
+	while IFS= read -r -d '' f; do
+		rel="${f#"$esp"}"
+		# Rewritten by the boot loader on every boot by design
+		[ "$rel" != "/loader/random-seed" ] || continue
+		read -r sum _ < <(sha256sum "$f")
+		emit "esp/file$rel" "$sum"
+	done < <(find "$esp" -type f -print0)
+}
+
+capture_entries()
+{
+	# "isSelected" is not captured here: bootctl builds it by
+	# matching the entry ID against LoaderEntrySelected, and
+	# grub2-bls writes that variable without the ".conf" suffix, so
+	# it is always false there.  It goes under vol/ instead, and
+	# becomes a real key once grub2-bls is fixed
+	entries_json | jq -r '
+		.[] | select(.type == "type1") |
+		"entry/\(.id)/title=\(.showTitle // .title // "")",
+		"entry/\(.id)/version=\(.version // "")",
+		"entry/\(.id)/sort-key=\(.sortKey // "")",
+		"entry/\(.id)/options=\(.options // "")",
+		"entry/\(.id)/linux=\(.linux // "")",
+		"entry/\(.id)/initrd=\((.initrd // []) | join(" "))",
+		"entry/\(.id)/devicetree=\(.devicetree // "")",
+		"entry/\(.id)/default=\(.isDefault // false)"
+	' >> "$statefile"
+}
+
+capture_loader()
+{
+	emit "loader/LoaderEntryDefault" "$(efi_var LoaderEntryDefault)"
+	emit "loader/LoaderConfigTimeout" "$(efi_var LoaderConfigTimeout)"
+	emit "loader/LoaderConfigTimeoutOneShot" "$(efi_var LoaderConfigTimeoutOneShot)"
+
+	# The two on-disk fallbacks.  systemd-boot reads loader.conf,
+	# grub2-bls reads grubenv instead; capturing both is how a move
+	# from one to the other shows up in a diff
+	local key value
+	if [ -r "$esp/loader/loader.conf" ]; then
+		while read -r key value; do
+			[ -n "$key" ] || continue
+			[[ "$key" = \#* ]] && continue
+			emit "loader/loader.conf/$key" "$value"
+		done < "$esp/loader/loader.conf"
+	fi
+
+	local f
+	for f in "$esp"/EFI/*/grubenv; do
+		[ -r "$f" ] || continue
+		while IFS='=' read -r key value; do
+			[ -n "$key" ] || continue
+			[[ "$key" = \#* ]] && continue
+			emit "loader/grubenv/$key" "$value"
+		done < "$f"
+	done
+}
+
+capture_kernels()
+{
+	local d v
+	for d in /usr/lib/modules/*/; do
+		v="${d%/}"
+		v="${v##*/}"
+		# A modules directory without a kernel image is not a
+		# kernel that anything can boot
+		[ -e "$d/vmlinuz" ] || continue
+		emit "kernel/$v" "present"
+	done
+}
+
+capture_snapshots()
+{
+	[ -n "$have_snapshots" ] || return 0
+
+	# --no-dbus so that a capture works while snapperd is busy, and
+	# --disable-used-space because the figure is expensive and
+	# changes on its own
+	snapper --jsonout --no-dbus list --disable-used-space 2> /dev/null | jq -r '
+		.root[] |
+		"snapshot/\(.number)/type=\(.type // "")",
+		"snapshot/\(.number)/default=\(.default // false)",
+		"snapshot/\(.number)/active=\(.active // false)"
+	' >> "$statefile" || warn "snapper list failed, snapshots not captured"
+}
+
+capture_crypttab()
+{
+	[ -e /etc/crypttab ] || return 0
+
+	local name dev key opts
+	while read -r name dev key opts || [ -n "$name" ]; do
+		[ -n "$name" ] || continue
+		[[ "$name" = \#* ]] && continue
+		emit "crypt/$name/device" "$dev"
+		emit "crypt/$name/keyfile" "$key"
+		# Sorted, so that rewriting crypttab with the same
+		# options in another order is not reported as a change
+		emit "crypt/$name/options" \
+			"$(tr ',' '\n' <<<"${opts:-}" | sed '/^$/d' | sort | paste -sd, -)"
+	done < /etc/crypttab
+}
+
+# Every LUKS2 device named by /etc/crypttab, keyed by UUID so that the
+# key survives a device rename
+capture_luks()
+{
+	[ -e /etc/crypttab ] || return 0
+	command -v cryptsetup > /dev/null || return 0
+
+	local name dev uuid
+	while read -r name dev _; do
+		[ -n "$name" ] || continue
+		[[ "$name" = \#* ]] && continue
+
+		if [[ "$dev" = "UUID="* ]]; then
+			uuid="${dev#UUID=}"
+			dev="$(blkid --uuid "$uuid" 2> /dev/null)" || continue
+		else
+			uuid="$(blkid "$dev" -o value -s UUID 2> /dev/null)" || continue
+		fi
+		[ -n "$uuid" ] && [ -b "$dev" ] || continue
+
+		# Structure only.  "tpm2-blob", "tpm2_srk" and
+		# "tpm2_pcrlock_nv" are deliberately left out: they are
+		# sealed material, and this output is meant to be
+		# shareable.  "tpm2-policy-hash" is a public digest and
+		# is precisely what changes when the policy is rewritten
+		cryptsetup luksDump --dump-json-metadata "$dev" 2> /dev/null | jq -r --arg u "$uuid" '
+			"luks/\($u)/keyslots=\(.keyslots | keys | join(" "))",
+			(.tokens // {} | to_entries[] |
+				"luks/\($u)/token/\(.key)/type=\(.value.type)",
+				"luks/\($u)/token/\(.key)/keyslots=\((.value.keyslots // []) | join(" "))",
+				"luks/\($u)/token/\(.key)/pcrs=\((.value["tpm2-pcrs"] // []) | join(","))",
+				"luks/\($u)/token/\(.key)/pcrlock=\(.value.tpm2_pcrlock // false)",
+				"luks/\($u)/token/\(.key)/policy-hash=\(.value["tpm2-policy-hash"] // "")")
+		' >> "$statefile" || warn "luksDump failed for $dev"
+	done < /etc/crypttab
+}
+
+# A pcrlock component is either "X.pcrlock" or a directory
+# "X.pcrlock.d" of variations, and either form can live in any of the
+# five search directories.  What matters for a diff is which PCRs it
+# claims, how many variations it has, and a fingerprint of its digests
+# -- the same three things that decide whether the policy has to be
+# rebuilt
+capture_pcrlock()
+{
+	local d name f sum
+	local -a files
+	for d in /etc/pcrlock.d /run/pcrlock.d /var/lib/pcrlock.d \
+		 /usr/local/lib/pcrlock.d /usr/lib/pcrlock.d; do
+		[ -d "$d" ] || continue
+		for f in "$d"/*.pcrlock "$d"/*.pcrlock.d; do
+			[ -e "$f" ] || continue
+			name="${f##*/}"
+			name="${name%.pcrlock}"
+			name="${name%.pcrlock.d}"
+
+			files=()
+			if [ -d "$f" ]; then
+				for sum in "$f"/*.pcrlock; do
+					[ -s "$sum" ] && files+=("$sum")
+				done
+			elif [ -s "$f" ]; then
+				files=("$f")
+			else
+				# An empty file is a mask, not a
+				# component, and jq cannot read it
+				emit "pcrlock/$name/mask" "$d"
+				continue
+			fi
+			[ "${#files[@]}" -gt 0 ] || continue
+
+			emit "pcrlock/$name/dir" "$d"
+			emit "pcrlock/$name/variations" "${#files[@]}"
+			emit "pcrlock/$name/pcrs" \
+				"$(jq -r '.records[] | .pcr // empty' "${files[@]}" | sort -nu | paste -sd, -)"
+			read -r sum _ < <(jq -r '.records[].digests[].digest' "${files[@]}" | sort | sha256sum)
+			emit "pcrlock/$name/digests" "$sum"
+		done
+	done
+
+	[ -e /var/lib/systemd/pcrlock.json ] || return 0
+	jq -r '
+		"pcrlock/policy/bank=\(.pcrBank // "")",
+		"pcrlock/policy/nvIndex=\(.nvIndex // "")",
+		(.pcrValues[] | "pcrlock/policy/pcr/\(.pcr)/alternatives=\(.values | length)")
+	' < /var/lib/systemd/pcrlock.json >> "$statefile"
+}
+
+capture_pcr15_prediction()
+{
+	local f
+	for f in measure-pcr-prediction measure-pcr-prediction.sha256 measure-pcr-public.pem; do
+		[ -e "/var/lib/sdbootutil/$f" ] || continue
+		read -r sum _ < <(sha256sum "/var/lib/sdbootutil/$f")
+		emit "pcr15/$f" "$sum"
+	done
+}
+
+capture_volatile()
+{
+	local bank i
+	for bank in /sys/class/tpm/tpm0/pcr-sha256 /sys/class/tpm/tpm0/pcr-sha1; do
+		[ -d "$bank" ] || continue
+		for i in 0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
+			[ -r "$bank/$i" ] || continue
+			emit "vol/pcr/${bank##*/}/$i" "$(< "$bank/$i")"
+		done
+	done
+
+	emit "vol/esp/avail-kb" \
+		"$(($(findmnt --noheadings --bytes -o AVAIL --target "$boot" | head -n1) / 1024))"
+	emit "vol/esp/size-kb" \
+		"$(($(findmnt --noheadings --bytes -o SIZE --target "$boot" | head -n1) / 1024))"
+	emit "vol/loader/LoaderEntrySelected" "$(efi_var LoaderEntrySelected)"
+	emit "vol/booted/kernel" "$(uname -r)"
+}
+
+do_capture()
+{
+	init
+	statefile="$(mktemp -t fde-state.XXXXXX)"
+	# shellcheck disable=SC2064
+	trap "rm -f '$statefile'" EXIT
+
+	capture_esp
+	capture_entries
+	capture_loader
+	capture_kernels
+	capture_snapshots
+	capture_crypttab
+	capture_luks
+	capture_pcrlock
+	capture_pcr15_prediction
+	capture_volatile
+
+	sort "$statefile"
+}
+
+
+##############################################################################
+# check
+##############################################################################
+
+failures=0
+checks=0
+
+pass()
+{
+	checks=$((checks + 1))
+	echo "PASS $*"
+}
+
+fail()
+{
+	checks=$((checks + 1))
+	failures=$((failures + 1))
+	echo "FAIL $*"
+}
+
+skip()
+{
+	echo "SKIP $*"
+}
+
+# Reported, but not counted as a failure.  For states that are wrong to
+# ignore and also wrong to gate on, because they resolve by themselves
+warn_check()
+{
+	checks=$((checks + 1))
+	echo "WARN $*"
+}
+
+# I1.1 -- every entry points at files that are there.  An entry whose
+# kernel or initrd is missing is an entry that drops the machine into
+# the firmware
+check_entry_files()
+{
+	local id path missing n=0
+	while IFS=$'\t' read -r id path; do
+		[ -n "$path" ] || continue
+		n=$((n + 1))
+		[ -e "$esp$path" ] || missing+="${missing:+ }$id:$path"
+	done < <(entries_json | jq -r '
+		.[] | select(.type == "type1") |
+		. as $e |
+		([$e.linux] + ($e.initrd // []) + [$e.devicetree // empty])[] |
+		select(. != null and . != "") |
+		"\($e.id)\t\(.)"')
+
+	if [ "$n" -eq 0 ]; then
+		fail "I1.1 no type1 entry references any file"
+	elif [ -n "${missing:-}" ]; then
+		fail "I1.1 entry references a file that is not in the ESP: ${missing}"
+	else
+		pass "I1.1 all $n kernel/initrd references resolve in the ESP"
+	fi
+}
+
+# I1.2 -- nothing is left behind.  Files under an entry token directory
+# that no entry refers to are what a broken refcount looks like: they
+# consume the ESP and `bootctl cleanup` no longer knows about them
+check_no_orphans()
+{
+	local -A referenced=()
+	local -A tokens=()
+	local path
+
+	while read -r path; do
+		[ -n "$path" ] || continue
+		referenced["$path"]=1
+		# The first component of the reference is the entry
+		# token directory, taken from the data instead of
+		# guessed from the configuration
+		path="${path#/}"
+		tokens["${path%%/*}"]=1
+	done < <(entries_json | jq -r '
+		.[] | select(.type == "type1") |
+		([.linux] + (.initrd // []) + [.devicetree // empty])[] |
+		select(. != null and . != "")')
+
+	if [ "${#tokens[@]}" -eq 0 ]; then
+		skip "I1.2 no entry token directory in use"
+		return
+	fi
+
+	local token f rel orphans="" n=0
+	for token in "${!tokens[@]}"; do
+		[ -d "$esp/$token" ] || continue
+		while IFS= read -r -d '' f; do
+			rel="${f#"$esp"}"
+			n=$((n + 1))
+			[ -z "${referenced[$rel]:-}" ] || continue
+			orphans+="${orphans:+ }$rel"
+		done < <(find "$esp/$token" -type f -print0)
+	done
+
+	if [ -n "$orphans" ]; then
+		fail "I1.2 files in the ESP that no entry refers to: $orphans"
+	else
+		pass "I1.2 all $n files under the entry token directories are referenced"
+	fi
+}
+
+# I1.3 -- the snapshots that have to boot still can.  Checked through
+# the rootflags in the options rather than by parsing the entry name,
+# because the name format is exactly the kind of thing a migration
+# changes
+check_snapshot_coverage()
+{
+	if [ -z "$have_snapshots" ]; then
+		skip "I1.3 no snapshots on this system"
+		return
+	fi
+
+	local snapshots
+	snapshots="$(snapper --jsonout --no-dbus list --disable-used-space 2> /dev/null)" || {
+		skip "I1.3 snapper list failed"
+		return
+	}
+
+	local options
+	options="$(entries_json | jq -r '.[] | select(.type == "type1") | .options // ""')"
+
+	local n missing="" checked=0
+	# The default snapshot is what the next boot picks, the active
+	# one is what is running.  Losing either is unrecoverable
+	# without a rescue medium
+	while read -r n; do
+		[ -n "$n" ] || continue
+		checked=$((checked + 1))
+		grep -qF "subvol=@/.snapshots/$n/snapshot" <<<"$options" || \
+			missing+="${missing:+ }$n"
+	done < <(jq -r '.root[] | select(.default == true or .active == true) | .number' <<<"$snapshots")
+
+	if [ "$checked" -eq 0 ]; then
+		skip "I1.3 no default or active snapshot reported"
+	elif [ -n "$missing" ]; then
+		fail "I1.3 no boot entry for snapshot $missing (default or active)"
+	else
+		pass "I1.3 the $checked default/active snapshot(s) have a boot entry"
+	fi
+}
+
+# I1.5 -- one entry per bootable thing.  Two entries for the same kernel
+# in the same subvolume are not harmless redundancy: they mean a naming
+# change was not adopted, so the ESP grows a second parallel set on
+# every update and the menu offers the same system twice.  I1.1 and
+# I1.2 both pass in that state, because each set is internally
+# consistent, which is why this needs its own check
+check_duplicate_entries()
+{
+	local dups
+	dups="$(entries_json | jq -r '
+		.[] | select(.type == "type1") |
+		(((.options // "") | capture("rootflags=subvol=(?<s>[^ ]+)") | .s) // "-") as $subvol |
+		"\(.version // "")@\($subvol)"
+	' | sort | uniq -d)" || dups=""
+
+	if [ -n "$dups" ]; then
+		fail "I1.5 more than one entry for the same kernel and subvolume: $(tr '\n' ' ' <<<"$dups")"
+	else
+		pass "I1.5 no two entries describe the same kernel and subvolume"
+	fi
+}
+
+# I1.6 -- the configured default names an entry that exists.  A dangling
+# default is not fatal on its own (the boot loader falls back to its own
+# ordering) but it means the machine no longer boots what it was told to,
+# which on a transactional system is the snapshot that was just applied
+check_default_resolves()
+{
+	local want=""
+	local -a sources=()
+
+	want="$(efi_var LoaderEntryDefault)"
+	[ -z "$want" ] || sources+=("LoaderEntryDefault")
+	if [ -z "$want" ] && [ -r "$esp/loader/loader.conf" ]; then
+		want="$(awk '$1 == "default" { print $2 }' "$esp/loader/loader.conf" | tail -n1)"
+		[ -z "$want" ] || sources+=("loader.conf")
+	fi
+	local f
+	if [ -z "$want" ]; then
+		for f in "$esp"/EFI/*/grubenv; do
+			[ -r "$f" ] || continue
+			want="$(sed -ne 's/^default=//p' "$f" | tail -n1)"
+			[ -z "$want" ] || sources+=("grubenv")
+		done
+	fi
+
+	if [ -z "$want" ]; then
+		skip "I1.6 no default entry is configured"
+		return
+	fi
+	# A wildcard default is a pattern for the boot loader to resolve,
+	# not a name
+	case "$want" in *[\*\?]*) skip "I1.6 the default is the pattern '$want'"; return ;; esac
+
+	local ids
+	ids="$(entries_json | jq -r '.[] | .id')"
+
+	if grep -qxF "$want" <<<"$ids"; then
+		pass "I1.6 the default entry '$want' exists (${sources[0]})"
+	elif grep -qxF "$want.conf" <<<"$ids"; then
+		# grub2-bls drops the suffix when it writes the variable.
+		# The entry is there and the machine boots it, so this is
+		# a conformance gap and not a broken ESP -- see the note
+		# on isSelected in capture_entries()
+		warn_check "I1.6 the default '$want' is written without the '.conf' suffix (${sources[0]})"
+	else
+		fail "I1.6 the default entry '$want' (${sources[0]}) is not among the installed entries"
+	fi
+}
+
+# I1.7 -- every kernel that is installed can be booted.  This is the
+# silent no-op: add-kernel returns success, writes nothing, and the
+# machine keeps booting the previous kernel with the previous initrd
+# until somebody looks at the menu
+check_kernel_coverage()
+{
+	local subvol=""
+	if [ -n "$have_snapshots" ]; then
+		# findmnt prints the subvolume with a leading slash and the
+		# rootflags in the entry do not, so compare without it
+		subvol="$(findmnt --noheadings -o FSROOT --target / | head -n1)"
+		subvol="${subvol#/}"
+	fi
+
+	local versions
+	# Only entries for the running system are relevant: another
+	# snapshot legitimately carries other kernels
+	if [ -n "$subvol" ]; then
+		versions="$(entries_json | jq -r --arg s "$subvol" '
+			.[] | select(.type == "type1") |
+			select((.options // "") | contains("subvol=" + $s)) |
+			.version // ""')"
+	else
+		versions="$(entries_json | jq -r '.[] | select(.type == "type1") | .version // ""')"
+	fi
+
+	local d v missing="" n=0
+	for d in /usr/lib/modules/*/; do
+		v="${d%/}"
+		v="${v##*/}"
+		[ -e "$d/vmlinuz" ] || continue
+		n=$((n + 1))
+		grep -qF "$v" <<<"$versions" || missing+="${missing:+ }$v"
+	done
+
+	if [ "$n" -eq 0 ]; then
+		skip "I1.7 no bootable kernel under /usr/lib/modules"
+	elif [ -n "$missing" ]; then
+		fail "I1.7 no boot entry for installed kernel: $missing"
+	else
+		pass "I1.7 all $n installed kernel(s) have a boot entry"
+	fi
+}
+
+# I1.4 -- the reserve that install_kernel() relies on to be able to add
+# the next kernel
+check_free_space()
+{
+	local reserve=10 f
+	for f in /etc/sdbootutil.conf /etc/default/sdbootutil /etc/default/fde-tools; do
+		[ -r "$f" ] || continue
+		# shellcheck disable=SC1090
+		reserve="$(. "$f" > /dev/null 2>&1; echo "${ESP_FREE_SPACE:-10}")"
+	done
+
+	local avail size pct
+	avail="$(findmnt --noheadings --bytes -o AVAIL --target "$boot" | head -n1)"
+	size="$(findmnt --noheadings --bytes -o SIZE --target "$boot" | head -n1)"
+	[ "$size" -gt 0 ] || { skip "I1.4 cannot size $boot"; return; }
+	pct=$((avail * 100 / size))
+
+	if [ "$pct" -lt "$reserve" ]; then
+		fail "I1.4 only ${pct}% free in $boot, below the ${reserve}% reserve"
+	else
+		pass "I1.4 ${pct}% free in $boot, reserve is ${reserve}%"
+	fi
+}
+
+# The devices that the TPM2 is expected to open, as UUIDs
+tpm2_devices()
+{
+	[ -e /etc/crypttab ] || return 0
+	local name dev opts uuid
+	while read -r name dev _ opts || [ -n "$name" ]; do
+		[ -n "$name" ] || continue
+		[[ "$name" = \#* ]] && continue
+		[[ "${opts:-}" != *"tpm2-device="* ]] && continue
+		[[ "${opts:-}" == *"x-sdbootutil.ignore"* ]] && continue
+		if [[ "$dev" = "UUID="* ]]; then
+			uuid="${dev#UUID=}"
+		else
+			uuid="$(blkid "$dev" -o value -s UUID 2> /dev/null)" || continue
+		fi
+		[ -z "$uuid" ] || echo "$uuid"
+	done < /etc/crypttab
+}
+
+# I2.1 -- a device that crypttab says the TPM2 opens really does carry a
+# TPM2 token, and where that token defers to pcrlock there is a policy
+# for it to defer to
+check_tpm2_tokens()
+{
+	local -a devices
+	mapfile -t devices < <(tpm2_devices)
+	if [ "${#devices[@]}" -eq 0 ]; then
+		skip "I2.1 no device in /etc/crypttab is unlocked by the TPM2"
+		return
+	fi
+
+	local uuid dev tokens missing="" needs_policy=""
+	for uuid in "${devices[@]}"; do
+		dev="$(blkid --uuid "$uuid" 2> /dev/null)" || dev=""
+		[ -n "$dev" ] || { missing+="${missing:+ }$uuid(absent)"; continue; }
+		tokens="$(cryptsetup luksDump --dump-json-metadata "$dev" 2> /dev/null |
+			jq -r '.tokens // {} | to_entries[] | select(.value.type == "systemd-tpm2") |
+			       "\(.value.tpm2_pcrlock // false)"')" || tokens=""
+		if [ -z "$tokens" ]; then
+			missing+="${missing:+ }$uuid"
+		elif grep -qx true <<<"$tokens"; then
+			needs_policy=1
+		fi
+	done
+
+	if [ -n "$missing" ]; then
+		fail "I2.1 crypttab expects a TPM2 unlock but there is no systemd-tpm2 token on: $missing"
+	elif [ -n "$needs_policy" ] && [ ! -e /var/lib/systemd/pcrlock.json ]; then
+		fail "I2.1 a token defers to pcrlock but /var/lib/systemd/pcrlock.json is missing"
+	else
+		pass "I2.1 all ${#devices[@]} TPM2 device(s) carry a systemd-tpm2 token"
+	fi
+}
+
+# I2.2 -- the policy still matches reality.  This is the same question
+# the TPM2 asks when make-policy has to re-authorize the NVIndex, and
+# getting "no" here is the state that issue 250 could not recover from
+check_policy_fresh()
+{
+	if [ ! -e /var/lib/systemd/pcrlock.json ]; then
+		skip "I2.2 no pcrlock policy"
+		return
+	fi
+
+	local bank
+	bank="$(jq -r '.pcrBank // "sha256"' < /var/lib/systemd/pcrlock.json)"
+
+	local i current stale="" checked=0
+	while read -r i; do
+		[ -r "/sys/class/tpm/tpm0/pcr-$bank/$i" ] || continue
+		checked=$((checked + 1))
+		# sysfs prints upper case, the policy stores lower case
+		current="$(tr 'A-Z' 'a-z' < "/sys/class/tpm/tpm0/pcr-$bank/$i")"
+		jq -e --arg c "$current" --argjson p "$i" \
+			'.pcrValues[] | select(.pcr == $p) | .values | index($c)' \
+			< /var/lib/systemd/pcrlock.json > /dev/null || \
+			stale+="${stale:+,}$i"
+	done < <(jq -r '.pcrValues[].pcr' < /var/lib/systemd/pcrlock.json)
+
+	if [ "$checked" -eq 0 ]; then
+		skip "I2.2 the kernel exports no PCR in bank $bank"
+	elif [ -n "$stale" ]; then
+		fail "I2.2 PCR $stale no longer match any alternative in the policy"
+	else
+		pass "I2.2 all $checked bound PCR(s) match the policy"
+	fi
+}
+
+# I2.3 -- the requested PCRs are actually bound.  A policy that silently
+# dropped a PCR still unlocks, so this has to be reported rather than
+# noticed by accident.
+#
+# It warns instead of failing, and that is deliberate.  Dropping a PCR
+# that cannot be predicted right now is designed behaviour: the
+# statement is about the current event log, and the boot service adds
+# the PCR back on the next boot.  Gating on it would make the harness
+# red on a system that is behaving correctly.  The regression that does
+# matter -- a PCR that was bound before and is not bound now -- is a
+# removed "pcrlock/policy/pcr/N/..." line, and `diff` catches it
+check_policy_binds()
+{
+	if [ ! -e /var/lib/systemd/pcrlock.json ]; then
+		skip "I2.3 no pcrlock policy"
+		return
+	fi
+
+	local requested="" f
+	for f in /etc/sdbootutil.conf /etc/default/sdbootutil /etc/default/fde-tools; do
+		[ -r "$f" ] || continue
+		# shellcheck disable=SC1090
+		requested="$(. "$f" > /dev/null 2>&1; echo "${FDE_SEAL_PCR_LIST:-}")"
+	done
+	if [ -z "$requested" ]; then
+		skip "I2.3 no FDE_SEAL_PCR_LIST configured"
+		return
+	fi
+
+	local -A bound=()
+	local i
+	while read -r i; do bound[$i]=1; done \
+		< <(jq -r '.pcrValues[].pcr' < /var/lib/systemd/pcrlock.json)
+
+	local unbound=""
+	for i in ${requested//,/ }; do
+		[ -z "${bound[$i]:-}" ] || continue
+		unbound+="${unbound:+,}$i"
+	done
+
+	if [ -n "$unbound" ]; then
+		warn_check "I2.3 requested PCR $unbound is not bound by the policy (requested $requested)"
+	else
+		pass "I2.3 the policy binds every requested PCR ($requested)"
+	fi
+}
+
+# I2.4 -- the PCR 15 prediction still describes the current crypttab and
+# is signed by the key the initrd validator carries.  Mechanism-specific
+# on purpose: if PCR 15 moves to a systemd primitive this check is
+# replaced rather than kept
+check_pcr15_prediction()
+{
+	if [ ! -e /etc/crypttab ] || ! grep -q "tpm2-measure-pcr=yes" /etc/crypttab; then
+		skip "I2.4 no device measures PCR 15"
+		return
+	fi
+
+	local dir=/var/lib/sdbootutil
+	if [ ! -e "$dir/measure-pcr-prediction" ]; then
+		fail "I2.4 crypttab measures PCR 15 but there is no prediction; the next boot halts"
+		return
+	fi
+	if [ ! -e "$dir/measure-pcr-prediction.sha256" ]; then
+		fail "I2.4 the PCR 15 prediction has no signature; the next boot halts"
+		return
+	fi
+	if ! openssl dgst -sha256 -verify "$dir/measure-pcr-public.pem" \
+		-signature "$dir/measure-pcr-prediction.sha256" \
+		"$dir/measure-pcr-prediction" &> /dev/null; then
+		fail "I2.4 the PCR 15 prediction is not signed by measure-pcr-public.pem"
+		return
+	fi
+
+	local current
+	read -r current _ < <(sha1sum /etc/crypttab)
+	if ! grep -Fixq "$current" "$dir/crypttab.sha1" 2> /dev/null; then
+		fail "I2.4 the PCR 15 prediction was made for a different /etc/crypttab"
+		return
+	fi
+
+	pass "I2.4 the PCR 15 prediction is signed and matches the current crypttab"
+}
+
+do_check()
+{
+	init
+
+	check_entry_files
+	check_no_orphans
+	check_snapshot_coverage
+	check_duplicate_entries
+	check_default_resolves
+	check_kernel_coverage
+	check_free_space
+	check_tpm2_tokens
+	check_policy_fresh
+	check_policy_binds
+	check_pcr15_prediction
+
+	echo
+	echo "$checks checks, $failures failed"
+	[ "$failures" -eq 0 ]
+}
+
+
+##############################################################################
+# diff
+##############################################################################
+
+do_diff()
+{
+	local old="${1:?usage: fde-state diff OLD NEW}"
+	local new="${2:?usage: fde-state diff OLD NEW}"
+
+	diff -u \
+		--label "$old" --label "$new" \
+		<(grep -v '^vol/' "$old") \
+		<(grep -v '^vol/' "$new")
+}
+
+
+case "${1:-}" in
+	capture) do_capture ;;
+	check)   do_check ;;
+	diff)    shift; do_diff "$@" ;;
+	*)
+		sed -ne '/^# Usage:/,/^$/{s/^#\( \|$\)//;p}' "$0"
+		exit 1 ;;
+esac

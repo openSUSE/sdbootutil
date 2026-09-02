@@ -1,0 +1,16 @@
+#!/bin/bash
+# scenario: orphan-initrd
+# Negative control: break an entry and confirm the harness notices
+#
+# Deletes one initrd that a boot entry references.  On a real ESP this
+# is a machine that stops at the firmware, so I1.1 has to fail.  A
+# harness that passes here is not testing anything
+# Read from this file by tests/run, not by the scenario itself: a
+# scenario that exits early never gets to report anything
+# shellcheck disable=SC2034
+EXPECT=fail
+
+initrd="$(bootctl list --json=short | jq -r 'first(.[] | select(.type=="type1") | .initrd[0] // empty)')"
+[ -n "$initrd" ] || { echo "no entry with an initrd, cannot run the control"; exit 77; }
+echo "removing $initrd"
+rm -f "$ESP$initrd"
