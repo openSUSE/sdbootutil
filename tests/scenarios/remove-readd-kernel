@@ -20,11 +20,31 @@ for d in /usr/lib/modules/*/; do
 done
 [ -n "$version" ] || { echo "no bootable kernel found"; exit 77; }
 
+entries_for()
+{
+	bootctl list --json=short |
+		jq -r --arg v "$1" '.[] | select(.type=="type1") |
+			select((.version // "") | endswith($v)) | .path'
+}
+
+before="$(entries_for "$version" | wc -l)"
+[ "$before" -gt 0 ] || { echo "kernel $version has no boot entry"; exit 77; }
+
 echo "removing kernel $version"
 "$SDBOOTUTIL" --esp-path "$ESP" --no-variables --disable-predictions -v remove-kernel "$version"
 
 echo "entries after removal:"
 ls -1 "$ESP"/loader/entries/
+
+# A removal that did nothing leaves a perfectly consistent ESP, so the
+# invariants cannot tell it from a removal that worked and the scenario
+# has to say so itself.  `bootctl unlink` makes that easy to hit: given
+# a name it does not recognise it removes nothing and still exits 0
+after="$(entries_for "$version" | wc -l)"
+[ "$after" -lt "$before" ] || {
+	echo "FAIL: remove-kernel left all $before entries for $version in place"
+	exit 1
+}
 
 echo "adding it back"
 "$SDBOOTUTIL" --esp-path "$ESP" --no-variables --disable-predictions -v add-kernel "$version"

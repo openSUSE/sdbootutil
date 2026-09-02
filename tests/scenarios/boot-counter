@@ -1,0 +1,80 @@
+#!/bin/bash
+# scenario: boot-counter
+# An entry with a boot counter is still the same entry
+#
+# `bootctl` files "$entry+3.conf" under the id "$entry.conf": the counter
+# is state the boot loader owns, not part of the name.  Code that takes
+# the file name for the id gets this wrong in both directions, and
+# neither direction announces itself -- `bootctl unlink` given a name it
+# does not recognise removes nothing and still exits 0, and a rewrite
+# under the uncounted name leaves the counted file behind as a duplicate.
+#
+# The counter also has to survive the entry being found and rewritten.
+# It counts the boots of the initrd the entry points at, so resetting it
+# while that initrd stays the same hands out a fresh set of attempts to
+# something that already spent them.
+#
+# Scoped to the running subvolume, like stale-prefix and for the same
+# reason: add-all-kernels installs the kernels of one snapshot and the
+# entries of another are not its to touch
+version="$(uname -r)"
+subvol="$(findmnt --noheadings -o FSROOT --target / | head -n1)"
+subvol="${subvol#/}"
+
+mine()
+{
+	if [ -z "$subvol" ] || [ "$subvol" = "/" ]; then
+		bootctl list --json=short | jq -r --arg v "$version" \
+			'.[] | select(.type=="type1") |
+			 select((.version // "") | endswith($v)) | .path'
+	else
+		bootctl list --json=short | jq -r --arg v "$version" --arg s "$subvol" \
+			'.[] | select(.type=="type1") |
+			 select((.version // "") | endswith($v)) |
+			 select((.options // "") | contains("subvol=" + $s)) | .path'
+	fi
+}
+
+mapfile -t paths < <(mine)
+[ "${#paths[@]}" -eq 1 ] || {
+	echo "expected one entry for the running kernel $version, found ${#paths[@]}"
+	exit 77
+}
+
+conf="${paths[0]}"
+case "${conf##*/}" in
+	*+*) echo "entry already carries a counter: ${conf##*/}"; exit 77 ;;
+esac
+
+counted="${conf%.conf}+3.conf"
+mv "$conf" "$counted"
+echo "gave ${conf##*/} a boot counter: ${counted##*/}"
+
+"$SDBOOTUTIL" --esp-path "$ESP" --no-variables --disable-predictions -v add-all-kernels
+
+echo "entries now:"
+ls -1 "$ESP"/loader/entries/
+
+# I1.5 catches a second entry appearing beside the counted one, but not a
+# counter that was quietly dropped: a single "$entry.conf" is a perfectly
+# consistent ESP
+mapfile -t after < <(mine)
+[ "${#after[@]}" -eq 1 ] || {
+	echo "FAIL: $version has ${#after[@]} entries after add-all-kernels"
+	exit 1
+}
+case "${after[0]##*/}" in
+	*+3*) echo "counter kept: ${after[0]##*/}" ;;
+	*)    echo "FAIL: the boot counter was dropped: ${after[0]##*/}"; exit 1 ;;
+esac
+
+echo "removing kernel $version"
+"$SDBOOTUTIL" --esp-path "$ESP" --no-variables --disable-predictions -v remove-kernel "$version"
+
+[ ! -f "${after[0]}" ] || {
+	echo "FAIL: remove-kernel left the counted entry ${after[0]##*/} in place"
+	exit 1
+}
+
+echo "putting it back"
+"$SDBOOTUTIL" --esp-path "$ESP" --no-variables --disable-predictions -v add-kernel "$version"
