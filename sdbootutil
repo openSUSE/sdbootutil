@@ -1066,6 +1066,55 @@ entry_files()
 	done < <(entry_fields "$conf")
 }
 
+# The files that the entry names and that are not in the ESP.  Nothing
+# reports those: `bootctl list` prints such an entry like any other and
+# the boot loader offers it in the menu, so the first sign of it is a
+# firmware error message on the one boot that needed it
+entry_missing_files()
+{
+	local conf="${1:?}"
+	local path
+
+	[ -f "$conf" ] || return 0
+
+	while read -r path; do
+		[ -e "${boot_root}${path}" ] || printf '%s\n' "$path"
+	done < <(entry_files "$conf")
+}
+
+# Reads a `bootctl list --json` array and prints one line per entry that
+# does not boot, as "id|path|snapshot|version|missing".
+#
+# Not tab separated: a system without snapshots leaves the snapshot
+# field empty, and `read` with a tab in IFS collapses the empty field
+# because tab counts as IFS whitespace.  "|" is not a character any of
+# these can contain, FAT does not accept it in a name
+#
+# Deliberately not restricted to the current snapshot.  An entry of any
+# other snapshot is in the same menu and boots with the same key press,
+# and nothing else in this script ever looks at one: "add-all-kernels"
+# and "install_kernel" are given a single snapshot and repair only that
+dangling_entries()
+{
+	local id path snapshot kernel_version missing
+
+	while read -r id; do
+		read -r path
+		read -r snapshot
+		read -r kernel_version
+		[ "$snapshot" != "null" ] || snapshot=""
+		missing="$(entry_missing_files "$path" | tr '\n' ' ')"
+		[ -n "$missing" ] || continue
+		printf '%s|%s|%s|%s|%s\n' \
+		       "$id" "$path" "$snapshot" "$kernel_version" "${missing% }"
+	done < <(jq -r '.[]
+		       | select(.type? == "type1")
+		       | select(.path != null)
+		       | .id, .path,
+			 ((.version // "") | capture("((?<snapshot>[0-9]*)@)?(?<kernel>.*)")) as $v
+		       | $v.snapshot, $v.kernel')
+}
+
 # An entry is usable only if it points to this kernel and every file
 # that it names is in the ESP
 entry_is_complete()
@@ -6085,6 +6134,19 @@ status_policy_backend=
 status_policy_stale=
 status_tpm2_device=
 status_pin_reachable=
+status_dangling=
+
+# Whether "$status_dangling" holds this entry.  The names in it carry
+# the ".conf" that the boot loader interface variables leave out, so
+# both spellings are tried (same workaround as in "status_boot")
+status_is_dangling()
+{
+	local id="$1"
+
+	[ -n "$id" ] || return 1
+	[ -n "$status_dangling" ] || return 1
+	cut -d'|' -f1 <<<"$status_dangling" | grep -qxF -e "$id" -e "$id.conf"
+}
 
 status_crypttab_field()
 {
@@ -6746,8 +6808,19 @@ status_boot()
 		[ -z "$booted" ] || guess=" (from the running kernel, the boot loader reported nothing)"
 	fi
 
+	# Which entries name a file that the ESP does not have.  Reported
+	# against the two entries that this section names, because saying
+	# "Next boot: X" about an entry that stops at the firmware is the
+	# one place where the report is not merely incomplete but wrong
+	status_dangling="$(dangling_entries <<<"$entries")"
+
 	if [ -n "$booted" ]; then
-		status_row "Booted entry" "$booted$guess"
+		local note=""
+		# Only worth saying about a guess: what actually booted
+		# obviously had its files at the time, and the entry may
+		# have been rewritten since
+		! status_is_dangling "$booted" || note=" -- and no longer boots"
+		status_row "Booted entry" "$booted$guess$note"
 	else
 		status_row "Booted entry" "unknown, the boot loader reported none"
 	fi
@@ -6759,10 +6832,13 @@ status_boot()
 	oneshot="$(bli_efi_var_get "LoaderEntryOneShot" 2> /dev/null)" || oneshot=""
 	default="$(get_default_entry 2> /dev/null)" || default=""
 
+	local next="${oneshot:-$default}"
+	local broken=""
+	! status_is_dangling "$next" || broken=" -- DOES NOT BOOT, it names a file that is not in the ESP"
 	if [ -n "$oneshot" ]; then
-		status_row "Next boot" "$oneshot (one shot, and then ${default:-the default})"
+		status_row "Next boot" "$oneshot (one shot, and then ${default:-the default})$broken"
 	else
-		status_row "Next boot" "${default:-unknown, no default is set}"
+		status_row "Next boot" "${default:-unknown, no default is set}$broken"
 	fi
 
 	[ -z "$arg_full" ] || {
@@ -6770,7 +6846,16 @@ status_boot()
 		# boot loader adds by itself ("Reboot Into Firmware
 		# Interface" and the like), and counting those answers a
 		# question nobody asked
-		status_row "Entries" "$(jq -r '[.[] | select(.type? == "type1")] | length' <<<"$entries")"
+		local count=0 dangling=0
+		count="$(jq -r '[.[] | select(.type? == "type1")] | length' <<<"$entries")"
+		[ -z "$status_dangling" ] || dangling="$(grep -c . <<<"$status_dangling")"
+		if [ "$dangling" -eq 0 ]; then
+			status_row "Entries" "$count"
+		elif [ "$dangling" -eq 1 ]; then
+			status_row "Entries" "$count, of which 1 does not boot"
+		else
+			status_row "Entries" "$count, of which $dangling do not boot"
+		fi
 		local timeout=""
 		timeout="$(get_timeout 2> /dev/null)" || timeout=""
 		status_row "Menu timeout" "${timeout:-not set}"
@@ -6829,6 +6914,20 @@ fde_status()
 	status_recovery_pin
 	echo
 	status_service sdbootutil-update-predictions.service
+
+	# An entry that names a file the ESP does not have is invisible
+	# from everywhere else: `bootctl list` prints it, the boot loader
+	# offers it, and the failure is a firmware message on the one boot
+	# that picked it.  Worth the lines it takes to name them, because
+	# the reader cannot ask any other question that would show this
+	[ -z "$status_dangling" ] || {
+		echo
+		warn "Boot entries that name a file that is not in the ESP, and do not boot:"
+		local id path snapshot kernel_version missing
+		while IFS='|' read -r id path snapshot kernel_version missing; do
+			warn "  $id (${snapshot:+snapshot $snapshot, }$kernel_version) is missing $missing"
+		done <<<"$status_dangling"
+	}
 
 	# A policy with no device behind it is not an error, but it is
 	# never what the reader assumes when they see "Backend: pcrlock".
