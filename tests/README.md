@@ -48,24 +48,18 @@ The scenarios, roughly in order of how much of the tool they touch:
 | `missing-initrd` | a deleted initrd is regenerated and the entry made whole |
 | `remove-readd-kernel` | reference counting frees exactly what it should, and the round trip returns |
 | `update-all-entries` | editing an entry in place is not a silent no-op, and is deterministic |
+| `boot-counter` | a `+N` counter is kept, and does not hide the entry from removal |
 
 ### What it reports today
 
-Everything passes except on a guest without snapshots, which fails
-`I1.5` on the three scenarios that create an entry —
-`add-all-kernels`, `missing-initrd` and `remove-readd-kernel`:
+Everything passes, on transactional and non-transactional guests, with
+systemd-boot and with grub2-bls, with and without snapshots. Two
+warnings are expected and do not fail a run; both are explained under
+*Notes on the guests*.
 
-```
-FAIL I1.5 more than one entry for the same kernel and subvolume: 7.0.12-1-default@- 7.1.2-1-default@-
-```
-
-`entry_conf_file()` adds the grub2 ordering prefix there too, because
-`subvol_is_ro()` returns false when there are no snapshots to ask
-about, so every kernel ends up with a prefixed entry next to the
-unprefixed one `kernel-install` wrote.
-This is a real defect and the harness is doing its job by failing;
-`update-all-entries` passes on the same guest because it only edits
-entries and never creates one.
+`missing-initrd` skips where the running subvolume's entry already
+shares its initrd with another entry, since deleting it would damage
+more than the one entry under test.
 
 `fde-state` can also be used on its own, on any machine:
 

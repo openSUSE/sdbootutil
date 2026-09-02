@@ -972,10 +972,17 @@ entry_conf_file()
 	# for entries that are not RO, making it newer that any other
 	# entry name that start with the "snapper" prefix: ("system" >
 	# "snapper").
+	#
+	# Without snapshots there is a single entry per kernel version
+	# and nothing to order it against, so the prefix has no work to
+	# do.  Adding it anyway invents a second name for the entry that
+	# kernel-install and earlier versions of this script write
+	# unprefixed, and both then sit in the ESP describing the same
+	# system
 	local prefix=""
 	local subvol=""
-	[ -z "$have_snapshots" ] || subvol="${subvol_prefix}/.snapshots/${snapshot}/snapshot"
-	if ! is_transactional && is_grub2_bls; then
+	if [ -n "$have_snapshots" ] && ! is_transactional && is_grub2_bls; then
+		subvol="${subvol_prefix}/.snapshots/${snapshot}/snapshot"
 		if ! subvol_is_ro "$subvol"; then
 			prefix="system"
 		else
