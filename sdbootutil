@@ -4329,10 +4329,10 @@ policy_stale_pcrs()
 # "Failed to submit super PCR policy"
 explain_pcrlock_policy_error()
 {
-	local errors="$1"
+	local errorfile="$1"
 	local pin="$2"
 
-	grep -qE "None of the alternative values|PCR values kept changing|Failed to submit super PCR policy|Failed to unseal PIN" "$errors" || return 0
+	grep -qE "None of the alternative values|PCR values kept changing|Failed to submit super PCR policy|Failed to unseal PIN" "$errorfile" || return 0
 
 	# A recovery PIN was used, so the PCRs were not part of the
 	# authorization and this is a different problem.  Saying anything
