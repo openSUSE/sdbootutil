@@ -1,0 +1,4 @@
+#!/bin/bash
+# scenario: noop
+# Do nothing, to prove the capture is stable and the guest is healthy
+:

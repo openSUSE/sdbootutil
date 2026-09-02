@@ -1,0 +1,19 @@
+#!/bin/bash
+# scenario: update-all-entries
+# Rewrite the kernel command line of every entry
+#
+# This is the path that finds an existing entry and edits it in place,
+# rather than writing a new one, so it fails by doing nothing at all:
+# the entry keeps whatever options it was created with.  A stale
+# command line boots -- with the wrong root, the wrong rootflags or a
+# missing plymouth -- which is why nothing notices until a machine does
+# not come up.
+#
+# Run twice: the second pass must change nothing, and a non-empty diff
+# between the two would mean the options are not derived deterministically
+"$SDBOOTUTIL" --esp-path "$ESP" --no-variables --disable-predictions -v update-all-entries
+cp -a "$ESP"/loader/entries "$ESP/../entries.first"
+
+"$SDBOOTUTIL" --esp-path "$ESP" --no-variables --disable-predictions -v update-all-entries
+diff -ru "$ESP/../entries.first" "$ESP"/loader/entries && echo "second pass changed nothing"
+rm -rf "$ESP/../entries.first"

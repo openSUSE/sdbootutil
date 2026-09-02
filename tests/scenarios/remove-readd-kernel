@@ -1,0 +1,30 @@
+#!/bin/bash
+# scenario: remove-readd-kernel
+# Take one kernel out of the ESP and put it back
+#
+# Removal is the half that reference counting gets wrong: `bootctl
+# unlink` frees the kernel and the initrd only when the last entry that
+# names them is gone, so a removal that leaves the entry behind, or one
+# that frees a file another snapshot still points at, both show up as
+# broken references afterwards.  Adding it back has to reach the same
+# state as before, which is what the diff is for
+version=""
+for d in /usr/lib/modules/*/; do
+	v="${d%/}"; v="${v##*/}"
+	[ -e "$d/vmlinuz" ] || continue
+	# Prefer a kernel that is not the running one, so that the
+	# removal is not also the last entry standing
+	[ "$v" = "$(uname -r)" ] && { version="${version:-$v}"; continue; }
+	version="$v"
+	break
+done
+[ -n "$version" ] || { echo "no bootable kernel found"; exit 77; }
+
+echo "removing kernel $version"
+"$SDBOOTUTIL" --esp-path "$ESP" --no-variables --disable-predictions -v remove-kernel "$version"
+
+echo "entries after removal:"
+ls -1 "$ESP"/loader/entries/
+
+echo "adding it back"
+"$SDBOOTUTIL" --esp-path "$ESP" --no-variables --disable-predictions -v add-kernel "$version"

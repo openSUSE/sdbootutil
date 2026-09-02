@@ -1,0 +1,10 @@
+#!/bin/bash
+# scenario: add-all-kernels
+# Re-add every kernel of the current snapshot, then clean up
+#
+# The ordinary path that kernel-install drives.  Run twice on purpose:
+# the second call must be a no-op, because an install that is not
+# idempotent leaves duplicate kernels in the ESP on every update
+"$SDBOOTUTIL" --esp-path "$ESP" --no-variables --disable-predictions -v add-all-kernels
+"$SDBOOTUTIL" --esp-path "$ESP" --no-variables --disable-predictions -v add-all-kernels
+"$SDBOOTUTIL" --esp-path "$ESP" --no-variables --disable-predictions -v cleanup
