@@ -28,11 +28,22 @@ $ tests/run --list                      # available scenarios
 $ tests/run noop                        # baseline every reachable guest
 $ tests/run --push add-all-kernels      # drive the working tree, not the installed rpm
 $ tests/run -g <address> orphan-initrd
+$ tests/run --push $(tests/run --list | awk '{print $1}')   # everything
 ```
 
+The guests are separate machines that share nothing, so they run at the
+same time; each one's output is collected and printed whole, in the
+order the guests were named, so a parallel run reads exactly like a
+serial one. Naming several scenarios runs them one after another on each
+guest and pays for the connection and the copies once — a full sweep of
+eight scenarios over six guests takes about three and a half minutes,
+almost all of it dracut.
+
 Scenarios run against a `cp -a` copy of the ESP, handed to bootctl and
-sdbootutil through `SYSTEMD_ESP_PATH` and `--esp-path`. Nothing a
-scenario does can stop a guest from booting. State outside the ESP —
+sdbootutil through `SYSTEMD_ESP_PATH` and `--esp-path`. The copy is made
+again before every scenario, so one cannot inherit what the one before
+it did. Nothing a scenario does can stop a guest from booting. State
+outside the ESP —
 crypttab, the LUKS headers, the pcrlock policy — is read from the real
 system and never written; `--disable-predictions` keeps sdbootutil off
 the TPM2 NVIndex and `--no-variables` keeps it out of the EFI variables,

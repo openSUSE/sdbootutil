@@ -2,8 +2,8 @@
 # SPDX-License-Identifier: MIT
 # SPDX-FileCopyrightText: Copyright 2026 SUSE LLC
 #
-# Run a scenario against one or more debug guests and report what it did
-# to the boot and FDE state.
+# Run scenarios against one or more debug guests and report what they
+# did to the boot and FDE state.
 #
 # Every scenario runs against a *copy* of the ESP, made with `cp -a` and
 # handed to bootctl and sdbootutil through SYSTEMD_ESP_PATH and
@@ -13,7 +13,7 @@
 # policy -- is read from the real system and never written.
 #
 # Usage:
-#   tests/run [OPTIONS] SCENARIO
+#   tests/run [OPTIONS] SCENARIO...
 #
 #   -g, --guest ADDR  Guest to run on, repeatable.  Without it the list
 #                     comes from $FDE_TEST_GUESTS or from tests/guests,
@@ -28,6 +28,13 @@
 # a negative control: the run passes only when the invariants break.
 # Exiting 77 means the scenario does not apply to that guest, which is
 # reported as a skip and not as a failure.
+#
+# The guests are separate machines that share nothing, so they run at
+# the same time.  Each one's output is collected and printed whole, in
+# the order the guests were named, so a parallel run reads exactly like
+# a serial one.  Naming several scenarios runs them one after another on
+# each guest, against a fresh copy of the ESP each time, and pays for
+# the connection and the copies once.
 
 set -euo pipefail
 
@@ -60,11 +67,25 @@ read_guests()
 	done < "$here/guests"
 }
 
+# Somewhere to keep the ssh control sockets and the output of each
+# guest, gone when the run is
+workdir="$(mktemp -d)"
+trap 'rm -rf "$workdir"' EXIT
+
+# Opening a connection to a guest costs about 1.6 s, and a guest is
+# talked to a dozen times: the probe, the copies, every scenario, the
+# cleanup.  Sharing one connection between all of them brings that down
+# to about 0.15 s each, which is the difference between a sweep that is
+# mostly handshakes and one that is mostly dracut.  Every command below
+# goes through here, scp included, so they all join the same master
 ssh_opts=(
 	-o UserKnownHostsFile=/dev/null
 	-o StrictHostKeyChecking=no
 	-o ConnectTimeout=5
 	-o BatchMode=yes
+	-o ControlMaster=auto
+	-o "ControlPath=$workdir/%h"
+	-o ControlPersist=60
 	-i "$top/id_detc"
 )
 
@@ -107,19 +128,43 @@ list_scenarios()
 	done
 }
 
-run_guest()
+# Everything a guest needs for the whole run, done once: the scratch
+# directory, fde-state, every scenario and, with --push, the sdbootutil
+# under test.  Prints the path of the sdbootutil the scenarios are to
+# use, or nothing if the guest cannot be driven
+prepare_guest()
+{
+	local ip="$1"; shift
+	local scenario
+	local scratch="/var/tmp/fde-test"
+	local files=("$here/fde-state")
+	local scripts=()
+
+	for scenario in "$@"; do
+		scripts+=("$here/scenarios/$scenario")
+	done
+	[ -z "$push" ] || files+=("$top/sdbootutil")
+
+	# The scenarios keep their own names, and go in a directory of
+	# their own so that one of them cannot ever be called "before"
+	# and land on a capture
+	on "$ip" "rm -rf $scratch && mkdir -p $scratch/scenarios" >&2
+	scp -q "${ssh_opts[@]}" "${files[@]}" "root@$ip:$scratch/" >&2
+	scp -q "${ssh_opts[@]}" "${scripts[@]}" "root@$ip:$scratch/scenarios/" >&2
+	if [ -n "$push" ]; then
+		on "$ip" "chmod +x $scratch/sdbootutil" >&2
+		echo "$scratch/sdbootutil"
+	else
+		echo "/usr/bin/sdbootutil"
+	fi
+}
+
+run_scenario()
 {
 	local ip="$1"
 	local scenario="$2"
-
-	echo "===== $ip ====="
-	if ! reachable "$ip"; then
-		echo "unreachable, skipped"
-		return 0
-	fi
-
+	local sdbootutil="$3"
 	local scratch="/var/tmp/fde-test"
-	local sdbootutil="/usr/bin/sdbootutil"
 
 	# Redirecting the ESP keeps a scenario away from the boot path,
 	# but not away from the TPM2: sdbootutil regenerates the
@@ -136,15 +181,6 @@ run_guest()
 		fi
 	fi
 
-	on "$ip" "rm -rf $scratch && mkdir -p $scratch"
-	scp -q "${ssh_opts[@]}" "$here/fde-state" "root@$ip:$scratch/fde-state"
-	scp -q "${ssh_opts[@]}" "$here/scenarios/$scenario" "root@$ip:$scratch/scenario"
-	if [ -n "$push" ]; then
-		scp -q "${ssh_opts[@]}" "$top/sdbootutil" "root@$ip:$scratch/sdbootutil"
-		on "$ip" "chmod +x $scratch/sdbootutil"
-		sdbootutil="$scratch/sdbootutil"
-	fi
-
 	# The scenario runs as its own process, not sourced: it is allowed
 	# to `exit` (77 to opt out of a guest) and that must end the
 	# scenario, not the wrapper that still has to capture and check.
@@ -156,15 +192,18 @@ run_guest()
 		set -u
 		export ESP=$scratch/esp
 		export SDBOOTUTIL=$sdbootutil
-		# The real ESP has to be resolved before SYSTEMD_ESP_PATH
+		# Every scenario starts from the ESP as the guest has it,
+		# so one cannot inherit what the one before it did.  The
+		# real ESP has to be resolved before SYSTEMD_ESP_PATH
 		# points bootctl at a copy that does not exist yet
+		rm -rf \$ESP
 		cp -a \"\$(bootctl --print-esp-path)\" \$ESP
 		export SYSTEMD_ESP_PATH=\$ESP
 
 		$scratch/fde-state capture > $scratch/before
 
 		echo '--- scenario ---'
-		bash $scratch/scenario; scenario_status=\$?
+		bash $scratch/scenarios/$scenario; scenario_status=\$?
 		echo \"--- scenario exit \$scenario_status ---\"
 
 		$scratch/fde-state capture > $scratch/after
@@ -212,6 +251,34 @@ run_guest()
 	return 1
 }
 
+# Every scenario on one guest.  A guest that is down is a note and not a
+# failure: they are not always up, and the run is about the code
+run_guest()
+{
+	local ip="$1"; shift
+	local scenario sdbootutil rc=0
+
+	echo "===== $ip ====="
+	if ! reachable "$ip"; then
+		echo "unreachable, skipped"
+		return 0
+	fi
+
+	sdbootutil="$(prepare_guest "$ip" "$@")"
+
+	for scenario in "$@"; do
+		[ "$#" -eq 1 ] || echo "----- $scenario -----"
+		run_scenario "$ip" "$scenario" "$sdbootutil" || rc=1
+	done
+
+	[ -n "$keep" ] || on "$ip" "rm -rf /var/tmp/fde-test" > /dev/null
+	# The shared connection has nothing left to carry, and leaving it
+	# to time out keeps a process and a socket around for a minute
+	ssh "${ssh_opts[@]}" -O exit "root@$ip" &> /dev/null || :
+
+	return "$rc"
+}
+
 while [ $# -gt 0 ]; do
 	case "$1" in
 		-g|--guest) guests+=("$2"); shift 2 ;;
@@ -224,21 +291,35 @@ while [ $# -gt 0 ]; do
 	esac
 done
 
-scenario="${1:-}"
-[ -n "$scenario" ] || { echo "Available scenarios:"; list_scenarios; exit 1; }
-[ -f "$here/scenarios/$scenario" ] || die "No such scenario: $scenario"
-# A scenario that does not parse reaches every guest, runs nothing and
-# reports an error on each of them.  Cheaper to find out here
-bash -n "$here/scenarios/$scenario" || die "Scenario $scenario does not parse"
+scenarios=("$@")
+[ "${#scenarios[@]}" -gt 0 ] || { echo "Available scenarios:"; list_scenarios; exit 1; }
+for scenario in "${scenarios[@]}"; do
+	[ -f "$here/scenarios/$scenario" ] || die "No such scenario: $scenario"
+	# A scenario that does not parse reaches every guest, runs
+	# nothing and reports an error on each of them.  Cheaper to find
+	# out here, and before the first one has started
+	bash -n "$here/scenarios/$scenario" || die "Scenario $scenario does not parse"
+done
 if [ "${#guests[@]}" -eq 0 ]; then
 	mapfile -t guests < <(read_guests)
 fi
 [ "${#guests[@]}" -gt 0 ] || die "No guest to run on. Name one with -g, set FDE_TEST_GUESTS, or list them in $here/guests"
 
+# The guests are separate machines and share nothing, so they run at the
+# same time.  What they say is collected instead of printed, and handed
+# over whole once the guest is done: interleaved output from six
+# machines is not a report, and an order that depends on which guest was
+# quickest cannot be diffed against the last run
+pids=()
+for i in "${!guests[@]}"; do
+	run_guest "${guests[$i]}" "${scenarios[@]}" > "$workdir/out.$i" 2>&1 &
+	pids+=("$!")
+done
+
 rc=0
-for ip in "${guests[@]}"; do
-	run_guest "$ip" "$scenario" || rc=1
-	[ -n "$keep" ] || on "$ip" "rm -rf /var/tmp/fde-test" > /dev/null
+for i in "${!pids[@]}"; do
+	wait "${pids[$i]}" || rc=1
+	cat "$workdir/out.$i"
 	echo
 done
 exit "$rc"
