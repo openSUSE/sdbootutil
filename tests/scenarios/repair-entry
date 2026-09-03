@@ -1,0 +1,65 @@
+#!/bin/bash
+# scenario: repair-entry
+# cleanup --repair puts the file back and leaves the command line alone
+#
+# Same damage as missing-initrd, repaired through the other door.  What
+# this one is really about is the second half: a repair that also rewrote
+# the options would hand the machine a command line nobody chose, and the
+# next boot would come up subtly different with nothing to point at.  So
+# the entry is edited first, and the edit has to survive.
+#
+# The marker goes on the "options" line because that is the field a
+# repair is most likely to clobber -- it is the one install_kernel
+# regenerates from create_boot_options -- and the one whose loss is worst.
+#
+# The initrd has to be one that only the running subvolume references.
+# cleanup looks at every snapshot, but it repairs an entry by installing
+# that snapshot's kernel, and a snapshot old enough to have lost its
+# /usr/lib/modules is deleted by the same command instead: that is a
+# different path and it has its own outcome
+subvol="$(findmnt --noheadings -o FSROOT --target / | head -n1)"
+subvol="${subvol#/}"
+
+mine()
+{
+	bootctl list --json=short | jq -r --arg s "$subvol" \
+		'.[] | select(.type=="type1") |
+		 select($s == "" or ((.options // "") | contains("subvol=" + $s)))'
+}
+
+initrd="$(bootctl list --json=short | jq -r --arg s "$subvol" '
+	[.[] | select(.type=="type1")] as $all |
+	[$all[] | select($s == "" or ((.options // "") | contains("subvol=" + $s))) |
+	 (.initrd // [])[]] as $mine |
+	[$all[] | select($s != "" and (((.options // "") | contains("subvol=" + $s)) | not)) |
+	 (.initrd // [])[]] as $theirs |
+	first($mine[] | select(. as $i | $theirs | index($i) | not)) // empty')"
+
+[ -n "$initrd" ] || { echo "no initrd is referenced only by the running subvolume"; exit 77; }
+
+conf="$(mine | jq -r --arg i "$initrd" 'select((.initrd // []) | index($i)) | .path' | head -n1)"
+[ -f "$conf" ] || { echo "cannot find the entry that references $initrd"; exit 77; }
+
+marker="fde-test-marker=do-not-lose-me"
+sed -i "/^options[ \t]/s/\$/ $marker/" "$conf"
+grep -q "$marker" "$conf" || { echo "could not mark ${conf##*/}"; exit 1; }
+echo "marked ${conf##*/} and removed $initrd"
+rm -f "$ESP$initrd"
+
+"$SDBOOTUTIL" --esp-path "$ESP" --no-variables --disable-predictions -v cleanup --repair
+
+# The entry may have been rewritten under a new name: a regenerated
+# initrd hashes differently, and install_with_rollback only keeps the old
+# name when the contents match.  So the marker is looked for across the
+# entries of this subvolume, not in the file that used to hold it
+echo "entries now:"
+mine | jq -r '"  \(.id) -> \((.initrd // []) | join(" "))"'
+
+found="$(mine | jq -r '.path' | xargs -r grep -l -- "$marker" || :)"
+[ -n "$found" ] || {
+	echo "FAIL: the repair dropped the hand-edited options, $marker is gone"
+	echo "what the entries say now:"
+	mine | jq -r '.path' | xargs -r grep -H '^options' || :
+	exit 1
+}
+echo "the edited command line survived in ${found##*/}"

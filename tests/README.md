@@ -49,6 +49,7 @@ The scenarios, roughly in order of how much of the tool they touch:
 | `remove-readd-kernel` | reference counting frees exactly what it should, and the round trip returns |
 | `update-all-entries` | editing an entry in place is not a silent no-op, and is deterministic |
 | `boot-counter` | a `+N` counter is kept, and does not hide the entry from removal |
+| `repair-entry` | `cleanup --repair` restores the file and keeps a hand-edited command line |
 
 ### What it reports today
 
