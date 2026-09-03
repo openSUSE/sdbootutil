@@ -5,12 +5,12 @@ check() {
     # Return 255 to only include the module, if another module
     # requires it.
     if [ -n "$hostonly" ]; then
-        if ! [ -d /sys/class/tpmrm ] || [ -z "$(ls -A /sys/class/tpmrm)" ]; then
-            return 255
-        fi
-        # A system with a TPM2 but without a device that measures
-        # PCR 15 has nothing to validate
-        if ! grep -qs "tpm2-measure-pcr=yes" /etc/crypttab; then
+        # The module does two jobs, and /etc/crypttab decides if
+        # either is needed.  The generator serializes the unlocks that
+        # share a FIDO2 key, which has nothing to do with the TPM2,
+        # and the validator has nothing to check without a device that
+        # measures PCR 15
+        if ! grep -qs "fido2-device=\|tpm2-measure-pcr=yes" /etc/crypttab; then
             return 255
         fi
     fi
