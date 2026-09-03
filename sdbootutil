@@ -87,6 +87,7 @@ arg_force=
 arg_strict=
 arg_disable_predictions=
 arg_full=
+arg_repair=
 have_snapshots=
 in_buildroot=
 # Snapshot that owns the "/" subvolume, that is not always the one
@@ -267,6 +268,10 @@ helpandquit()
 		                        or nothing is applied (like systemd-pcrlock --strict=)
 		  --disable-predictions	Disable automatic update predictions
 		  --full		"status" reports every detail, not the summary
+		  --repair		"cleanup" also writes back the kernels and initrds
+		                        that boot entries name and the ESP does not have.
+		                        The command line of the entry is left alone,
+		                        "update-all-entries" is what rewrites those
 		  -v, --verbose		More verbose output
 		  --start-trace-code	Create /var/log/sdbootutil.log to trace the code.
 		                        (verbose output is enabled)
@@ -294,7 +299,10 @@ helpandquit()
 		           Remove boot entries for all kernels in SNAPSHOT
 
 		cleanup [SNAPSHOT]
-		           Remove boot entries with missing kernels from SNAPSHOT
+		           Remove boot entries with missing kernels from SNAPSHOT.
+		           With --repair, also install again the kernels and initrds
+		           that the remaining entries name and the ESP does not have.
+		           Only those files are written, what the entry says is kept
 
 		list-kernels [SNAPSHOT]
 		           List all kernels related to SNAPSHOT
@@ -1052,6 +1060,18 @@ entry_field()
 	done < <(entry_fields "$conf")
 }
 
+# The keys whose value is a file in the ESP.  Everything else in an
+# entry is text that describes the system, and the two are owned by
+# different people: this script writes the files, the command line can
+# have been edited by hand
+entry_file_keys=" linux initrd devicetree "
+
+entry_is_file_key()
+{
+	[ -n "${1-}" ] || return 1
+	[[ $entry_file_keys == *" $1 "* ]]
+}
+
 # Every file that the entry references, as a path relative to the boot
 # partition
 entry_files()
@@ -1060,10 +1080,35 @@ entry_files()
 	local key value
 
 	while read -r key value; do
-		case "$key" in
-			linux|initrd|devicetree) printf '%s\n' "$value" ;;
-		esac
+		! entry_is_file_key "$key" || printf '%s\n' "$value"
 	done < <(entry_fields "$conf")
+}
+
+# The same entry, split in two by "entry_is_file_key" and printed as it
+# was written: "files" for the fields naming a file, "text" for
+# everything else, comments and empty lines included.
+#
+# entry_fields() normalizes, and here that would be a defect.  The
+# result is written back as a boot entry, and an entry that differs from
+# the one on disk only in its blanks is still a different file: it loses
+# the name it had, and with the name the boot counter of the kernel that
+# did boot
+entry_lines()
+{
+	local conf="${1:?}"
+	local want="${2:?}"
+	local line key
+
+	[ -f "$conf" ] || return 0
+
+	while IFS= read -r line; do
+		read -r key _ <<<"$line"
+		if entry_is_file_key "$key"; then
+			[ "$want" != "files" ] || printf '%s\n' "$line"
+		else
+			[ "$want" != "text" ] || printf '%s\n' "$line"
+		fi
+	done < "$conf"
 }
 
 # The files that the entry names and that are not in the ESP.  Nothing
@@ -1113,6 +1158,34 @@ dangling_entries()
 		       | .id, .path,
 			 ((.version // "") | capture("((?<snapshot>[0-9]*)@)?(?<kernel>.*)")) as $v
 		       | $v.snapshot, $v.kernel')
+}
+
+# The entry that is on disk, set by "cleanup --repair" to the one it is
+# about to write again.  Empty everywhere else, and every other caller
+# of "install_kernel" wants it empty: they are creating the entry or
+# bringing it up to date, and the generated content is the answer
+keep_entry_conf=
+
+# Rewrite a generated entry so that only the fields naming a file are
+# the generated ones, and everything else is what the entry already
+# said, as it said it.
+#
+# "linux", "initrd" and "devicetree" carry the checksum of what was just
+# written and are the whole point of a repair.  The rest is not ours to
+# touch: an administrator can have edited the command line by hand, and
+# the generated one would silently replace it -- a boot entry that comes
+# up with different options than the one that was there is exactly the
+# failure that is impossible to diagnose afterwards.  Refreshing those
+# fields is what "update-all-entries" is for, and it is asked for
+keep_entry_fields()
+{
+	local conf="${1:?}"
+
+	{
+		entry_lines "$keep_entry_conf" text
+		entry_lines "$conf" files
+	} > "$conf.keep"
+	mv "$conf.keep" "$conf"
 }
 
 # An entry is usable only if it points to this kernel and every file
@@ -1970,6 +2043,9 @@ install_kernel()
 	for i in "${dstinitrd[@]}"; do
 		echo "initrd     $i" >> "$tmpdir/entry.conf"
 	done
+	# A repair replaces a file that went missing, and nothing else
+	[ -z "$keep_entry_conf" ] || keep_entry_fields "$tmpdir/entry.conf"
+
 	dbg "Generated new boot entry"
 	dbg_cat "$tmpdir/entry.conf"
 
@@ -2120,6 +2196,34 @@ cleanup_entries()
 			rm "$path"
 		}
 	done < <(jq -r '.[] | .id, .path, (.version | capture("((?<snapshot>[0-9]*)@)?(?<kernel>.*)")) as $v | $v.snapshot, $v.kernel' "$entryfile")
+
+	# The loop above drops the entry whose kernel is gone.  The
+	# opposite case -- the kernel is still there and what went missing
+	# is the copy in the ESP -- leaves an entry that stops at the
+	# firmware, and nothing repairs it: every other command is handed
+	# a single snapshot and only ever looks at that one, while this
+	# loop is the one place with the whole system in front of it.
+	#
+	# Writing a kernel back means generating an initrd, which is slow
+	# and needs space in the ESP, so it is asked for rather than done
+	# on the way past
+	[ -z "$arg_repair" ] || {
+		# Collected before the first repair, not streamed: an
+		# entry deleted above is still listed in "$entryfile",
+		# and "install_kernel" rewrites that same file
+		local dangling missing
+		dangling="$(dangling_entries < "$entryfile")"
+		[ -z "$dangling" ] || while IFS='|' read -r id path snapshot kernel_version missing; do
+			info "Repairing boot entry $id, missing $missing"
+			# What the entry says survives the repair, only the
+			# files it names are written again.  "install_kernel"
+			# builds the new entry aside and only then replaces
+			# this one, so it is still readable while it does
+			keep_entry_conf="$path"
+			install_kernel "${snapshot:-$root_snapshot}" "$kernel_version"
+			keep_entry_conf=
+		done <<<"$dangling"
+	}
 
 	bootctl_cleanup
 
@@ -6927,6 +7031,7 @@ fde_status()
 		while IFS='|' read -r id path snapshot kernel_version missing; do
 			warn "  $id (${snapshot:+snapshot $snapshot, }$kernel_version) is missing $missing"
 		done <<<"$status_dangling"
+		warn "Run 'sdbootutil cleanup --repair' to write them again from the kernels that are still installed"
 	}
 
 	# A policy with no device behind it is not an error, but it is
@@ -7074,6 +7179,7 @@ define_options() {
 		[strict]=""
 		[disable-predictions]=""
 		[full]=""
+		[repair]=""
 	)
 	opts_long=""
 	for opt in "${!options_with_arg[@]}"; do
@@ -7139,6 +7245,7 @@ while true ; do
 		--strict) arg_strict=1; shift ;;
 		--disable-predictions) arg_disable_predictions=1; shift ;;
 		--full) arg_full=1; shift ;;
+		--repair) arg_repair=1; shift ;;
 		--) shift ; break ;;
 		*) echo "Internal error!" ; exit 1 ;;
 	esac
