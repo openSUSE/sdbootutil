@@ -3202,11 +3202,56 @@ default_entry_snapshot()
 	[ -n "$id" ] || return 0
 
 	update_entries_for_this_system
+	entry_snapshot "$id" < "$entryfile"
+}
+
+# The snapshot that an entry describes, read from the entry list in
+# stdin.  Empty when the entry is not in the list or describes no
+# snapshot
+#
+# The ID is matched case insensitively: when it comes from
+# "LoaderEntryDefault" it has been through `bli_efi_var_get`, which
+# lower-cases what it reads, and an entry token is not always lower
+# case (same workaround as in "list_entries")
+entry_snapshot()
+{
+	local id="${1:?}"
+
 	jq -r --arg id "$id" '.[]
-		| select(.id == $id)
+		| select((.id | ascii_downcase) == ($id | ascii_downcase))
 		| ((.options // "") | capture("rootflags=subvol=[^ ]*/\\.snapshots/(?<n>[0-9]+)/snapshot") | .n)
 		  // ((.version // "") | capture("^(?<n>[0-9]+)@") | .n)
-		  // empty' < "$entryfile"
+		  // empty'
+}
+
+# The snapshot that snapper reports as default, which is the btrfs
+# default subvolume
+default_snapper_snapshot()
+{
+	[ -n "$have_snapshots" ] || return 0
+	[ -s "$snapperfile" ] || update_snapper
+	jq -r '.root[]|select(.default==true)|.number' "$snapperfile"
+}
+
+# Say it when the two defaults disagree.  Nothing repairs this on its
+# own: each actor keeps reading the store it wrote, and the machine
+# goes on booting an entry that no tool calls the default until the
+# next successful `set-default-snapshot` writes both again
+#
+# The repair is that same command, with the snapshot that the boot
+# loader already boots: aligning the other way would point the boot
+# loader at a snapshot whose entries may be the ones that failed to
+# install
+warn_default_snapshot_diverged()
+{
+	local esp snapper
+	esp="$(default_entry_snapshot)"
+	snapper="$(default_snapper_snapshot)"
+	[ -n "$esp" ] && [ -n "$snapper" ] || return 0
+	[ "$esp" != "$snapper" ] || return 0
+
+	warn "The default boot entry boots snapshot $esp, but snapper and btrfs default to $snapper"
+	warn "Run 'sdbootutil set-default-snapshot $esp' to align them"
 }
 
 set_timeout_sdboot()
@@ -5381,6 +5426,12 @@ generate_tpm2_predictions()
 	# one and the one that would otherwise never say anything
 	warn_no_recovery_pin
 
+	# The policy that was just written covers the entry that the boot
+	# loader selects, so the machine still unlocks, but a divergence
+	# spends one of the few slots (two under grub2-bls) on a snapshot
+	# that nothing is going to boot
+	warn_default_snapshot_diverged
+
 	# Generate a PCR 15 prediction only in certain cases, as for
 	# now this will ask the password (can be resolved by an
 	# external tool that extract the password from the TPM2 if the
@@ -7088,10 +7139,24 @@ status_boot()
 	local next="${oneshot:-$default}"
 	local broken=""
 	! status_is_dangling "$next" || broken=" -- DOES NOT BOOT, it names a file that is not in the ESP"
+	# What snapper and btrfs call the default is not what the boot
+	# loader reads, it only has to agree with it.  When it does not,
+	# each tool keeps answering for its own store and none of them
+	# looks wrong on its own, so this is reported where the default
+	# entry is named and nowhere else
+	local diverged=""
+	if [ -n "$have_snapshots" ] && [ -n "$default" ]; then
+		local esp_snapshot="" btrfs_snapshot=""
+		esp_snapshot="$(entry_snapshot "$default" <<<"$entries")"
+		btrfs_snapshot="$(default_snapper_snapshot)"
+		[ -z "$esp_snapshot" ] || [ -z "$btrfs_snapshot" ] || [ "$esp_snapshot" = "$btrfs_snapshot" ] || \
+			diverged=" -- boots snapshot $esp_snapshot, while snapper and btrfs default to $btrfs_snapshot; run 'sdbootutil set-default-snapshot $esp_snapshot' to align them"
+	fi
+
 	if [ -n "$oneshot" ]; then
-		status_row "Next boot" "$oneshot (one shot, and then ${default:-the default})$broken"
+		status_row "Next boot" "$oneshot (one shot, and then ${default:-the default})$broken$diverged"
 	else
-		status_row "Next boot" "${default:-unknown, no default is set}$broken"
+		status_row "Next boot" "${default:-unknown, no default is set}$broken$diverged"
 	fi
 
 	[ -z "$arg_full" ] || {
