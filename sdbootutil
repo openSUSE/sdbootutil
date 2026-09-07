@@ -2677,7 +2677,11 @@ bootloader_needs_update()
 	[ -n "$nv" ] || return 1
 	info "System version $nv"
 	local status=0
-	systemd-analyze compare-versions "$v" "$nv" 2> /dev/null || status="$?"
+	# The comparison goes to stdout ("261.2 == 261.2"), and only the
+	# exit status is wanted here.  Our stdout is read through a pipe by
+	# transactional-update and weak-modules2, and it also lands in the
+	# rpm scriptlet output, where the bare line explains nothing
+	systemd-analyze compare-versions "$v" "$nv" > /dev/null 2>&1 || status="$?"
 	bldr_name=$(bootloader_name "$snapshot")
 	if [ "$status" = "11" ]; then
 		info "$bldr_name is newer than system bootloader"
