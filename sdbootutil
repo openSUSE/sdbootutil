@@ -3179,6 +3179,32 @@ get_default_entry()
 	fi
 }
 
+# The snapshot that the boot loader is going to boot, which is not
+# always the one that snapper calls default.  snapper switches the
+# btrfs default subvolume before running the plugin, and the entry
+# that the boot loader reads is written from inside it, so an
+# interruption in that window, a manual `btrfs subvolume set-default`
+# or an aborted rollback leaves the two pointing at different
+# snapshots, for good.  Nothing repairs it later, as every actor keeps
+# consulting the one it wrote (bsc#1252227)
+#
+# Empty when no default is set, when the default entry is gone, or
+# when it describes no snapshot (a system without snapshots, or an
+# entry that this script does not manage)
+default_entry_snapshot()
+{
+	local id
+	id="$(get_default_entry 2> /dev/null)" || return 0
+	[ -n "$id" ] || return 0
+
+	update_entries_for_this_system
+	jq -r --arg id "$id" '.[]
+		| select(.id == $id)
+		| ((.options // "") | capture("rootflags=subvol=[^ ]*/\\.snapshots/(?<n>[0-9]+)/snapshot") | .n)
+		  // ((.version // "") | capture("^(?<n>[0-9]+)@") | .n)
+		  // empty' < "$entryfile"
+}
+
 set_timeout_sdboot()
 {
 	local timeout="${1:?}"
@@ -3425,6 +3451,18 @@ snapshot_ids_for_prediction()
 	if [ -n "$root_snapshot" ]; then
 		[ -n "${snapshots[$root_snapshot]}" ] || snapshot_ids+=("$root_snapshot")
 		snapshots["$root_snapshot"]=1
+	fi
+	# What the boot loader is going to boot comes before what
+	# snapper calls default.  They are the same snapshot in the
+	# ordinary case, and then this costs no slot, but when they
+	# disagree it is the boot loader that decides which entry is
+	# measured, and sealing the other one is sealing a boot that
+	# never happens: the machine comes up asking for the recovery
+	# key and no later update can notice (bsc#1252227)
+	id="$(default_entry_snapshot)"
+	if [ -n "$id" ]; then
+		[ -n "${snapshots[$id]}" ] || snapshot_ids+=("$id")
+		snapshots[$id]=1
 	fi
 	while read -r id; do
 		[ -n "${snapshots[$id]}" ] || snapshot_ids+=("$id")
