@@ -4458,6 +4458,42 @@ policy_stale_pcrs()
 	echo "$stale"
 }
 
+# What a PCR covers, and what legitimately moves it.  The second half of
+# each line is the one that matters: a number alone cannot tell the
+# reader whether the change was theirs
+pcr_meaning()
+{
+	case "${1:?}" in
+		0)  echo "firmware code. A firmware update moves it" ;;
+		1)  echo "firmware settings. A BIOS setting or boot order change moves it" ;;
+		2)  echo "option ROM code. Adding or removing a plug-in card moves it" ;;
+		3)  echo "option ROM settings. Adding or removing a plug-in card moves it" ;;
+		4)  echo "the boot loader binaries. A shim, systemd-boot or GRUB2 update moves it, and so does booting another entry" ;;
+		5)  echo "the partition table. Adding, removing or resizing a partition moves it" ;;
+		7)  echo "secure boot state and certificates. Toggling secure boot, or a keys, db or dbx update, moves it" ;;
+		8)  echo "the GRUB2 commands. Editing the command line or the GRUB2 configuration moves it" ;;
+		9)  echo "the kernel and initrd. A kernel or initrd update moves it" ;;
+		11) echo "the UKI sections. A kernel update moves it" ;;
+		12) echo "the kernel command line and credentials. Editing either moves it" ;;
+		14) echo "the shim MOK certificates. Using mokutil moves it" ;;
+		*)  echo "something this tool cannot describe" ;;
+	esac
+}
+
+# What the PCRs that moved measure, and the two ways out.  Both ways
+# trust the current boot path, so tampering has to be ruled out before
+# either.  The list can be empty when sysfs does not export the PCRs
+explain_pcrlock_recovery()
+{
+	local i
+	for i in ${1//,/ }; do
+		warn "PCR $i measures $(pcr_meaning "$i")"
+	done
+	warn "If you made no such change, the boot path was altered. Both fixes below trust the current state, so explain it first"
+	warn "With the recovery PIN: re-run with --ask-recovery-pin (or RECOVERY_PIN=...)"
+	warn "Without it: check that a password opens the devices, then 'systemd-pcrlock remove-policy' and 'sdbootutil enroll --method=tpm2'"
+}
+
 # `systemd-pcrlock make-policy` has to authorize the NVIndex against
 # the policy that is already stored in it.  With a recovery PIN that is
 # a PolicySigned and no PCR takes part, but without one the PIN is first
@@ -4478,8 +4514,6 @@ explain_pcrlock_policy_error()
 	local errorfile="$1"
 	local pin="$2"
 
-	grep -qE "None of the alternative values|PCR values kept changing|Failed to submit super PCR policy|Failed to unseal PIN" "$errorfile" || return 0
-
 	# A recovery PIN was used, so the PCRs were not part of the
 	# authorization and this is a different problem.  Saying anything
 	# about PCRs here would only send the reader the wrong way
@@ -4488,10 +4522,20 @@ explain_pcrlock_policy_error()
 	local stale
 	stale="$(policy_stale_pcrs)"
 
-	warn "The policy stored in the TPM2 cannot be re-authorized${stale:+: PCR $stale no longer match it}"
-	warn "No recovery PIN was available, so the one sealed in the TPM2 had to be used, and reading it back needs the current PCRs to match the previous prediction.  This does not recover by itself, every new run fails the same way"
-	warn "With the recovery PIN, re-run with --ask-recovery-pin (or RECOVERY_PIN=...)"
-	warn "Without it, the policy has to be created again: 'systemd-pcrlock remove-policy' and then 'sdbootutil enroll --method=tpm2'.  Until that is done the TPM2 does not open the device, so first make sure that a password does"
+	# Where the authorization fails decides what is printed.
+	# `tpm2_policy_super_pcr()` names the PCR it could not satisfy, but
+	# the same stale PCR can instead break the later
+	# `Esys_PolicyAuthorizeNV`, and that one says nothing about PCRs.
+	# Both are the one condition, so the second form is only taken when
+	# a PCR really did move: any other TPM2 error reaching
+	# PolicyAuthorizeNV must not collect this explanation
+	if ! grep -qE "None of the alternative values|PCR values kept changing|Failed to submit super PCR policy|Failed to unseal PIN" "$errorfile"; then
+		[ -n "$stale" ] || return 0
+		grep -qE "Failed to submit AuthorizeNV policy" "$errorfile" || return 0
+	fi
+
+	warn "The TPM2 policy cannot be re-authorized${stale:+: PCR $stale moved}. No recovery PIN was available, so every new run fails the same way"
+	explain_pcrlock_recovery "$stale"
 }
 
 shim_changed()
@@ -7092,12 +7136,15 @@ fde_status()
 	# current PCRs to satisfy the *old* policy (github issue 250)
 	[ -z "$status_policy_stale" ] || {
 		echo
+		local i
 		if [ -n "$status_pin_reachable" ]; then
-			warn "PCR $status_policy_stale no longer match the policy. The next 'sdbootutil update-predictions' rewrites it, and a recovery PIN is reachable to authorize the new NVIndex"
+			warn "PCR $status_policy_stale no longer match the policy. The next 'sdbootutil update-predictions' rewrites it with the reachable recovery PIN, trusting the current boot path"
+			for i in ${status_policy_stale//,/ }; do
+				warn "PCR $i measures $(pcr_meaning "$i")"
+			done
 		else
-			warn "PCR $status_policy_stale no longer match the policy, and no recovery PIN is reachable"
-			warn "The PIN sealed in the TPM2 is the only one left, and reading it back needs the current PCRs to match the previous prediction, which is what just failed. This does not recover by itself: every 'update-predictions' from now on fails the same way"
-			warn "First make sure that a password opens the devices, then 'systemd-pcrlock remove-policy' and 'sdbootutil enroll --method=tpm2'"
+			warn "PCR $status_policy_stale no longer match the policy, and no recovery PIN is reachable, so every 'update-predictions' from now on fails the same way"
+			explain_pcrlock_recovery "$status_policy_stale"
 		fi
 	}
 
