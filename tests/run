@@ -99,6 +99,9 @@ die()
 	exit 1
 }
 
+# The callers build the remote command with local values ($scratch, the
+# scenario name), so the expansion on this side is the point of it
+# shellcheck disable=SC2029
 on()
 {
 	local ip="$1"; shift
@@ -107,6 +110,7 @@ on()
 
 # Like on(), but the exit status is the command's.  on() pipes through
 # grep to drop the host-key notice, which would swallow it
+# shellcheck disable=SC2029
 on_q()
 {
 	local ip="$1"; shift

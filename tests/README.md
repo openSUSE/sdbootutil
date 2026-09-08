@@ -81,6 +81,47 @@ more than the one entry under test.
 # fde-state diff before after
 ```
 
+## Secret routing (`tests/unit`)
+
+`run` never writes outside a copy of the ESP, which is what makes it
+safe to point at a machine one wants to keep — and what puts enrollment
+out of its reach. `enroll` writes LUKS2 headers and the pcrlock
+NVIndex, and it cannot even be aimed: `detect_tracked_devices` builds
+its list from `lsblk` ∩ `/etc/crypttab`, so a scratch container added to
+crypttab is enrolled *alongside* the real root, not instead of it.
+
+`tests/unit` covers the part that does not need any of that. Which
+source of a secret wins, what is published to the kernel keyring, and
+which warnings are printed are all decided before anything is written,
+and a scratch LUKS2 container on a loop device answers `cryptsetup` and
+`systemd-cryptenroll` exactly like a root device would. It sources the
+library half of `sdbootutil` — everything above the `####### main`
+marker, which the completion data already relies on — and calls the
+functions one at a time.
+
+```console
+# tests/unit
+ok   get_device_password takes CURRENT_PW
+...
+13 cases, all passed
+```
+
+It needs root, for `losetup` and the keyring, and it uses the real
+keyring names because the names are in the code: it refuses to start
+when one of them is already there rather than overwrite a secret left
+behind by an installer or an interrupted enrollment, and it purges them
+between cases. Every case runs in a subshell with its own environment,
+against a freshly formatted header, and can replace a function —
+`t_erk_unreachable_pin` fakes a TPM2 slot, because the answer it checks
+must not depend on the machine having a TPM2.
+
+What stays out of reach here is the NVIndex itself: authorizing with the
+old recovery PIN, the "not needed, so not validated" skip, the dead end
+of github issue 250. Those need a real TPM2 and destroy the enrollment
+of the machine they run on, so they belong to a destructive guest suite
+that does not exist yet, and whose first requirement is a way to put a
+guest back.
+
 ## Adding a scenario
 
 A scenario is a bash script in `scenarios/`, run on the guest with
