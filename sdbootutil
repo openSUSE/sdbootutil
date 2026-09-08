@@ -2727,20 +2727,21 @@ esp_root_drive_partno_dseq()
 
 extra_entry_needs_update()
 {
-	local entry="$1"
-	local nv v
+	local efi="$1"
+	local entry="$2"
 
-	# If we do not have a version in the entry file (or the entry
-	# file is missing), then we assume that an update is required
-	[ -n "$entry" ] || return 0
-	nv="$(entry_field "$entry" version)"
-	[ -n "$nv" ] || return 0
-
-	entry="${boot_root}/loader/entries/$(basename "$entry")"
-	v="$(entry_field "$entry" version)"
-	[ -n "$v" ] || return 0
-
-	systemd-analyze compare-versions "$v" "<" "$nv" 2> /dev/null
+	# The `version` field of the entry says which release the
+	# provider calls this build, and nothing more: a package can be
+	# rebuilt with a new binary and the same version (a re-signed
+	# EFI is exactly that), and it can be downgraded, which a
+	# "newer than" comparison reads as "nothing to do" while the
+	# ESP keeps a binary that the system no longer has.  What has
+	# to be in the ESP is what is installed now, so the files are
+	# what is asked
+	cmp -s "$efi" "${esp_root}/EFI/extra/$(basename "$efi")" || return 0
+	[ -n "$entry" ] || return 1
+	cmp -s "$entry" "${boot_root}/loader/entries/$(basename "$entry")" || return 0
+	return 1
 }
 
 install_extra_entry()
@@ -2766,7 +2767,8 @@ install_extra_entry()
 	# updated)
 	echo "/EFI/extra/$(basename "${e[EFI]}")"
 
-	extra_entry_needs_update "${subvol:1}${e[ENTRY]}" || return 0
+	extra_entry_needs_update "${subvol:1}${e[EFI]}" \
+				 "${e[ENTRY]:+${subvol:1}${e[ENTRY]}}" || return 0
 
 	mkdir -p "${esp_root}/EFI/extra"
 	install -p -D "${subvol:1}${e[EFI]}" "${esp_root}/EFI/extra"
