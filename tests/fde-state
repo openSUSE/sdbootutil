@@ -689,7 +689,7 @@ check_policy_fresh()
 		[ -r "/sys/class/tpm/tpm0/pcr-$bank/$i" ] || continue
 		checked=$((checked + 1))
 		# sysfs prints upper case, the policy stores lower case
-		current="$(tr 'A-Z' 'a-z' < "/sys/class/tpm/tpm0/pcr-$bank/$i")"
+		current="$(tr '[:upper:]' '[:lower:]' < "/sys/class/tpm/tpm0/pcr-$bank/$i")"
 		jq -e --arg c "$current" --argjson p "$i" \
 			'.pcrValues[] | select(.pcr == $p) | .values | index($c)' \
 			< /var/lib/systemd/pcrlock.json > /dev/null || \

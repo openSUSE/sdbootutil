@@ -392,20 +392,30 @@ helpandquit()
 
 		Secrets:
 		Each one is taken from the --ask-X parameter, the X variable
-		or the %u:sdbootutil-x keyring entry, in that order:
+		or the %u:sdbootutil-x keyring entry, in that order.
+
+		Presented, to authorize a change:
 
 		                  parameter          variable      keyring (%u)
 		Current password  --ask-current-pw   CURRENT_PW    cryptenroll
-		New recovery key  --ask-key          KEY           sdbootutil-key
-		New password      --ask-pw           PW            sdbootutil-pw
-		TPM2 PIN          --ask-pin          PIN           sdbootutil-tpm2-pin
 		Recovery PIN      --ask-recovery-pin RECOVERY_PIN  sdbootutil-recovery-pin
+
+		Enrolled, as the new secret:
+
+		Recovery key      --ask-key          KEY           sdbootutil-key
+		Password          --ask-pw           PW            sdbootutil-pw
+		TPM2 PIN          --ask-pin          PIN           sdbootutil-tpm2-pin
 
 		The TPM2 PIN is typed at every boot; the recovery PIN
 		re-authorizes the pcrlock NVIndex, and PIN also names it when
 		there is no TPM2 PIN (--method=tpm2, update-predictions).
-		--ask-pin asks both.  With no source, the recovery key and
-		the recovery PIN are generated and printed.
+		--ask-pin asks both.
+
+		The recovery PIN cannot be changed: the same value has to
+		authorize the old NVIndex and seal the new one.  It is sealed
+		by the first enrollment, taken from the recovery key so that
+		there is a single secret to keep, and only presented after
+		that.  With no source both are generated and printed.
 
 		Prefer the keyring, it expires and the environment does not.
 		%u:sdbootutil (any secret, read last) and %u:sdbootutil-pin
@@ -3604,6 +3614,9 @@ select_entries_for_prediction()
 	#     higher one first
 	#
 	local filter
+	# $id, $ids and $kernel below are jq variables, bound by --arg
+	# and by "as", so the filter has to reach jq unexpanded
+	# shellcheck disable=SC2016
 	if [ -n "$have_snapshots" ]; then
 		filter='def priority(id): id as $id | $ids | split(" ") | index($id); map(. + {"priority": priority(.version | scan("(\\d+)@") | .[]), "kernel": .version | scan(".*@(?:(\\d+).(\\d+).(\\d+)-(\\d+))") | map(. | tonumber)})'
 	else
@@ -4495,7 +4508,7 @@ policy_stale_pcrs()
 		# problem that may not be there
 		[ -r "/sys/class/tpm/tpm0/pcr-$bank/$i" ] || continue
 		# sysfs writes them in upper case, the policy in lower
-		current="$(tr 'A-Z' 'a-z' < "/sys/class/tpm/tpm0/pcr-$bank/$i")"
+		current="$(tr '[:upper:]' '[:lower:]' < "/sys/class/tpm/tpm0/pcr-$bank/$i")"
 		jq -e --arg c "$current" --argjson p "$i" \
 		   '.pcrValues[] | select(.pcr == $p) | .values | index($c)' \
 		   < /var/lib/systemd/pcrlock.json > /dev/null || \
@@ -4625,9 +4638,33 @@ explain_pcrlock_policy_error()
 	local pin="$2"
 
 	# A recovery PIN was used, so the PCRs were not part of the
-	# authorization and this is a different problem.  Saying anything
-	# about PCRs here would only send the reader the wrong way
-	[ -z "$pin" ] || return 0
+	# authorization and this is a different problem: the PIN is what has
+	# to satisfy the PolicySigned of the NVIndex, and the TPM2 refusing
+	# the write is what a wrong one looks like.  Saying anything about
+	# PCRs here would only send the reader the wrong way
+	if [ -n "$pin" ]; then
+		grep -q "Failed to write to NV index" "$errorfile" || return 0
+
+		warn "The TPM2 rejected the recovery PIN, so the NVIndex keeps the policy it had"
+
+		# The recovery key and the recovery PIN are meant to be the
+		# same secret, and a key enrolled while the PIN was out of
+		# reach used to be published under the name of the PIN.  A
+		# "PIN" that opens the devices is that confusion, and it
+		# cannot become the PIN: `systemd-pcrlock` authorizes the
+		# NVIndex with the PIN that sealed it, and only with it
+		local dev
+		for dev in "${tracked_devices[@]}"; do
+			valid_password "$dev" "$pin" || continue
+			warn "That value opens $dev, so it is the recovery key and not the recovery PIN of the NVIndex"
+			break
+		done
+
+		local m
+		m="$(enrolled_tpm2_method)"
+		warn "Use the recovery PIN that sealed the NVIndex, or start again with one you keep: 'sdbootutil unenroll --method=$m' then 'sdbootutil enroll --method=$m --ask-recovery-pin'"
+		return 0
+	fi
 
 	local stale
 	stale="$(policy_stale_pcrs)"
@@ -5064,6 +5101,20 @@ generate_tpm2_predictions_pcrlock()
 		# keyring, so that it is available to `sdbootutil
 		# enroll --method=recovery-key`
 		keyctl_add_with_timeout "sdbootutil-recovery-pin" "$pin"
+
+		# A recovery key that is already in the LUKS2 header was
+		# made equal to the recovery PIN of that moment, and
+		# `enroll_recovery_key` says so when it enrolls it.  This
+		# PIN is a new one, so from here on they are two different
+		# secrets, and the value printed above is the only copy of
+		# this one
+		local rdev
+		for rdev in "${tracked_devices[@]}"; do
+			have_slot "$rdev" "recovery" || continue
+			warn "There is already a recovery key for $rdev"
+			warn "The recovery key and the recovery PIN are now different"
+			break
+		done
 	fi
 
 	[ -e /var/lib/systemd/pcrlock.json ] || {
@@ -5128,16 +5179,18 @@ get_device_password()
 	# *current* password, so it is tried first
 	[ -z "$env_current_pw" ] || candidates+=("$env_current_pw")
 
-	# PW, KEY and the %user:sdbootutil* entries hold the *new*
-	# secret for the password, recovery-key and tpm2+pin methods,
-	# and during the first enrollment they can contain the recovery
-	# PIN, so every candidate is validated before it is used.
+	# PW, KEY, RECOVERY_PIN and the %user:sdbootutil* entries hold
+	# the *new* secret for the password, recovery-key and tpm2+pin
+	# methods, and during the first enrollment they can contain the
+	# recovery PIN, which is then also the recovery key, so every
+	# candidate is validated before it is used.
 	# Adding a wrong one is not harmless: keyctl replaces the
 	# payload, so it would drop a valid password.  Because of the
 	# validation, %user:sdbootutil is not ambiguous here and it is
 	# not deprecated as a candidate
 	[ -z "$env_pw" ] || candidates+=("$env_pw")
 	[ -z "$env_key" ] || candidates+=("$env_key")
+	[ -z "$env_recovery_pin" ] || candidates+=("$env_recovery_pin")
 	local name
 	for name in sdbootutil-pw sdbootutil-key sdbootutil-recovery-pin sdbootutil-pin sdbootutil; do
 		if keyid="$(keyctl id %user:"$name" 2> /dev/null)"; then
@@ -5984,9 +6037,13 @@ enroll_recovery_key()
 		key="$env_key"
 	elif [ -n "$keyid_key" ]; then
 		key="$(keyctl pipe "$keyid_key")"
-	elif [ -n "$keyid_int" ]; then
+	elif [ -n "$env_recovery_pin" ]; then
 		# There is no recovery key, but there is a recovery PIN:
-		# make both the same one (see below)
+		# make both the same one (see below).  RECOVERY_PIN wins
+		# over the keyring entry, as it does in
+		# generate_tpm2_predictions_pcrlock
+		key="$env_recovery_pin"
+	elif [ -n "$keyid_int" ]; then
 		key="$(keyctl pipe "$keyid_int")"
 	elif [ -n "$keyid_dep" ]; then
 		deprecated_keyring_secret "recovery key" "sdbootutil-key"
@@ -6030,21 +6087,6 @@ enroll_recovery_key()
 
 	check_enrolled "$dev" "recovery" "$header" || return 1
 
-	# If we enroll a recovery key first, we can use the generated
-	# key as a recovery PIN later when we enroll a TPM2[+PIN]
-	# (note that the recovery PIN is not the same PIN for the
-	# tpm2+pin method).
-	#
-	# If we enroll the recovery key after the TPM2 enrollment and
-	# we send the recovery PIN via the keyring, then we can make
-	# the recovery key the same as the recovery PIN.  But if the
-	# PIN is missing from the keyring, then we missed the
-	# synchronization and the key and the PIN are different.
-	if [ -z "$keyid_int" ] && have_slot "$dev" "tpm2"; then
-		warn "There is already a recovery PIN for the TPM2"
-		warn "The recovery key and the recovery PIN are now different"
-	fi
-
 	if [ -n "$generated_key" ]; then
 		echo "Recovery key: $key"
 		if [ -x /usr/bin/qrencode ]; then
@@ -6059,14 +6101,37 @@ enroll_recovery_key()
 	if [ -z "$keyid" ] && [ -z "$unlock_method" ]; then
 		keyctl_add_with_timeout "cryptenroll" "$key"
 	fi
-	# ... and to --method=tpm2[+pin] via a private keyring.  An
-	# entry that is already there holds the recovery PIN that
-	# protects the pcrlock NV index, and it is not overwritten:
-	# that PIN cannot be recovered from anywhere else
-	if [ -z "$keyid_int" ]; then
-		keyctl_add_with_timeout "sdbootutil-recovery-pin" "$key"
-	elif [ "$key" != "$(keyctl pipe "$keyid_int")" ]; then
+	# ... and to --method=tpm2[+pin] via a private keyring, so that
+	# the key enrolled here is the recovery PIN that seals the
+	# pcrlock NVIndex and the user has a single secret to keep.
+	# That is only possible while the NVIndex has no PIN yet, or
+	# while the one it has is reachable: the PIN cannot be read back
+	# from the TPM2, and `systemd-pcrlock` takes a single
+	# --recovery-pin, which has to authorize the old NVIndex and
+	# seal the new one, so it cannot be replaced by this key either
+	local reachable_pin=
+	if [ -n "$env_recovery_pin" ]; then
+		reachable_pin="$env_recovery_pin"
+	elif [ -n "$keyid_int" ]; then
+		reachable_pin="$(keyctl pipe "$keyid_int")"
+	fi
+	if [ -n "$reachable_pin" ]; then
+		# The value presented is the recovery PIN, and it is not
+		# replaced: that PIN cannot be recovered from anywhere else
+		[ "$key" = "$reachable_pin" ] || \
+			warn "The recovery key and the recovery PIN are now different"
+	elif have_slot "$dev" "tpm2"; then
+		# A PIN sealed the NVIndex of this enrollment and it is
+		# not reachable here, so this key is not it.  Publishing
+		# it would name as the recovery PIN a value that no policy
+		# update can use, and `status` and `warn_no_recovery_pin`
+		# would report a PIN that is not there, which is the one
+		# warning that must reach a machine heading into the dead
+		# end of github issue 250
+		warn "There is already a recovery PIN for the TPM2, and it is not reachable here"
 		warn "The recovery key and the recovery PIN are now different"
+	else
+		keyctl_add_with_timeout "sdbootutil-recovery-pin" "$key"
 	fi
 }
 
@@ -6300,6 +6365,16 @@ unenroll_device()
 			;;
 
 		"recovery-key")
+			# The recovery key and the recovery PIN of the
+			# pcrlock NVIndex are the same secret when sdbootutil
+			# enrolled both.  Only the first one lives in this
+			# slot: the PIN stays in the TPM2, and it is what
+			# re-authorizes the policy on the next update, so the
+			# value cannot be discarded with the slot
+			if have_slot "$dev" "tpm2"; then
+				warn "The recovery PIN of the TPM2 policy is not removed with the recovery key of $dev"
+				warn "Keep the value: it is still needed to update the predictions"
+			fi
 			systemd-cryptenroll \
 				--wipe-slot=recovery \
 				"$dev"
@@ -6719,7 +6794,7 @@ status_policy()
 		else
 			# sysfs writes them in upper case, the policy in
 			# lower
-			current="$(tr 'A-Z' 'a-z' < "/sys/class/tpm/tpm0/pcr-$bank/$i")"
+			current="$(tr '[:upper:]' '[:lower:]' < "/sys/class/tpm/tpm0/pcr-$bank/$i")"
 			if jq -e --arg c "$current" --argjson p "$i" \
 			      '.pcrValues[] | select(.pcr == $p) | .values | index($c)' \
 			      < "$policy" > /dev/null; then
@@ -6794,7 +6869,11 @@ status_pcr15_replay()
 		# TPM_Extend is a hash over the concatenation of the two
 		# binary digests.  `printf %b` writes the NUL bytes
 		# straight to the pipe, which a command substitution
-		# around the binary would have eaten
+		# around the binary would have eaten.  ${var//;/} cannot
+		# replace this sed: the pattern is every *pair* of
+		# characters and "&" is the pair that matched, and bash
+		# has globs there, without repetition or back-reference
+		# shellcheck disable=SC2001
 		value="$(printf '%b' "$(sed 's/../\\x&/g' <<<"$value$digest")" | \
 				openssl dgst -sha256 -r | cut -d' ' -f1)"
 		measured=1

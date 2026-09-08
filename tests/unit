@@ -1,0 +1,391 @@
+#!/bin/bash
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: Copyright 2026 SUSE LLC
+#
+# Unit tests for the routing of the secrets: which source wins, what is
+# published to the kernel keyring, and which warnings are printed.
+#
+# These are decisions the tool takes *before* it writes anything to the
+# TPM2, so they do not need one, and they do not need a guest either: a
+# scratch LUKS2 container on a loop device answers `cryptsetup` and
+# `systemd-cryptenroll` exactly like a real root device does.  What
+# cannot be reached from here is everything about the pcrlock NVIndex
+# (authorizing with the old PIN, the "not needed, so not validated"
+# skip); that needs a real TPM2 and destroys the enrollment of the
+# machine it runs on, so it belongs to a guest and not to this file.
+#
+# `tests/run` drives the boot and FDE state of a whole guest and never
+# writes outside a copy of the ESP.  This one is the opposite: it writes
+# LUKS2 headers, but only the ones it made itself.
+#
+# Usage:
+#   tests/unit [-h]
+#
+# Needs root, for losetup and for the keyring.  The entries it uses are
+# the real ones -- the names are in the code -- so it refuses to start
+# when one of them is already there, rather than overwrite a secret that
+# an installer or an interrupted enrollment left behind.
+
+set -e
+shopt -s nullglob
+
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+top="$(dirname "$here")"
+
+# The password of the scratch container, and the credential that
+# authorizes every enrollment below
+BOOTSTRAP="bootstrap-password"
+
+# The keyring entries sdbootutil reads or writes.  Purged between cases
+# so that one cannot inherit what the one before it left
+KEYS=(cryptenroll sdbootutil sdbootutil-key sdbootutil-pw sdbootutil-pin
+      sdbootutil-recovery-pin sdbootutil-tpm2-pin)
+
+[ "${1:-}" != "-h" ] && [ "${1:-}" != "--help" ] || {
+	sed -n '4,26p' "${BASH_SOURCE[0]}" | sed 's/^# \?//'
+	exit 0
+}
+
+skip()
+{
+	echo "SKIP: $*"
+	exit 77
+}
+
+die()
+{
+	echo "ERROR: $*" >&2
+	exit 1
+}
+
+[ "$(id -u)" = 0 ] || skip "needs root for losetup and the keyring"
+for cmd in cryptsetup systemd-cryptenroll keyctl losetup jq; do
+	command -v "$cmd" > /dev/null || skip "$cmd is not installed"
+done
+for key in "${KEYS[@]}"; do
+	keyctl id %user:"$key" &> /dev/null && \
+		die "%user:$key is in the keyring. Purge it first: keyctl purge user $key"
+done
+
+# The library half of sdbootutil.  Everything below the marker is the
+# command dispatcher, which would run on source; everything above it is
+# definitions, and the marker is already there for the completion data
+lib=
+dev=
+workdir="$(mktemp -d -t sdbootutil-unit.XXXXXX)"
+
+cleanup_unit()
+{
+	[ -z "$dev" ] || losetup -d "$dev" 2> /dev/null || true
+	rm -rf "$workdir"
+	purge_keys
+}
+trap cleanup_unit EXIT
+
+purge_keys()
+{
+	local key
+	for key in "${KEYS[@]}"; do
+		keyctl purge user "$key" &> /dev/null || true
+	done
+}
+
+extract_lib()
+{
+	grep -q '^####### main #######$' "$top/sdbootutil" || \
+		die "the 'main' marker is gone from sdbootutil, nothing to source"
+	lib="$workdir/lib.sh"
+	sed '/^####### main #######$/,$d' "$top/sdbootutil" > "$lib"
+	# shellcheck source=/dev/null
+	( . "$lib" ) || die "the library half of sdbootutil does not source cleanly"
+}
+
+# A fresh LUKS2 header for every case, so that the slots of one do not
+# reach the next.  pbkdf2 with the lowest iteration count keeps a format
+# under a tenth of a second; nothing here measures key derivation
+format_device()
+{
+	cryptsetup luksFormat --type luks2 --batch-mode \
+		   --pbkdf pbkdf2 --pbkdf-force-iterations 1000 \
+		   "$dev" <<<"$BOOTSTRAP"
+}
+
+setup_device()
+{
+	truncate -s 32M "$workdir/luks.img"
+	dev="$(losetup --find --show "$workdir/luks.img")"
+}
+
+####### the assertions #######
+#
+# They report and continue, so that one case tells the whole story
+# instead of only its first mistake.  `case_failed` is a plain variable
+# because every case runs in its own subshell
+
+fail()
+{
+	echo "     $*"
+	case_failed=1
+}
+
+is()
+{
+	[ "$2" = "$3" ] || fail "$1: expected '$2', got '$3'"
+}
+
+says()
+{
+	case "$2" in
+		*"$3"*) ;;
+		*) fail "$1: '$3' was not said" ;;
+	esac
+}
+
+says_not()
+{
+	case "$2" in
+		*"$3"*) fail "$1: '$3' was said, and should not" ;;
+	esac
+}
+
+key_is()
+{
+	local id value=
+	if id="$(keyctl id %user:"$1" 2> /dev/null)"; then
+		value="$(keyctl pipe "$id")"
+	fi
+	is "keyring %user:$1" "$2" "$value"
+}
+
+no_key()
+{
+	! keyctl id %user:"$1" &> /dev/null || \
+		fail "keyring %user:$1 exists, and should not"
+}
+
+opens()
+{
+	cryptsetup luksOpen --test-passphrase --disable-external-tokens \
+		   "$dev" <<<"$1" &> /dev/null || \
+		fail "$2: the value does not open the device"
+}
+
+# Source the library with whatever the case put in the environment, and
+# take back the `set -e` that sdbootutil turns on: an assertion has to
+# be able to fail without ending the case
+load()
+{
+	# shellcheck source=/dev/null
+	. "$lib"
+	set +e
+}
+
+####### the cases #######
+#
+# get_device_password: every source of a *current* password, and the
+# rule that a candidate is validated before it is used
+
+t_gdp_current_pw()
+{
+	CURRENT_PW="$BOOTSTRAP" load
+
+	is "returned" "$BOOTSTRAP" "$(get_device_password "$dev")"
+	key_is cryptenroll "$BOOTSTRAP"
+}
+
+t_gdp_key()
+{
+	KEY="$BOOTSTRAP" load
+
+	is "returned" "$BOOTSTRAP" "$(get_device_password "$dev")"
+}
+
+t_gdp_pw()
+{
+	PW="$BOOTSTRAP" load
+
+	is "returned" "$BOOTSTRAP" "$(get_device_password "$dev")"
+}
+
+# The recovery PIN is the recovery key while the two are linked, so the
+# variable has to unlock exactly like its keyring twin below
+t_gdp_recovery_pin()
+{
+	RECOVERY_PIN="$BOOTSTRAP" load
+
+	is "returned" "$BOOTSTRAP" "$(get_device_password "$dev")"
+}
+
+t_gdp_keyring_recovery_pin()
+{
+	load
+	keyctl padd user sdbootutil-recovery-pin @u <<<"$BOOTSTRAP" > /dev/null
+
+	is "returned" "$BOOTSTRAP" "$(get_device_password "$dev")"
+}
+
+# %user:sdbootutil holds "any secret" and is deprecated as a name, but
+# not as a candidate: it is validated like the rest
+t_gdp_keyring_deprecated()
+{
+	load
+	keyctl padd user sdbootutil @u <<<"$BOOTSTRAP" > /dev/null
+
+	is "returned" "$BOOTSTRAP" "$(get_device_password "$dev")"
+}
+
+t_gdp_all_wrong()
+{
+	CURRENT_PW="wrong-1" KEY="wrong-2" PW="wrong-3" RECOVERY_PIN="wrong-4" load
+
+	is "returned" "" "$(get_device_password "$dev")"
+	# A wrong candidate must not displace a good entry, so nothing
+	# is written when nothing validated
+	no_key cryptenroll
+}
+
+t_gdp_wrong_then_valid()
+{
+	CURRENT_PW="wrong-1" KEY="$BOOTSTRAP" load
+
+	is "returned" "$BOOTSTRAP" "$(get_device_password "$dev")"
+	key_is cryptenroll "$BOOTSTRAP"
+}
+
+####### enroll_recovery_key: what is enrolled, and what is published
+####### as the recovery PIN
+
+t_erk_key_env()
+{
+	CURRENT_PW="$BOOTSTRAP" KEY="the-recovery-key" load
+
+	out="$(enroll_recovery_key "$dev" 2>&1)"
+
+	opens "the-recovery-key" "enrolled key"
+	# No PIN anywhere, so this key becomes one: a single secret
+	key_is sdbootutil-recovery-pin "the-recovery-key"
+	says_not "output" "$out" "are now different"
+}
+
+# Nothing was given: systemd-cryptenroll generates the key, it is
+# printed, and it is published as the recovery PIN too
+t_erk_generated()
+{
+	CURRENT_PW="$BOOTSTRAP" load
+
+	out="$(enroll_recovery_key "$dev" 2>&1)"
+
+	local key
+	key="$(sed -n 's/^Recovery key: //p' <<<"$out")"
+	[ -n "$key" ] || fail "output: no recovery key was printed"
+	opens "$key" "generated key"
+	key_is sdbootutil-recovery-pin "$key"
+}
+
+# A recovery PIN is presented and there is no recovery key yet, so the
+# key enrolled is the PIN: still one secret, and the entry that holds
+# the PIN is not rewritten
+t_erk_recovery_pin_env()
+{
+	CURRENT_PW="$BOOTSTRAP" RECOVERY_PIN="the-recovery-pin" load
+
+	out="$(enroll_recovery_key "$dev" 2>&1)"
+
+	opens "the-recovery-pin" "enrolled key"
+	says_not "output" "$out" "are now different"
+}
+
+# Both given and different: the key is enrolled, the PIN is left alone
+# (it cannot be replaced) and the divergence is reported
+t_erk_diverging()
+{
+	CURRENT_PW="$BOOTSTRAP" KEY="the-recovery-key" RECOVERY_PIN="the-recovery-pin" load
+
+	out="$(enroll_recovery_key "$dev" 2>&1)"
+
+	opens "the-recovery-key" "enrolled key"
+	says "output" "$out" "The recovery key and the recovery PIN are now different"
+	no_key sdbootutil-recovery-pin
+}
+
+# A PIN already seals an NVIndex and it is not reachable here, so this
+# key is not it.  Publishing it would name as the recovery PIN a value
+# that no policy update can use, and `status` would then report a PIN
+# that is not there (github issue 250).  The TPM2 slot is faked because
+# the answer must not depend on having a TPM2
+t_erk_unreachable_pin()
+{
+	CURRENT_PW="$BOOTSTRAP" KEY="the-recovery-key" load
+
+	# Called by enroll_recovery_key, from the sourced library
+	# shellcheck disable=SC2329
+	have_slot()
+	{
+		[ "$2" = "tpm2" ] && return 0
+		grep -q "$2" < <(systemd-cryptenroll "$1")
+	}
+
+	out="$(enroll_recovery_key "$dev" 2>&1)"
+
+	opens "the-recovery-key" "enrolled key"
+	says "output" "$out" "There is already a recovery PIN for the TPM2"
+	says "output" "$out" "The recovery key and the recovery PIN are now different"
+	no_key sdbootutil-recovery-pin
+}
+
+####### the runner #######
+
+run_case()
+{
+	local fn="$1"; shift
+	local desc="$*"
+	local rc=0
+
+	purge_keys
+	format_device
+
+	# The case runs apart: it sources the library, it defines
+	# secrets in its environment and it can replace a function
+	( set +e; case_failed=; "$fn"; [ -z "$case_failed" ] ) || rc=$?
+
+	total=$((total + 1))
+	if [ "$rc" = 0 ]; then
+		echo "ok   $desc"
+	else
+		failed=$((failed + 1))
+		echo "FAIL $desc"
+	fi
+}
+
+extract_lib
+setup_device
+
+total=0
+failed=0
+
+while read -r fn desc; do
+	[ -n "$fn" ] || continue
+	run_case "$fn" "$desc"
+done <<-'EOF'
+	t_gdp_current_pw            get_device_password takes CURRENT_PW
+	t_gdp_key                   get_device_password takes KEY
+	t_gdp_pw                    get_device_password takes PW
+	t_gdp_recovery_pin          get_device_password takes RECOVERY_PIN
+	t_gdp_keyring_recovery_pin  get_device_password takes %u:sdbootutil-recovery-pin
+	t_gdp_keyring_deprecated    get_device_password takes the deprecated %u:sdbootutil
+	t_gdp_all_wrong             get_device_password writes nothing when no candidate is valid
+	t_gdp_wrong_then_valid      get_device_password skips a wrong candidate and keeps looking
+	t_erk_key_env               enroll_recovery_key enrolls KEY and publishes it as the recovery PIN
+	t_erk_generated             enroll_recovery_key prints the generated key and publishes it
+	t_erk_recovery_pin_env      enroll_recovery_key enrolls the presented recovery PIN as the key
+	t_erk_diverging             enroll_recovery_key reports a key that differs from the PIN
+	t_erk_unreachable_pin       enroll_recovery_key publishes nothing when a PIN it cannot reach exists
+EOF
+
+echo
+if [ "$failed" = 0 ]; then
+	echo "$total cases, all passed"
+else
+	echo "$total cases, $failed failed"
+	exit 1
+fi
