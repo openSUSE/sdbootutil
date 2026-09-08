@@ -168,12 +168,23 @@ create_snapshot()
 	[ "$path" = "/" ] || return 0
 	[ "$fs" = btrfs ] || return 1
 
-	/usr/bin/sdbootutil update --disable-predictions "$num"
-
 	# If we are in a transactional system we abort here.  The
 	# kernel entries are added later via set_default_snapshot,
 	# when tukit set via snapper the new snapshot as complete
 	is_transactional && return 0
+
+	# `update` is deliberately not given "$num".  Unlike the kernel
+	# entries below, everything it writes is shared by every snapshot
+	# (the bootloader, the shim, and the extra entries that packages
+	# drop in /usr/lib/sdbootutil/entries.d), so it has to reflect the
+	# snapshot that boots, never the one that is merely being created.
+	# A "pre" snapshot does not have the packages that the transaction
+	# is about to install, so reconciling the ESP against it deletes
+	# their files -- restored only by the "post" snapshot, and not at
+	# all if the transaction fails in between.  With no argument the
+	# running root is used, which is what the rpm file trigger does
+	# too, and it is already the correct answer at both events
+	/usr/bin/sdbootutil update --disable-predictions
 
 	# The entries are added here only for Tumbleweed
 	# (non-transactional systems)

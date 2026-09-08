@@ -17,6 +17,43 @@
 
 
 %global rustflags '-Clink-arg=-Wl,-z,relro,-z,now'
+
+# Body shared by the file triggers below.  `sdbootutil update` is the
+# one command that reconciles the ESP with the system: the bootloader,
+# the shim and the extra entries that other packages drop in
+# `entries.d`.  It is asked here for all of them, because the answer
+# to "did any of them change" is the same command.
+#
+# The `--disable-predictions` marker is set by the snapper plugin,
+# which already scheduled a deferred update-predictions for this
+# transaction.  The plugin sets it in the pre snapshot, so it is here
+# before this trigger runs, and the deferred service runs after the
+# post snapshot, once the entries that this trigger does not touch are
+# in place.  Updating the predictions here too builds the pcrlock
+# policy and rewrites the TPM2 NVIndex a second time, inside the rpm
+# transaction, and that first policy is discarded by the deferred run
+# seconds later.
+#
+# Without the snapper plugin there is no marker and no deferral, so
+# the trigger stays the only chance to update the predictions
+%global sdbootutil_update_trigger()					\
+cat > /dev/null || :							\
+[ "$YAST_IS_RUNNING" != 'instsys' ] || exit 0				\
+[ -e /sys/firmware/efi/efivars ] || exit 0				\
+[ -z "$TRANSACTIONAL_UPDATE" ] || exit 0				\
+[ -z "$VERBOSE_FILETRIGGERS" ] || echo "%{name}-%{version}-%{release}: updating bootloader" \
+predictions=								\
+[ ! -e /run/sdbootutil/update-predictions ] || predictions=--disable-predictions \
+if [ -e /etc/sysconfig/bootloader ]; then				\
+	. /etc/sysconfig/bootloader &> /dev/null			\
+	if [ "$LOADER_TYPE" = "grub2-bls" ] || [ "$LOADER_TYPE" = "systemd-boot" ]; then \
+		sdbootutil update $predictions				\
+	fi								\
+else									\
+	sdbootutil update $predictions					\
+fi									\
+%{nil}
+
 Name:           sdbootutil
 Version:        0
 Release:        0
@@ -200,33 +237,24 @@ install -Dpm 0644 kernel-install-%{name}.conf %{buildroot}%{_tmpfilesdir}/kernel
 # present, as sdbootutil is called for enrollment
 install -d -m 700 %{buildroot}%{_sharedstatedir}/%{name}
 
-%transfiletriggerin -- %{_prefix}/lib/systemd/boot/efi %{_datadir}/grub2/%{_build_arch}-efi %{_datadir}/efi/%{_build_arch}
-cat > /dev/null || :
-[ "$YAST_IS_RUNNING" != 'instsys' ] || exit 0
-[ -e /sys/firmware/efi/efivars ] || exit 0
-[ -z "$TRANSACTIONAL_UPDATE" ] || exit 0
-[ -z "$VERBOSE_FILETRIGGERS" ] || echo "%{name}-%{version}-%{release}: updating bootloader"
-# The marker is set by the snapper plugin, that already scheduled a
-# deferred update-predictions for this transaction.  The plugin sets
-# it in the pre snapshot, so it is here before this trigger runs, and
-# the deferred service runs after the post snapshot, once the entries
-# that this trigger does not touch are in place.  Updating the
-# predictions here too builds the pcrlock policy and rewrites the TPM2
-# NVIndex a second time, inside the rpm transaction, and that first
-# policy is discarded by the deferred run seconds later.
-#
-# Without the snapper plugin there is no marker and no deferral, so
-# this trigger stays the only chance to update the predictions
-predictions=
-[ ! -e /run/sdbootutil/update-predictions ] || predictions=--disable-predictions
-if [ -e /etc/sysconfig/bootloader ]; then
-	. /etc/sysconfig/bootloader &> /dev/null
-	if [ "$LOADER_TYPE" = "grub2-bls" ] || [ "$LOADER_TYPE" = "systemd-boot" ]; then
-		sdbootutil update $predictions
-	fi
-else
-	sdbootutil update $predictions
-fi
+# Drop-in point for the extra boot entries of other packages.  It is
+# owned here, and not only by whoever drops a file in it, because it
+# is the interface and because the file trigger below watches it
+install -d -m 755 %{buildroot}%{_prefix}/lib/%{name}/entries.d
+
+%transfiletriggerin -- %{_prefix}/lib/systemd/boot/efi %{_datadir}/grub2/%{_build_arch}-efi %{_datadir}/efi/%{_build_arch} %{_prefix}/lib/%{name}/entries.d
+%sdbootutil_update_trigger
+
+# An extra entry is removed by the same `sdbootutil update` that adds
+# it: `install_extra_entries` deletes the ESP binary and the loader
+# entry of every `entries.d` file that is no longer there.  Nothing
+# else would notice the removal, so without this trigger the menu
+# keeps offering an entry whose package is gone.  The bootloader
+# directories are deliberately not watched here: a bootloader is
+# removed only to install another one, and that installation fires the
+# trigger above
+%transfiletriggerpostun -- %{_prefix}/lib/%{name}/entries.d
+%sdbootutil_update_trigger
 
 %preun
 %service_del_preun %{name}-update-predictions.service
@@ -273,6 +301,8 @@ fi
 %{_tmpfilesdir}/%{name}.conf
 %dir %{_libexecdir}/%{name}
 %{_libexecdir}/%{name}/uhmac
+%dir %{_prefix}/lib/%{name}
+%dir %{_prefix}/lib/%{name}/entries.d
 
 %files snapper
 %dir %{_prefix}/lib/snapper
