@@ -352,13 +352,14 @@ helpandquit()
 		           Install the bootloader and shim into ESP
 
 		needs-update
-		           Check whether the bootloader in ESP needs updating
+		           Check whether the bootloader or the shim in ESP needs
+		           updating
 
 		update
-		           Update the bootloader in the ESP if a newer version
-		           is available. Passing the --sync option will also
-		           allow downgrades, ensuring that the version in the ESP
-		           matches the one installed in the system.
+		           Update the bootloader and the shim in the ESP if a
+		           newer version is available. Passing the --sync option
+		           will also allow downgrades, ensuring that the version
+		           in the ESP matches the one installed in the system.
 
 		force-update
 		           Update the bootloader in any case
@@ -2578,6 +2579,35 @@ is_bootable()
 	return 0
 }
 
+shim_version()
+{
+	local fn="$1"
+	if [ -z "$1" ]; then
+		is_shim_installed || return 1
+		if [ -n "$arg_portable" ]; then
+			fn="${esp_root}/EFI/BOOT/BOOT${firmware_arch^^}.EFI"
+		else
+			fn="${esp_root}${esp_dst}/shim.efi"
+		fi
+	fi
+	[ -e "$fn" ] || return 1
+
+	# Useless as it reports mayor.minor, so append the last update
+	# time until the minutes, as the FAT store dates differently
+	# than other filesystems
+	local v
+	# The leading `$` is a literal, and grep only reads it as one
+	# when it is escaped
+	# shellcheck disable=SC2016
+	read -r _ v _ < <(grep -ao '\$Version: [^$]\+ \$' "$fn")
+	[ -n "$v" ] || return 1
+	v="$v-$(date -r "$fn" +'%Y%m%d%H%M')"
+
+	dbg "Shim version $v"
+
+	echo "$v"
+}
+
 bootloader_version()
 {
 	local fn="$1"
@@ -2613,6 +2643,13 @@ is_installed()
 {
 	info "Checking if the bootloader is installed"
 	bootloader_version > /dev/null && [ -e "${esp_root}/${esp_dst}/installed_by_sdbootutil" ]
+}
+
+find_shim()
+{
+	local prefix=""
+	[ -z "$have_snapshots" ] || prefix="/.snapshots/${1-$root_snapshot}/snapshot"
+	echo "$prefix$shimdir/shim.efi"
 }
 
 find_sdboot()
@@ -2664,6 +2701,38 @@ find_bootloader()
 	fi
 }
 
+shim_needs_update()
+{
+	local snapshot=""
+	[ -z "$have_snapshots" ] || snapshot="${1-$root_snapshot}"
+
+	info "Checking if shim needs update"
+
+	local v nv
+	# The status of the next commands is checked below, so it must
+	# be collected in the same line: `set -e` would end the script
+	# before the check, and without any message
+	v="$(shim_version)" || :
+	[ -n "$v" ] || return 1
+	info "Deployed shim version $v"
+	nv="$(shim_version "$(find_shim "$snapshot")")" || :
+	[ -n "$nv" ] || return 1
+	info "System shim version $nv"
+	local status=0
+	# Only the exit status is wanted here, for the same reason as in
+	# `bootloader_needs_update`
+	systemd-analyze compare-versions "$v" "$nv" > /dev/null 2>&1 || status="$?"
+	if [ "$status" = "11" ]; then
+		info "shim is newer than system shim"
+		return 2
+	elif [ "$status" = "12" ]; then
+		info "shim needs to be updated"
+		return 0
+	fi
+	info "shim is already up-to-date"
+	return 1
+}
+
 bootloader_needs_update()
 {
 	local prefix=""
@@ -2693,15 +2762,25 @@ bootloader_needs_update()
 	# rpm scriptlet output, where the bare line explains nothing
 	systemd-analyze compare-versions "$v" "$nv" > /dev/null 2>&1 || status="$?"
 	bldr_name=$(bootloader_name "$snapshot")
-	if [ "$status" = "11" ]; then
-		info "$bldr_name is newer than system bootloader"
-		return 2
-	elif [ "$status" = "12" ]; then
+	if [ "$status" = "12" ]; then
 		info "$bldr_name needs to be updated"
 		return 0
 	fi
+
+	# `install_bootloader` deploys shim and the bootloader together, so
+	# a new shim alone is already a reason to run it.  It is asked here
+	# and not by the caller because both are the one question, "is what
+	# the ESP boots the one the system has"
+	local shim_status=0
+	shim_needs_update "$snapshot" || shim_status=$?
+	[ "$shim_status" != "0" ] || return 0
+
+	if [ "$status" = "11" ]; then
+		info "$bldr_name is newer than system bootloader"
+		return 2
+	fi
 	info "$bldr_name is already up-to-date"
-	return 1
+	return "$shim_status"
 }
 
 esp_root_drive_partno_dseq()
