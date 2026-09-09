@@ -61,6 +61,7 @@ The scenarios, roughly in order of how much of the tool they touch:
 | `update-all-entries` | editing an entry in place is not a silent no-op, and is deterministic |
 | `boot-counter` | a `+N` counter is kept, and does not hide the entry from removal |
 | `repair-entry` | `cleanup --repair` restores the file and keeps a hand-edited command line |
+| `set-default` | the default entry is written where the same loader reads it back |
 
 ### What it reports today
 
