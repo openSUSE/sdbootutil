@@ -2263,8 +2263,7 @@ list_entries()
 	# "LoaderEntrySelected", but grub2-bls writes the variable without
 	# the ".conf" suffix, so nothing matches there and "isSelected" is
 	# always null.  Read the variable to compare it here too, both
-	# spellings, until grub2-bls is fixed.  Note that the value is
-	# lower-cased by `bli_efi_var_get`
+	# spellings, until grub2-bls is fixed
 	local selected=
 	[ -z "$interactive" ] || selected="$(bli_efi_var_get "LoaderEntrySelected")"
 
@@ -2283,8 +2282,8 @@ list_entries()
 		marker=
 		if [ -n "$interactive" ]; then
 			booted=
-			if [ "$isselected" = "true" ] || [ "${id,,}" = "$selected" ] \
-			    || [ "${id,,}" = "$selected.conf" ]; then
+			if [ "$isselected" = "true" ] || [ "$id" = "$selected" ] \
+			    || [ "$id" = "$selected.conf" ]; then
 				booted=1
 			fi
 			if [ "$isdefault" = "true" ]; then
@@ -3074,7 +3073,8 @@ bli_efi_var_get()
 {
 	# BLI uses this vendor UUID
 	local efi_var="/sys/firmware/efi/efivars/${1:?}-4a67b082-0a4c-41cf-b6c7-440b29bb8c4f"
-	[ ! -e "$efi_var" ] || dd "if=$efi_var" bs=2 skip=2 conv=lcase status=none | tr -d '\0'
+	# 4 bytes of attributes, then the value as UTF-16LE
+	[ ! -e "$efi_var" ] || dd "if=$efi_var" bs=2 skip=2 status=none | tr -d '\0'
 }
 
 bli_efi_var_set()
@@ -3300,17 +3300,12 @@ default_entry_snapshot()
 # The snapshot that an entry describes, read from the entry list in
 # stdin.  Empty when the entry is not in the list or describes no
 # snapshot
-#
-# The ID is matched case insensitively: when it comes from
-# "LoaderEntryDefault" it has been through `bli_efi_var_get`, which
-# lower-cases what it reads, and an entry token is not always lower
-# case (same workaround as in "list_entries")
 entry_snapshot()
 {
 	local id="${1:?}"
 
 	jq -r --arg id "$id" '.[]
-		| select((.id | ascii_downcase) == ($id | ascii_downcase))
+		| select(.id == $id)
 		| ((.options // "") | capture("rootflags=subvol=[^ ]*/\\.snapshots/(?<n>[0-9]+)/snapshot") | .n)
 		  // ((.version // "") | capture("^(?<n>[0-9]+)@") | .n)
 		  // empty'
@@ -7245,15 +7240,14 @@ status_boot()
 	# `bootctl` builds "isSelected" by matching the entry ID against
 	# "LoaderEntrySelected", but grub2-bls writes the variable without
 	# the ".conf" suffix, so nothing matches there and "isSelected" is
-	# always null.  Compare both spellings against the variable, which
-	# `bli_efi_var_get` returns lower-cased (same workaround as in
-	# "list_entries")
+	# always null.  Compare both spellings against the variable (same
+	# workaround as in "list_entries")
 	local selected="" booted=""
 	selected="$(bli_efi_var_get "LoaderEntrySelected" 2> /dev/null)" || selected=""
 	booted="$(jq -r --arg s "$selected" \
 		     'first(.[] | select(.isSelected == true
-					 or (.id | ascii_downcase) == $s
-					 or (.id | ascii_downcase) == ($s + ".conf"))
+					 or .id == $s
+					 or .id == ($s + ".conf"))
 			   | .id) // empty' <<<"$entries")"
 	# No entry claims it, so report the raw variable: on a machine
 	# that booted something the ESP no longer offers, the name is the
