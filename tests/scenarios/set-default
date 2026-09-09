@@ -1,0 +1,33 @@
+#!/bin/bash
+# scenario: set-default
+# Set the default boot entry and read it back
+#
+# The default is written to a different place on each loader --
+# loader.conf for systemd-boot, grubenv for grub2-bls -- and the reader
+# has to look in the same one. It fails silently: the write lands
+# somewhere nothing reads, get-default keeps answering with bootctl's
+# guess, and the machine boots the entry it booted before.
+#
+# --no-variables is what puts the on-disk path under test, and is also
+# what keeps this out of the real EFI variables.
+sdb()
+{
+	"$SDBOOTUTIL" --esp-path "$ESP" --no-variables --disable-predictions "$@"
+}
+
+# Prefer an entry that is not the default already, so that the write has
+# something to change
+target="$(bootctl list --json=short | jq -r \
+	'first(.[] | select(.type == "type1" and .isDefault != true) | .id)')"
+[ "$target" != "null" ] || target="$(bootctl list --json=short | jq -r \
+	'first(.[] | select(.type == "type1") | .id)')"
+[ -n "$target" ] && [ "$target" != "null" ] || exit 77
+
+sdb set-default "$target"
+
+got="$(sdb get-default)"
+[ "$got" = "$target" ] || {
+	echo "get-default returned '$got', expected '$target'"
+	exit 1
+}
+echo "default round trip: $target"

@@ -3096,7 +3096,8 @@ loader_conf_set()
 	[ -e "${esp_root}/loader/loader.conf" ] || touch "${esp_root}/loader/loader.conf"
 
 	if grep -q "^$key " "${esp_root}/loader/loader.conf"; then
-		sed -i -e "s/^$key .*/$key $value/" "${esp_root}/loader/loader.conf"
+		# "|" as the delimiter, as a value can contain a path
+		sed -i -e "s|^$key .*|$key $value|" "${esp_root}/loader/loader.conf"
 	else
 		echo "$key $value" >> "${esp_root}/loader/loader.conf"
 	fi
