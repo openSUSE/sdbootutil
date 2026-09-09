@@ -4633,14 +4633,6 @@ recovery_pin_sources()
 	echo "$keyring:$environment"
 }
 
-# A policy that binds PCRs and has no recovery PIN outside the TPM2 is
-# one firmware, kernel or boot loader change away from being
-# unrecoverable: the sealed PIN is then the only credential left, it can
-# no longer be unsealed, and it cannot be replaced either, because
-# `make-policy` authorizes the new NVIndex with the *old* PIN.  So the
-# warning belongs here, right after a policy update, and not only in
-# `status`: this runs on every kernel and boot loader update, while
-# nobody runs `status` before hitting the dead end (github issue 250)
 # The enrolled TPM2 method, for the commands the warnings below tell
 # the user to run.  `unenroll` cannot tell "tpm2" from "tpm2+pin" (both
 # wipe the same slot), but `enroll` can: only the second one passes
@@ -4667,16 +4659,32 @@ enrolled_tpm2_method()
 	echo "tpm2"
 }
 
+# A PIN that cannot be read here is the normal state, not a problem:
+# `systemd-pcrlock` always seals one in the policy metadata, the keyring
+# copy lives $keyctl_timeout seconds and never survives a reboot, and
+# from then on the sealed one is unsealed without help on every update,
+# because the PCRs still satisfy the policy that sealed it.
+#
+# What is a dead end is that unseal failing: a bound PCR that moved out
+# of the alternatives the policy accepts locks the NVIndex, and without
+# a reachable PIN every `update-predictions` from then on fails the same
+# way (github issue 250).  So both halves have to hold before saying
+# anything, and the pair is checked here, and not only in `status`,
+# because this runs on every kernel and boot loader update while nobody
+# runs `status` before hitting it.  Right after a policy was written the
+# PCRs match by construction, so in practice this is the "Policy is up
+# to date" return, the one path where nothing authorizes the NVIndex and
+# a stale PCR would otherwise stay unreported until the next change
 warn_no_recovery_pin()
 {
 	[ "$(recovery_pin_sources)" = ":" ] || return 0
-	jq -e '(.pcrValues|length) > 0' < /var/lib/systemd/pcrlock.json \
-	   > /dev/null 2>&1 || return 0
 
-	local m
-	m="$(enrolled_tpm2_method)"
-	warn "No recovery PIN is reachable here. If none was recorded it cannot be recovered nor replaced, and the next firmware, kernel or boot loader change leaves this policy unrecoverable"
-	warn "To set one you can keep: 'sdbootutil unenroll --method=$m' then 'sdbootutil enroll --method=$m --ask-recovery-pin'"
+	local stale
+	stale="$(policy_stale_pcrs)"
+	[ -n "$stale" ] || return 0
+
+	warn "PCR $stale no longer match the policy, and no recovery PIN is reachable, so every 'update-predictions' from now on fails the same way"
+	explain_pcrlock_recovery "$stale"
 }
 
 # What the PCRs that moved measure, and the two ways out.  Both ways
