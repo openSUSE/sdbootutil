@@ -16,12 +16,15 @@ sdb()
 }
 
 # Prefer an entry that is not the default already, so that the write has
-# something to change
-target="$(bootctl list --json=short | jq -r \
-	'first(.[] | select(.type == "type1" and .isDefault != true) | .id)')"
-[ "$target" != "null" ] || target="$(bootctl list --json=short | jq -r \
-	'first(.[] | select(.type == "type1") | .id)')"
-[ -n "$target" ] && [ "$target" != "null" ] || exit 77
+# something to change, and settle for the only one there is otherwise.
+# `first` over an empty stream prints nothing rather than "null", so the
+# preference has to be expressed inside jq: a guard out here would read
+# the empty output as an answer and skip the guest
+target="$(bootctl list --json=short | jq -r '
+	[.[] | select(.type == "type1")] as $entries
+	| (first($entries[] | select(.isDefault != true))
+	   // first($entries[]) // empty) | .id')"
+[ -n "$target" ] || exit 77
 
 sdb set-default "$target"
 
