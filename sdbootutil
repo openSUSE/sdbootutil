@@ -1012,6 +1012,24 @@ entry_conf_file()
 	echo "${prefix:+$prefix-}$entry_token-$kernel_version${snapshot:+-$snapshot}${tries:++$tries}.conf"
 }
 
+# An entry name reduced to what identifies it, so that a name from
+# `bootctl` and one from a boot loader can be compared.
+#
+# `bootctl` reports the ID with its ".conf" suffix and without the boot
+# counter that "entry_conf_file" puts in the file name.  grub2-bls
+# writes "LoaderEntrySelected" the other way around: no suffix, and the
+# counter still there, because it records the name before
+# "systemd-bless-boot" renames the file
+entry_key()
+{
+	# "+3" until the loader counts a boot, "+2-1" afterwards
+	local name="${1%.conf}"
+
+	[[ ! "$name" =~ ^(.+)\+[0-9]+(-[0-9]+)?$ ]] || name="${BASH_REMATCH[1]}"
+
+	echo "$name"
+}
+
 find_conf_file()
 {
 	local kernel_version="${1:?}"
@@ -2260,12 +2278,12 @@ list_entries()
 	fi
 
 	# `bootctl` builds "isSelected" by matching the entry ID against
-	# "LoaderEntrySelected", but grub2-bls writes the variable without
-	# the ".conf" suffix, so nothing matches there and "isSelected" is
-	# always null.  Read the variable to compare it here too, both
-	# spellings, until grub2-bls is fixed
+	# "LoaderEntrySelected", but grub2-bls spells the variable
+	# differently and nothing matches there, so "isSelected" is always
+	# null.  Compare it here too, through "entry_key", until grub2-bls
+	# is fixed
 	local selected=
-	[ -z "$interactive" ] || selected="$(bli_efi_var_get "LoaderEntrySelected")"
+	[ -z "$interactive" ] || selected="$(entry_key "$(bli_efi_var_get "LoaderEntrySelected")")"
 
 	local isdefault isselected isreported type id root conf title marker booted
 	while read -r isdefault isselected isreported type id root conf title; do
@@ -2282,8 +2300,7 @@ list_entries()
 		marker=
 		if [ -n "$interactive" ]; then
 			booted=
-			if [ "$isselected" = "true" ] || [ "$id" = "$selected" ] \
-			    || [ "$id" = "$selected.conf" ]; then
+			if [ "$isselected" = "true" ] || [ "${id%.conf}" = "$selected" ]; then
 				booted=1
 			fi
 			if [ "$isdefault" = "true" ]; then
@@ -7238,16 +7255,16 @@ status_boot()
 	[ -n "$entries" ] || entries="[]"
 
 	# `bootctl` builds "isSelected" by matching the entry ID against
-	# "LoaderEntrySelected", but grub2-bls writes the variable without
-	# the ".conf" suffix, so nothing matches there and "isSelected" is
-	# always null.  Compare both spellings against the variable (same
-	# workaround as in "list_entries")
-	local selected="" booted=""
+	# "LoaderEntrySelected", but grub2-bls spells the variable
+	# differently and nothing matches there, so "isSelected" is always
+	# null.  Compare it here too, through "entry_key" (same workaround
+	# as in "list_entries")
+	local selected="" key="" booted=""
 	selected="$(bli_efi_var_get "LoaderEntrySelected" 2> /dev/null)" || selected=""
-	booted="$(jq -r --arg s "$selected" \
+	key="$(entry_key "$selected")"
+	booted="$(jq -r --arg k "$key" \
 		     'first(.[] | select(.isSelected == true
-					 or .id == $s
-					 or .id == ($s + ".conf"))
+					 or (.id | sub("\\.conf$"; "")) == $k)
 			   | .id) // empty' <<<"$entries")"
 	# No entry claims it, so report the raw variable: on a machine
 	# that booted something the ESP no longer offers, the name is the
