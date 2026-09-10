@@ -3,9 +3,9 @@
 # SPDX-FileCopyrightText: Copyright 2026 SUSE LLC
 #
 # Unit tests for the library half of sdbootutil: the routing of the
-# secrets -- which source wins, what is published to the kernel keyring,
-# and which warnings are printed -- the entry names that the boot loaders
-# spell differently, and the versions that the status report compares.
+# secrets -- which source wins, what is published to the keyring, and
+# which warnings are printed -- the entry names the boot loaders spell
+# differently, the versions the status report compares, and `grubenv`.
 #
 # These are decisions the tool takes *before* it writes anything to the
 # TPM2, so they do not need one, and they do not need a guest either: a
@@ -427,6 +427,41 @@ t_svr_no_system()
 	     "the version of the system cannot be read"
 }
 
+# grubenv_set: GRUB2 reads a block of exactly 1024 bytes, so the size is
+# the whole of what the padding has to get right
+
+t_grubenv_size()
+{
+	load
+	# shellcheck disable=SC2034  # both are read by the sourced library
+	esp_root="$workdir" esp_dst=""
+
+	grubenv_set default opensuse-tumbleweed-7.2.3-1-default-10
+	is "size" 1024 "$(stat -c %s "$workdir/grubenv")"
+
+	grubenv_set timeout 5
+	is "size after a second key" 1024 "$(stat -c %s "$workdir/grubenv")"
+
+	is "default" opensuse-tumbleweed-7.2.3-1-default-10 "$(grubenv_get default)"
+	is "timeout" 5 "$(grubenv_get timeout)"
+}
+
+# A block whose variables already fill it needs no padding at all, and
+# that is where one byte used to be written anyway
+t_grubenv_full()
+{
+	load
+	# shellcheck disable=SC2034  # both are read by the sourced library
+	esp_root="$workdir" esp_dst=""
+
+	# 25 bytes of header, and a "default=" line that takes the rest
+	printf '%s\n' "# GRUB Environment Block" > "$workdir/grubenv"
+	printf 'default=%s\n' "$(printf '%*s' 990 "" | tr ' ' x)" >> "$workdir/grubenv"
+
+	grubenv_set default "$(printf '%*s' 990 "" | tr ' ' y)"
+	is "size" 1024 "$(stat -c %s "$workdir/grubenv")"
+}
+
 ####### the runner #######
 
 run_case()
@@ -484,6 +519,8 @@ done <<-'EOF'
 	t_svr_newer                 status_version_row reports a version newer than the one of the system
 	t_svr_shim_mtime            status_version_row compares the shim by its modification time
 	t_svr_no_system             status_version_row reports a system version that cannot be read
+	t_grubenv_size              grubenv_set writes a block of exactly 1024 bytes
+	t_grubenv_full              grubenv_set does not pad a block that is already full
 EOF
 
 echo

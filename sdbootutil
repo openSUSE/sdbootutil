@@ -3145,9 +3145,15 @@ grubenv_set()
 	done < "${esp_root}${esp_dst}/grubenv"
 	echo "$key=$value" >> "$grubenv"
 
+	# GRUB2 reads a block of exactly 1024 bytes, and what is not a
+	# variable is padding.  One `printf` for the whole padding: the
+	# old `seq 1 $filler` loop printed nothing for a full block, and
+	# `printf` writes its format once when it has no arguments, so a
+	# block that was already full got a 1025th byte
 	local filler
 	filler=$((1024 - $(stat -c %s "$grubenv")))
-	printf '#%.0s' $(seq 1 $filler) >> "$grubenv"
+	[ "$filler" -ge 0 ] || err "grubenv has no room left for $key"
+	printf '%*s' "$filler" "" | tr ' ' '#' >> "$grubenv"
 
 	mv "$grubenv" "${esp_root}${esp_dst}/grubenv"
 }
