@@ -4,8 +4,8 @@
 #
 # Unit tests for the library half of sdbootutil: the routing of the
 # secrets -- which source wins, what is published to the kernel keyring,
-# and which warnings are printed -- and the entry names that the boot
-# loaders spell differently.
+# and which warnings are printed -- the entry names that the boot loaders
+# spell differently, and the versions that the status report compares.
 #
 # These are decisions the tool takes *before* it writes anything to the
 # TPM2, so they do not need one, and they do not need a guest either: a
@@ -383,6 +383,50 @@ t_ek_not_a_counter()
 	is "nothing to reduce" "" "$(entry_key "")"
 }
 
+# status_version_row: the three answers that the report can give about a
+# binary in the ESP, the same ones that `bootloader_needs_update` gives
+
+t_svr_current()
+{
+	load
+
+	says "row" "$(status_version_row "In the ESP" 261.2 261.2)" "up to date (261.2)"
+}
+
+t_svr_outdated()
+{
+	load
+
+	says "row" "$(status_version_row "In the ESP" 258.4 261.2)" \
+	     "OUTDATED: 258.4 in the ESP, 261.2 in the system"
+}
+
+t_svr_newer()
+{
+	load
+
+	says "row" "$(status_version_row "In the ESP" 262 261.2)" \
+	     "262, newer than the 261.2 of the system"
+}
+
+# The shim reports a major.minor that does not change between builds, so
+# the modification time appended to it is what decides
+t_svr_shim_mtime()
+{
+	load
+
+	says "older" "$(status_version_row Shim 16.1-202506170714 16.1-202601011200)" "OUTDATED"
+	says "newer" "$(status_version_row Shim 16.1-202601011200 16.1-202506170714)" "newer than"
+}
+
+t_svr_no_system()
+{
+	load
+
+	says "row" "$(status_version_row Shim 16.1-202506170714 "")" \
+	     "the version of the system cannot be read"
+}
+
 ####### the runner #######
 
 run_case()
@@ -435,6 +479,11 @@ done <<-'EOF'
 	t_ek_counter                entry_key drops the boot counter
 	t_ek_counted_boot           entry_key drops a counter with the attempts done
 	t_ek_not_a_counter          entry_key keeps a "+" that is not a boot counter
+	t_svr_current               status_version_row reports a version that is the one of the system
+	t_svr_outdated              status_version_row reports a version older than the one of the system
+	t_svr_newer                 status_version_row reports a version newer than the one of the system
+	t_svr_shim_mtime            status_version_row compares the shim by its modification time
+	t_svr_no_system             status_version_row reports a system version that cannot be read
 EOF
 
 echo
