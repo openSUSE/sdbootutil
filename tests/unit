@@ -2,8 +2,10 @@
 # SPDX-License-Identifier: MIT
 # SPDX-FileCopyrightText: Copyright 2026 SUSE LLC
 #
-# Unit tests for the routing of the secrets: which source wins, what is
-# published to the kernel keyring, and which warnings are printed.
+# Unit tests for the library half of sdbootutil: the routing of the
+# secrets -- which source wins, what is published to the kernel keyring,
+# and which warnings are printed -- and the entry names that the boot
+# loaders spell differently.
 #
 # These are decisions the tool takes *before* it writes anything to the
 # TPM2, so they do not need one, and they do not need a guest either: a
@@ -40,6 +42,9 @@ BOOTSTRAP="bootstrap-password"
 # so that one cannot inherit what the one before it left
 KEYS=(cryptenroll sdbootutil sdbootutil-key sdbootutil-pw sdbootutil-pin
       sdbootutil-recovery-pin sdbootutil-tpm2-pin)
+
+# A boot entry ID as `bootctl` reports it, for the entry_key cases
+ENTRY="opensuse-microos-7.2.3-1-default-10"
 
 [ "${1:-}" != "-h" ] && [ "${1:-}" != "--help" ] || {
 	sed -n '4,26p' "${BASH_SOURCE[0]}" | sed 's/^# \?//'
@@ -333,6 +338,51 @@ t_erk_unreachable_pin()
 	no_key sdbootutil-recovery-pin
 }
 
+# entry_key: the spellings a boot loader can leave in
+# "LoaderEntrySelected", all reduced to the ID that `bootctl` reports.
+# systemd-boot writes that ID as it is; grub2-bls drops the ".conf"
+# suffix and keeps the boot counter, which it records before
+# "systemd-bless-boot" renames the file
+
+t_ek_systemd_boot()
+{
+	load
+
+	is "the ID itself" "$ENTRY" "$(entry_key "$ENTRY.conf")"
+}
+
+t_ek_no_suffix()
+{
+	load
+
+	is "no .conf suffix" "$ENTRY" "$(entry_key "$ENTRY")"
+}
+
+t_ek_counter()
+{
+	load
+
+	is "counter alone" "$ENTRY" "$(entry_key "$ENTRY+3")"
+	is "counter and suffix" "$ENTRY" "$(entry_key "$ENTRY+3.conf")"
+}
+
+t_ek_counted_boot()
+{
+	load
+
+	is "one attempt counted" "$ENTRY" "$(entry_key "$ENTRY+2-1")"
+}
+
+t_ek_not_a_counter()
+{
+	load
+
+	# Only "+" followed by digits is a counter, so an entry token
+	# that carries one keeps it
+	is "a + in the name" "my+entry-1" "$(entry_key "my+entry-1.conf")"
+	is "nothing to reduce" "" "$(entry_key "")"
+}
+
 ####### the runner #######
 
 run_case()
@@ -380,6 +430,11 @@ done <<-'EOF'
 	t_erk_recovery_pin_env      enroll_recovery_key enrolls the presented recovery PIN as the key
 	t_erk_diverging             enroll_recovery_key reports a key that differs from the PIN
 	t_erk_unreachable_pin       enroll_recovery_key publishes nothing when a PIN it cannot reach exists
+	t_ek_systemd_boot           entry_key takes the ID that systemd-boot writes
+	t_ek_no_suffix              entry_key takes the ID without the ".conf" suffix
+	t_ek_counter                entry_key drops the boot counter
+	t_ek_counted_boot           entry_key drops a counter with the attempts done
+	t_ek_not_a_counter          entry_key keeps a "+" that is not a boot counter
 EOF
 
 echo
