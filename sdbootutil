@@ -7214,6 +7214,28 @@ status_config()
 	EOF
 }
 
+# One row for a binary in the ESP against the one that the system ships,
+# decided the same way that `bootloader_needs_update` decides
+status_version_row()
+{
+	local label="$1" deployed="$2" system="$3"
+
+	if [ -z "$system" ]; then
+		status_row "$label" "$deployed, the version of the system cannot be read"
+		return
+	fi
+
+	# The comparison goes to stdout ("261.2 == 261.2"), and only the
+	# exit status is wanted here
+	local status=0
+	systemd-analyze compare-versions "$deployed" "$system" > /dev/null 2>&1 || status="$?"
+	case "$status" in
+		11) status_row "$label" "$deployed, newer than the $system of the system" ;;
+		12) status_row "$label" "OUTDATED: $deployed in the ESP, $system in the system" ;;
+		*)  status_row "$label" "up to date ($deployed)" ;;
+	esac
+}
+
 # What the machine booted, and what it will boot next
 status_boot()
 {
@@ -7233,18 +7255,19 @@ status_boot()
 
 	if [ -z "$deployed" ]; then
 		status_row "In the ESP" "no bootloader found in the ESP"
-	elif [ -z "$system" ]; then
-		status_row "In the ESP" "$deployed, the version of the system cannot be read"
 	else
-		# The comparison goes to stdout ("261.2 == 261.2"), and
-		# only the exit status is wanted here
-		local cmp=0
-		systemd-analyze compare-versions "$deployed" "$system" > /dev/null 2>&1 || cmp="$?"
-		case "$cmp" in
-			11) status_row "In the ESP" "$deployed, newer than the $system of the system" ;;
-			12) status_row "In the ESP" "OUTDATED: $deployed in the ESP, $system in the system" ;;
-			*)  status_row "In the ESP" "up to date ($deployed)" ;;
-		esac
+		status_version_row "In the ESP" "$deployed" "$system"
+	fi
+
+	# `install_bootloader` deploys the shim and the bootloader
+	# together, so a shim that is not the one of the system is also a
+	# reason to run it, the way `bootloader_needs_update` counts it.
+	# Without a shim in the ESP there is nothing to compare
+	local deployed_shim="" system_shim=""
+	deployed_shim="$(shim_version 2> /dev/null)" || deployed_shim=""
+	if [ -n "$deployed_shim" ]; then
+		system_shim="$(shim_version "$(find_shim)" 2> /dev/null)" || system_shim=""
+		status_version_row "Shim" "$deployed_shim" "$system_shim"
 	fi
 
 	# Its own copy of the entry list, and not "update_entries": that
