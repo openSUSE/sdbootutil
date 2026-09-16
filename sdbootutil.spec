@@ -151,6 +151,7 @@ Summary:        Bash completions for sdbootutil
 Requires:       %{name} = %{version}
 Requires:       bash
 Requires:       bash-completion
+Supplements:    (%{name} if bash-completion)
 BuildArch:      noarch
 
 %description bash-completion
