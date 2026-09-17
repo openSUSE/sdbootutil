@@ -3075,14 +3075,20 @@ hex_to_binary()
 	for ((i=0;i<${#s};i+=2)); do echo -ne "\x${s:$i:2}"; done
 }
 
+# `bootctl random-seed` hashes fresh entropy together with the seed
+# that is already in the ESP, it also writes the "LoaderSystemToken"
+# EFI variable.
 update_random_seed()
 {
 	[ -z "$arg_no_random_seed" ] || return 0
-	local s _p
-	read -r s _p < <({ dd if=/dev/urandom bs=32 count=1 status=none; [ -e "${esp_root}/loader/random-seed" ] && dd if="${esp_root}/loader/random-seed" bs=32 count=1 status=none; } | sha256sum)
-	[ "${#s}" = 64 ] || { warn "Invalid random seed"; return 0; }
-	hex_to_binary "$s" > "${esp_root}/loader/random-seed.new"
-	mv "${esp_root}/loader/random-seed.new" "${esp_root}/loader/random-seed"
+
+	local extra=()
+	[ -z "$arg_no_variables" ] && [ -z "$arg_portable" ] && mountpoint -q "$esp_root" || extra=("--no-variables")
+
+	local output
+	output="$(bootctl "${extra[@]}" random-seed 2>&1)" || \
+		warn "Failed to update the random seed${output:+: $output}"
+	return 0
 }
 
 has_efivars()
