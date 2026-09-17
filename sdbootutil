@@ -1363,8 +1363,7 @@ install_with_rollback()
 		mv "$old" "$old.bak" || return "$?"
 	fi
 	rollback+=("$old")
-	install -p -m 0644 "$src" "$dst" || return "$?"
-	chown root:root "$dst" 2> /dev/null || true
+	install -p -m 0644 -o root -g root "$src" "$dst" || return "$?"
 	info "Installed $dst"
 }
 
