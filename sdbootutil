@@ -5224,7 +5224,7 @@ generate_tpm2_predictions_pcrlock()
 		echo "Recovery PIN: $pin"
 		if [ -x /usr/bin/qrencode ]; then
 			echo "You can also scan it with your mobile phone:"
-			qrencode -t utf8i "$pin"
+			echo -n "$pin" | qrencode -t utf8i
 		fi
 
 		# Add the generated recovery PIN to the kernel
@@ -6235,7 +6235,7 @@ enroll_recovery_key()
 		echo "Recovery key: $key"
 		if [ -x /usr/bin/qrencode ]; then
 			echo "You can also scan it with your mobile phone:"
-			qrencode -t utf8i "$key"
+			echo -n "$key" | qrencode -t utf8i
 		fi
 	fi
 
