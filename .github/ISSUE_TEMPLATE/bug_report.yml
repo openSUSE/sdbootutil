@@ -121,7 +121,7 @@ body:
     attributes:
       label: Debug trace excerpts (sanitized)
       description: |
-        If you enabled the **opt‑in debug trace** (create `/var/log/sdbootutil.log` and set permissions to 600 before running), please paste only the **relevant, sanitized excerpts** here.
+        If you enabled the **opt‑in debug trace** (`sdbootutil --start-trace-code`, which creates `/var/log/sdbootutil.log` with mode 600), please paste only the **relevant, sanitized excerpts** here.
 
         ⚠️ **Privacy warning:** trace lines may include sensitive data (e.g. passwords typed as command arguments). **You must review and redact** any secrets before sharing. If in doubt, **omit** the trace and instead describe what you observed.
 
