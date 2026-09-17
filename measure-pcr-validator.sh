@@ -27,7 +27,8 @@ validate_measure_pcr() {
 	fi
 
 	local res=1
-	for sha in sha1 sha256 sha384 sha512; do
+	# Strongest bank first
+	for sha in sha512 sha384 sha256 sha1; do
 		[ -e "/sys/class/tpm/tpm0/pcr-$sha/15" ] || continue
 		read -r expected_pcr_15 < "/sys/class/tpm/tpm0/pcr-$sha/15"
 		grep -Fixq "$expected_pcr_15" /var/lib/sdbootutil/measure-pcr-prediction; res="$?"
