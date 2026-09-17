@@ -1483,38 +1483,36 @@ mount_chroot()
 	# We include the rootfs (the first line usually), as is needed
 	# to appear in the mounts under the chroot, allowing dracut to
 	# properly detect the fs type and load the relevant module.
-	findmnt -o TARGET,FSTYPE,FSROOT -Rv --pairs / > "$tmpdir/mounts"
+	findmnt -o TARGET,FSTYPE,FSROOT -Rv --json / > "$tmpdir/mounts"
 	mount --bind "$snapshot_dir" "$snapshot_dir"
 	# Register the chroot before mounting anything else, so a
 	# failure in the middle of the loop is unwound by `cleanup`
 	chroot_dir="$snapshot_dir"
-	while read -r line; do
-		eval "$line"
-		# shellcheck disable=SC2153
-		[ "$FSTYPE" = "btrfs" ] || [ "$FSTYPE" = "vfat" ] || [ "$FSTYPE" = "xfs" ] || [[ "$FSTYPE" == ext* ]] || continue
-		[ "$TARGET" != "/" ] || continue
-		[ "$TARGET" = "/etc" ] && [ "$FSTYPE" = "btrfs" ] && continue
-		[[ "$TARGET" != /.snapshots* ]] || continue
-		[[ "$TARGET" != /run/media/* ]] || continue
+	local target fstype fsroot
+	while IFS=$'\t' read -r target fstype fsroot; do
+		[ "$fstype" = "btrfs" ] || [ "$fstype" = "vfat" ] || [ "$fstype" = "xfs" ] || [[ "$fstype" == ext* ]] || continue
+		[ "$target" != "/" ] || continue
+		[ "$target" = "/etc" ] && [ "$fstype" = "btrfs" ] && continue
+		[[ "$target" != /.snapshots* ]] || continue
+		[[ "$target" != /run/media/* ]] || continue
 		# After a `transactional-update apply` the running
 		# system has /usr and /boot bind mounted from the new
 		# default snapshot.  Those belong to a different
 		# snapshot and must not shadow the ones that
 		# "$snapshot_dir" provides
-		# shellcheck disable=SC2153
-		[ -z "$(snapshot_from_fsroot "$FSROOT")" ] || continue
+		[ -z "$(snapshot_from_fsroot "$fsroot")" ] || continue
 		# Not every mount point of the running system is present
 		# in the snapshot.  For example the directory that
 		# `transactional-update` mounts under /tmp while a
 		# transaction is open, or any external media.  They are
 		# not needed to generate the initrd, and the snapshot can
 		# be read-only, so the directory cannot be created
-		if [ ! -d "$snapshot_dir$TARGET" ]; then
-			dbg "Skipping $TARGET, not present in $snapshot_dir"
+		if [ ! -d "$snapshot_dir$target" ]; then
+			dbg "Skipping $target, not present in $snapshot_dir"
 			continue
 		fi
-		mountpoint --quiet "$snapshot_dir$TARGET" || mount --bind "$TARGET" "$snapshot_dir$TARGET"
-	done < "$tmpdir/mounts"
+		mountpoint --quiet "$snapshot_dir$target" || mount --bind "$target" "$snapshot_dir$target"
+	done < <(jq -r '..|objects|select(has("target"))|[.target,.fstype,.fsroot]|@tsv' "$tmpdir/mounts")
 	rm "$tmpdir/mounts"
 
 	mount -t tmpfs -o size=10m tmpfs "$snapshot_dir/run"
