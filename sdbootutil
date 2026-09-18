@@ -6661,6 +6661,7 @@ status_policy_stale=
 status_tpm2_device=
 status_pin_reachable=
 status_dangling=
+status_pcr15_halt=
 
 # Whether "$status_dangling" holds this entry.  The names in it carry
 # the ".conf" that the boot loader interface variables leave out, so
@@ -7035,11 +7036,27 @@ status_pcr15()
 	fi
 	status_row "Enabled" "yes"
 
+	# The same three checks that `measure-pcr-validator` makes at
+	# boot, in the same order.  Any of them failing ends in
+	# `FailureAction=poweroff-immediate`, so this is not a detail of
+	# the report but the answer to "why did the machine power off"
+	if [ ! -e "$prediction" ]; then
+		status_pcr15_halt="there is no prediction file"
+	elif [ ! -e "$prediction.sha256" ]; then
+		status_pcr15_halt="the prediction is not signed"
+	elif ! openssl dgst -sha256 \
+			-verify /var/lib/sdbootutil/measure-pcr-public.pem \
+			-signature "$prediction.sha256" \
+			"$prediction" &> /dev/null; then
+		status_pcr15_halt="the signature of the prediction is not valid"
+	fi
+
 	if [ -n "$arg_full" ]; then
-		local present="MISSING" signed=", NOT SIGNED"
-		[ ! -e "$prediction" ] || present="present"
-		[ ! -e "$prediction.sha256" ] || signed=", signed"
-		status_row "Prediction" "$present$signed"
+		if [ -n "$status_pcr15_halt" ]; then
+			status_row "Prediction" "UNUSABLE, $status_pcr15_halt"
+		else
+			status_row "Prediction" "present, signed"
+		fi
 
 		if [ -e /var/lib/sdbootutil/measure-pcr-public.pem ]; then
 			status_row "Public key" "yes"
@@ -7487,6 +7504,16 @@ fde_status()
 			warn "  $id (${snapshot:+snapshot $snapshot, }$kernel_version) is missing $missing"
 		done <<<"$status_dangling"
 		warn "Run 'sdbootutil cleanup --repair' to write them again from the kernels that are still installed"
+	}
+
+	# The validator runs on every boot and powers the machine off
+	# when the prediction it needs is not usable.  Nothing else in
+	# the report says that the next boot does not finish, and the
+	# rows that carry the two halves of it are behind `--full`
+	[ -z "$status_pcr15_halt" ] || {
+		echo
+		warn "/etc/crypttab asks to measure PCR 15, but $status_pcr15_halt. 'measure-pcr-validator' powers the machine off at the next boot"
+		warn "Run 'sdbootutil update-predictions' to write it, or boot once with 'measure-pcr-validator.ignore=yes' in the cmdline"
 	}
 
 	# A policy with no device behind it is not an error, but it is
