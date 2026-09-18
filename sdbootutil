@@ -3566,6 +3566,22 @@ pcrlock()
 	return "$status"
 }
 
+# `systemd-pcrlock` refuses to generate a component when the event
+# log does not replay to the current value of one of the PCRs that
+# the component describes, and it checks all of them, not only the
+# ones that the policy is going to seal.  Two cases are routine:
+# PCR 7 when secure boot is disabled, and PCR 0 under a firmware
+# that does not log everything that it measures, like the vTPM of
+# VMware Workstation.  Neither is a reason to stop, as a PCR left
+# without a component is dropped by `predict` and reported by
+# `get_final_pcrs`
+pcrlock_lock()
+{
+	local err status=0
+	err="$(pcrlock "$@" 2>&1)" || status=$?
+	[ "$status" -eq 0 ] || dbg "No component for '$1': ${err:-exit $status}"
+}
+
 is_pcr_oracle()
 {
 	[ -e /etc/systemd/tpm2-pcr-public-key.pem ] && \
@@ -4436,6 +4452,10 @@ clean_pcrlock_d()
 
 get_predicted_hashes()
 {
+	# Nothing generated any component yet, which is a valid state
+	# and not a reason to print a `find` error
+	[ -d /var/lib/pcrlock.d ] || return 0
+
 	find /var/lib/pcrlock.d/ -name "*.pcrlock" -type f -exec jq -r '.records[].digests[] | select(.hashAlg == "sha256") | .digest' {} + | sort -u
 }
 
@@ -4945,18 +4965,16 @@ generate_tpm2_predictions_pcrlock()
 
 	shift_component 250-firmware-code-early
 	shift_component 550-firmware-code-late
-	pcrlock lock-firmware-code
+	pcrlock_lock lock-firmware-code
 
 	shift_component 250-firmware-config-early
 	shift_component 550-firmware-config-late
-	pcrlock lock-firmware-config
+	pcrlock_lock lock-firmware-config
 
-	# If secure boot is disabled, this can fail.  There is patch
-	# for the policy generation, and for the authority is planned
 	shift_component 240-secureboot-policy
-	pcrlock lock-secureboot-policy &> /dev/null || true
+	pcrlock_lock lock-secureboot-policy
 	shift_component 620-secureboot-authority
-	pcrlock lock-secureboot-authority &> /dev/null || true
+	pcrlock_lock lock-secureboot-authority
 	# Generates 620-secureboot-authority when the verb cannot
 	pcrlock_secureboot_sbatlevel
 
