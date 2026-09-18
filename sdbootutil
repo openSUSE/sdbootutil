@@ -5830,7 +5830,21 @@ can_unlock()
 in_lockout()
 {
 	command -v tpm2_getcap &> /dev/null || { warn "tpm2_getcap not found"; return 1; }
-	tpm2_getcap properties-variable | grep -q 'inLockout: *1'
+
+	# `tpm2-tools` probes a fixed list of TCTIs and `tabrmd` comes
+	# before the device.  A system that has `libtss2-tcti-tabrmd0`
+	# installed but no `tpm2-abrmd` running loads the library, fails
+	# to reach the service on the bus, and prints a GDBus warning
+	# plus "Could not initialize TCTI file" before falling back to
+	# /dev/tpmrm0.  Nothing is broken by that, but it is the first
+	# thing on stderr, and an installer that collects stderr reports
+	# it as the reason for whatever fails next.  Naming the device
+	# skips the probe.
+	#
+	# This is the same device that every `systemd-cryptenroll` and
+	# `systemd-pcrlock` call here already talks to: `tpm2_context_new`
+	# hardcodes it, and for the same reason
+	TPM2TOOLS_TCTI="device:/dev/tpmrm0" tpm2_getcap properties-variable | grep -q 'inLockout: *1'
 }
 
 is_same_device()
