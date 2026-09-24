@@ -185,7 +185,7 @@ Entries include snapshot-specific `rootflags=subvol=` parameter:
 
 ```
 title      openSUSE Tumbleweed
-version    15@6.2.1-1-default
+version    15_6.2.1-1-default
 machine-id 2ceda9f
 sort-key   opensuse-tumbleweed
 options    root=UUID=... rootflags=subvol=@/.snapshots/15/snapshot

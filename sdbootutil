@@ -1191,7 +1191,7 @@ dangling_entries()
 		       | select(.type? == "type1")
 		       | select(.path != null)
 		       | .id, .path,
-			 ((.version // "") | capture("((?<snapshot>[0-9]*)@)?(?<kernel>.*)")) as $v
+			 ((.version // "") | capture("((?<snapshot>[0-9]*)[@_])?(?<kernel>.*)")) as $v
 		       | $v.snapshot, $v.kernel')
 }
 
@@ -1684,12 +1684,12 @@ removable_entries()
 	jq -r --arg in_use "${in_use[*]}" --arg last "$root_snapshot" '
 		def snapshot_of:
 			((.options // "") | capture("rootflags=subvol=[^ ]*/\\.snapshots/(?<n>[0-9]+)/snapshot") | .n)
-			// ((.version // "") | capture("^(?<n>[0-9]+)@") | .n)
+			// ((.version // "") | capture("^(?<n>[0-9]+)[@_]") | .n)
 			// ((.id // "") | capture("-(?<n>[0-9]+)(\\+[0-9]+(-[0-9]+)?)?\\.conf$") | .n)
 			// "";
 		def kernel_of:
 			((.linux // "") | capture("^/[^/]+/(?<k>[^/]+)/[^/]+$") | .k)
-			// ((.version // "") | capture("@(?<k>.+)$") | .k)
+			// ((.version // "") | capture("^[0-9]+[@_](?<k>.+)$") | .k)
 			// "";
 
 		($in_use | split(" ") | map(select(. != ""))) as $in_use
@@ -2065,10 +2065,18 @@ install_kernel()
 	local entry_machine_id=
 	[ "$entry_token" = "$machine_id" ] && entry_machine_id="$machine_id"
 
+	# The snapshot number goes in front of the kernel version, so
+	# that the boot loader sorts the entries by snapshot first.  The
+	# separator is "_": it is one of the characters that
+	# `strverscmp_improved()` drops as a plain segment separator,
+	# like the "@" used before, so both sort identically.  "@" is
+	# outside the UAPI.10 charset and systemd v262 warns about it on
+	# every entry it parses.  Entries written with "@" are still on
+	# disk, and every reader accepts both
 	cat > "$tmpdir/entry.conf" <<-EOF
 	# Boot Loader Specification type#1 entry
 	title      $title
-	version    ${snapshot:+$snapshot@}$kernel_version${entry_machine_id:+${nl}machine-id $entry_machine_id}${sort_key:+${nl}sort-key   $sort_key}
+	version    ${snapshot:+${snapshot}_}$kernel_version${entry_machine_id:+${nl}machine-id $entry_machine_id}${sort_key:+${nl}sort-key   $sort_key}
 	options    $boot_options
 	linux      $dst${devicetree_dst:+${nl}devicetree ${devicetree_dst}}
 	EOF
@@ -2227,7 +2235,7 @@ cleanup_entries()
 			info "Cleaning boot entry $id"
 			rm "$path"
 		}
-	done < <(jq -r '.[] | .id, .path, (.version | capture("((?<snapshot>[0-9]*)@)?(?<kernel>.*)")) as $v | $v.snapshot, $v.kernel' "$entryfile")
+	done < <(jq -r '.[] | .id, .path, (.version | capture("((?<snapshot>[0-9]*)[@_])?(?<kernel>.*)")) as $v | $v.snapshot, $v.kernel' "$entryfile")
 
 	# The loop above drops the entry whose kernel is gone.  The
 	# opposite case -- the kernel is still there and what went missing
@@ -3339,7 +3347,7 @@ entry_snapshot()
 	jq -r --arg id "$id" '.[]
 		| select(.id == $id)
 		| ((.options // "") | capture("rootflags=subvol=[^ ]*/\\.snapshots/(?<n>[0-9]+)/snapshot") | .n)
-		  // ((.version // "") | capture("^(?<n>[0-9]+)@") | .n)
+		  // ((.version // "") | capture("^(?<n>[0-9]+)[@_]") | .n)
 		  // empty'
 }
 
@@ -3731,9 +3739,9 @@ select_entries_for_prediction()
 	#     version has more priority
 	#
 	# Without snapshots
-	#   - The version of the entry has no "N@" prefix, so there is
-	#     no snapshot to order by and every entry shares the same
-	#     priority.  Only the kernel version separates them, the
+	#   - The version of the entry has no "N_" (or "N@") prefix, so
+	#     there is no snapshot to order by and every entry shares the
+	#     same priority.  Only the kernel version separates them, the
 	#     higher one first
 	#
 	local filter
@@ -3741,7 +3749,7 @@ select_entries_for_prediction()
 	# and by "as", so the filter has to reach jq unexpanded
 	# shellcheck disable=SC2016
 	if [ -n "$have_snapshots" ]; then
-		filter='def priority(id): id as $id | $ids | split(" ") | index($id); map(. + {"priority": priority(.version | scan("(\\d+)@") | .[]), "kernel": .version | scan(".*@(?:(\\d+).(\\d+).(\\d+)-(\\d+))") | map(. | tonumber)})'
+		filter='def priority(id): id as $id | $ids | split(" ") | index($id); map(. + {"priority": priority(.version | scan("^(\\d+)[@_]") | .[]), "kernel": .version | scan("^\\d+[@_](?:(\\d+).(\\d+).(\\d+)-(\\d+))") | map(. | tonumber)})'
 	else
 		filter='map(([.version // "" | scan("(\\d+)\\.(\\d+)\\.(\\d+)-(\\d+)")] | first) as $kernel | . + {"priority": 0, "kernel": (($kernel // []) | map(tonumber))})'
 	fi

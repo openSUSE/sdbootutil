@@ -83,7 +83,7 @@ snapshot number to the file name.
 An entry file might now look like this:
 
     title      openSUSE Tumbleweed
-    version    15@1.2.3-1-default
+    version    15_1.2.3-1-default
     machine-id 2ceda9f
     sort-key   opensuse-tumbleweed
     options    root=UUID=abc... rootflags=subvol=@/.snapshots/15/snapshot
@@ -107,7 +107,7 @@ option is to use the file's checksum instead.
 So that makes an entry look like this
 
     title      openSUSE Tumbleweed
-    version    15@1.2.3-1-default
+    version    15_1.2.3-1-default
     machine-id 2ceda9f
     sort-key   opensuse-tumbleweed
     options    root=UUID=abc... rootflags=subvol=@/.snapshots/15/snapshot
