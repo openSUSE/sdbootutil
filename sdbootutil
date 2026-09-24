@@ -944,12 +944,28 @@ sedrootflags()
 	sed "${sed_arguments[@]}"
 }
 
+# Entries written before the "N_" prefix say "N@", and systemd >= v262
+# warns about the "@" on every parse.  Only the warning, the entry is
+# accepted and sorts the same
+bootctl_noise="^.*: Version string '[0-9]+@[^']*' is not a valid version, accepting anyway\.$"
+
+# `bootctl` for the commands that parse the entries.  The noise is
+# kept when the user asked for more output, with `--verbose` or with
+# SYSTEMD_LOG_LEVEL
+bootctl_entries()
+{
+	if [ -n "$verbose" ] || [ -n "$SYSTEMD_LOG_LEVEL" ]; then
+		bootctl "$@"
+		return
+	fi
+	bootctl "$@" 2> >(grep -Ev "$bootctl_noise" >&2)
+}
 
 entry_filter=("cat")
 update_entries()
 {
 	[ -z "$1" ] || entry_filter=("$@")
-	bootctl list --json=short | "${entry_filter[@]}" > "$entryfile"
+	bootctl_entries list --json=short | "${entry_filter[@]}" > "$entryfile"
 	dbg "Entry filter: ${entry_filter[*]}"
 	dbg_cat "$entryfile"
 }
@@ -1328,7 +1344,7 @@ remove_kernel()
 	local id
 	id="$(entry_conf_file "$kernel_version" "$snapshot")"
 	info "Removing boot entry $id"
-	bootctl unlink "$id"
+	bootctl_entries unlink "$id"
 
 	# If we remove the default entry, `bootctl` will mark a new
 	# default, but we still need to update the EFI var (or the
