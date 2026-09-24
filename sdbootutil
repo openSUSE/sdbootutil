@@ -871,7 +871,9 @@ get_rootfs()
 		label) read -r rootfs_data < <(findmnt / -v -n -o LABEL 2> /dev/null) ;;
 		partuuid) read -r rootfs_data < <(findmnt / -v -n -o PARTUUID 2> /dev/null) ;;
 		partlabel) read -r rootfs_data < <(findmnt / -v -n -o PARTLABEL 2> /dev/null) ;;
-		device) read -r rootfs_data < <(findmnt / -v -n -o SOURCE 2> /dev/null) ;;
+		# "/dev/mapper/NAME", as "/dev/dm-N" depends on the
+		# order in which the devices were opened
+		device) read -r rootfs_data < <(lsblk --noheadings --nodeps -o PATH "$(findmnt / -v -n -o SOURCE 2> /dev/null)" 2> /dev/null) ;;
 		*)
 			info "Can't determine rootfs ($ROOTFS). Using UUID as default"
 			ROOTFS="uuid"
@@ -889,12 +891,18 @@ get_rootfs()
 
 get_all_rootfs()
 {
-	local rootfs rootfs_data
+	local rootfs rootfs_data kname path
 
 	read -r rootfs_data < <(findmnt / -v -n -o SOURCE)
 	rootfs="$rootfs_data"
 
+	# Every device of the file system (btrfs can span several), by
+	# both names, as older entries can use "/dev/dm-N"
 	read -r rootfs_data < <(findmnt / -v -n -o UUID)
+	[ -z "$rootfs_data" ] || while read -r kname path; do
+		rootfs="$rootfs|/dev/$kname|$path"
+	done < <(lsblk --noheadings --raw -o KNAME,PATH -Q "UUID == \"$rootfs_data\"" 2> /dev/null)
+
 	[ -z "$rootfs_data" ] || rootfs="$rootfs|UUID=$rootfs_data"
 
 	read -r rootfs_data < <(findmnt / -v -n -o LABEL)
@@ -993,7 +1001,7 @@ update_entries_for_this_system()
 	local root
 	root="$(get_all_rootfs)"
 
-	update_entries jq "[.[]|select(has(\"options\"))|select(.options|test(\"root=(?:$root)\"))]"
+	update_entries jq "[.[]|select(has(\"options\"))|select(.options|test(\"root=(?:$root)(?: |$)\"))]"
 }
 
 update_entries_for_extra()
