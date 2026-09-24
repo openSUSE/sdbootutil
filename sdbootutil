@@ -3845,6 +3845,26 @@ shift_component()
 	find /var/lib/pcrlock.d/"$component".pcrlock.d -name '*.pcrlock' ! -name 'shift-*.pcrlock' -delete
 }
 
+# The shifted variation matches the current event log, and when the
+# component did not change it is identical to the one that was just
+# generated.  `systemd-pcrlock` drops the duplicated values from the
+# prediction, but only after walking every combination of variations,
+# so each copy doubles the cost of `predict` and `make-policy`.
+drop_duplicated_shifts()
+{
+	local shifted variation
+
+	for shifted in /var/lib/pcrlock.d/*.pcrlock.d/shift-*.pcrlock; do
+		for variation in "${shifted%/*}"/*.pcrlock; do
+			[[ "$(basename "$variation")" != shift-* ]] || continue
+			cmp -s "$shifted" "$variation" || continue
+			dbg "Dropping $shifted, identical to $variation"
+			rm "$shifted"
+			break
+		done
+	done
+}
+
 uint64_le()
 {
 	# 64 bit little endian representation of a number, as escape
@@ -5072,6 +5092,8 @@ generate_tpm2_predictions_pcrlock()
 	elif is_grub2_bls; then
 		pcrlock_grub2_bls
 	fi
+
+	drop_duplicated_shifts
 
 	# The copy in the ESP is imported by `dracut-pcr-signature`,
 	# and can be missing after a new ESP installation.  Both copies
