@@ -3,7 +3,7 @@ Description=Update TPM predictions
 ConditionSecurity=tpm2
 
 [Service]
-Type=oneshot
+Type=exec
 KeyringMode=shared
 PrivateTmp=yes
 # Predictions are only needed when a device is unlocked with the TPM2.
