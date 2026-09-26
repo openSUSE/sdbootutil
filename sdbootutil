@@ -1524,6 +1524,44 @@ reuse_initrd()
 	reuse_initrd_from "$parent_snapshot" "$kernel_version"
 }
 
+# Generate the initrd of "kernel_version" for "subvol" in
+# "$tmpdir/initrd-0".  Every failure ends in `err`, and the caller must
+# not call it from a condition, or `set -e` stops covering the mounts
+generate_initrd()
+{
+	local subvol="$1"
+	local kernel_version="$2"
+	local dracut_args=(
+		'--reproducible'
+		'--force'
+		'--tmpdir' '/var/tmp'
+	)
+	if [ "${verbose:-0}" -le 1 ]; then
+		dracut_args+=('--quiet')
+	fi
+
+	info "Generating new initrd"
+
+	# When the running system is a mix of snapshots the live
+	# /usr is not the one of "$root_subvol", so the initrd
+	# needs to be generated inside the snapshot in any case
+	if [ -n "$have_snapshots" ] && { [ "$subvol" != "$root_subvol" ] || [ -n "$applied_snapshot" ]; }; then
+		mount_chroot "${subvol#"${subvol_prefix}"}"
+		# In MicroOS we need to be sure to have the same /etc
+		# inside the snapshot.  For example, /etc/crypttab can
+		# have modifications in the overlay that will be
+		# visible once the snapshot is active, but the version
+		# in /.snapshots is still the unmodified base
+		is_transactional && mount_etc "${subvol#"${subvol_prefix}"}"
+		chroot "${subvol#"${subvol_prefix}"}" dracut "${dracut_args[@]}" "$tmpdir/initrd-0" "$kernel_version" \
+			|| err "Failed to generate the initrd for $kernel_version"
+		umount_chroot "${subvol#"${subvol_prefix}"}"
+	else
+		dracut "${dracut_args[@]}" "$tmpdir/initrd-0" "$kernel_version" \
+			|| err "Failed to generate the initrd for $kernel_version"
+	fi
+}
+
 mount_chroot()
 {
 	local snapshot_dir="$1"
@@ -2107,42 +2145,36 @@ install_kernel()
 	if [ -e "$initrd" ]; then
 		ln -s "$initrd" "$tmpdir/initrd-0"
 	elif ! reuse_initrd "$snapshot" "$subvol" "$kernel_version"; then
-		local dracut_args=(
-			'--reproducible'
-			'--force'
-			'--tmpdir' '/var/tmp'
-		)
-		if [ "${verbose:-0}" -le 1 ]; then
-			dracut_args+=('--quiet')
-		fi
-
-		info "Generating new initrd"
-
-		# When the running system is a mix of snapshots the live
-		# /usr is not the one of "$root_subvol", so the initrd
-		# needs to be generated inside the snapshot in any case
-		if [ -n "$have_snapshots" ] && { [ "$subvol" != "$root_subvol" ] || [ -n "$applied_snapshot" ]; }; then
-			mount_chroot "${subvol#"${subvol_prefix}"}"
-			# In MicroOS we need to be sure to have the same /etc
-			# inside the snapshot.  For example, /etc/crypttab can
-			# have modifications in the overlay that will be
-			# visible once the snapshot is active, but the version
-			# in /.snapshots is still the unmodified base
-			is_transactional && mount_etc "${subvol#"${subvol_prefix}"}"
-			chroot "${subvol#"${subvol_prefix}"}" dracut "${dracut_args[@]}" "$tmpdir/initrd-0" "$kernel_version" \
-				|| err "Failed to generate the initrd for $kernel_version"
-			umount_chroot "${subvol#"${subvol_prefix}"}"
-		else
-			dracut "${dracut_args[@]}" "$tmpdir/initrd-0" "$kernel_version" \
-				|| err "Failed to generate the initrd for $kernel_version"
-		fi
+		generate_initrd "$subvol" "$kernel_version"
 	fi
+
+	# The files that are budgeted as already in the ESP
+	local reused=()
+	[ -e "$tmpdir/initrd-0" ] || reused+=("${dstinitrd[@]}")
+	! reused_file_is_kept "$dst" || reused+=("$dst")
+	! reused_file_is_kept "$devicetree_dst" || reused+=("$devicetree_dst")
 
 	make_free_space_for_kernel "$snapshot" "$src" "$tmpdir" "$devicetree_src" "$dst" "$devicetree_dst" || err "No free space in ${boot_root} for new kernel"
 
-	# The donor of the reused initrds is never evicted, but they can
-	# still be gone: something else removed them.  Do not write an
-	# entry that points to a missing initrd
+	# The donor of the reused files is never evicted, but they can
+	# still be gone: something else removed them.  A machine that
+	# updates unattended must not be left with an entry pointing to
+	# a missing initrd, nor fail where the initrd can be generated,
+	# so a lost initrd is generated again, once, in the same context
+	# as any other.  Then the space is budgeted again, for what is
+	# really going to be written, with the donor still protected
+	if ! esp_has_all "${reused[@]}"; then
+		if [ ! -e "$tmpdir/initrd-0" ] && ! esp_has_all "${dstinitrd[@]}"; then
+			warn "The reused initrd of $kernel_version is gone from ${boot_root}, generating it again"
+			# Only the entry being installed is repaired here
+			[ "$reuse_donor_snapshot" = "$snapshot" ] || \
+				warn "$reuse_donor_conf still points to it. Run 'sdbootutil cleanup --repair' to write it again"
+			dstinitrd=()
+			generate_initrd "$subvol" "$kernel_version"
+		fi
+		make_free_space_for_kernel "$snapshot" "$src" "$tmpdir" "$devicetree_src" "$dst" "$devicetree_dst" || err "No free space in ${boot_root} for new kernel"
+	fi
+	# Lost a second time: stop here instead of looping
 	[ -e "$tmpdir/initrd-0" ] || esp_has_all "${dstinitrd[@]}" || err "The reused initrd of $kernel_version is gone from ${boot_root}"
 
 	local boot_options
