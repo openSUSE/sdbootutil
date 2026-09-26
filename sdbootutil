@@ -1827,11 +1827,30 @@ make_free_space_for_kernel()
 	local kernel="$2"
 	local initrds="$3"
 	local devicetree="${4:-}"
+	local kernel_dst="${5:-}"
+	local devicetree_dst="${6:-}"
 
 	# Calculate the free space and the required size.  All sizes
-	# are in Kb to avoid big numbers
-	local free_space total_size
-	total_size=$(($(pending_kernel_size "$kernel") + $(pending_initrds_size "$initrds") + $(pending_devicetree_size "$devicetree")))
+	# are in Kb to avoid big numbers.  A kernel or devicetree file
+	# that is already on the ESP at its checksummed destination
+	# needs zero bytes: counting it demands space that will never
+	# be written and evicts entries to find it.  Likewise, without
+	# a "$tmpdir/initrd-0" the initrds are reused from the ESP,
+	# so nothing is going to be written for them
+	local kernel_size initrds_size devicetree_size total_size
+	kernel_size="$(pending_kernel_size "$kernel")"
+	if [ -n "$kernel_dst" ] && [ -e "${boot_root}${kernel_dst}" ]; then
+		kernel_size=0
+	fi
+	initrds_size="$(pending_initrds_size "$initrds")"
+	if [ ! -e "$initrds/initrd-0" ]; then
+		initrds_size=0
+	fi
+	devicetree_size="$(pending_devicetree_size "$devicetree")"
+	if [ -n "$devicetree_dst" ] && [ -e "${boot_root}${devicetree_dst}" ]; then
+		devicetree_size=0
+	fi
+	total_size=$((kernel_size + initrds_size + devicetree_size))
 
 	make_free_space "$snapshot" "$total_size"
 }
@@ -2055,7 +2074,25 @@ install_kernel()
 		fi
 	fi
 
-	make_free_space_for_kernel "$snapshot" "$src" "$tmpdir" "$devicetree_src" || err "No free space in ${boot_root} for new kernel"
+	make_free_space_for_kernel "$snapshot" "$src" "$tmpdir" "$devicetree_src" "$dst" "$devicetree_dst" || err "No free space in ${boot_root} for new kernel"
+
+	# The eviction above may have unlinked the entry the reused
+	# initrd came from, garbage-collecting the initrd file with
+	# it.  Re-check before writing an entry that points at it
+	if [ -e "$tmpdir/initrd-0" ]; then
+		: # fresh initrd, installed below
+	elif [ "${#dstinitrd[@]}" -ne 0 ]; then
+		local v missing_initrd=
+		for v in "${dstinitrd[@]}"; do
+			[ -e "${boot_root}$v" ] || missing_initrd=1
+		done
+		if [ -n "$missing_initrd" ]; then
+			dstinitrd=()
+			reuse_initrd "$snapshot" "$subvol" "$kernel_version" || {
+				err "The reused initrd for $kernel_version is gone from ${boot_root} after making free space"
+			}
+		fi
+	fi
 
 	local boot_options
 	[ -z "$in_buildroot" ] || subvol="${subvol_prefix}/.snapshots/${snapshot}/snapshot"
