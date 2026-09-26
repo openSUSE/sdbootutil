@@ -1462,41 +1462,66 @@ set_machine_id()
 	done
 }
 
+# Take the initrds of the entry of "kernel_version" in "snapshot", but
+# only if the entry lists at least one and every one of them is in the
+# ESP.  A partial list does not boot: the missing one can be the
+# microcode or the main image, and nothing would notice until the boot.
+#
+# The entry becomes the donor of the initrds.  "reuse_donor_snapshot",
+# "reuse_donor_entry" and "reuse_donor_conf" are locals of
+# "install_kernel", so the donor is known exactly for as long as the
+# installation that relies on it, and "removable_entries" never evicts
+# it to make room: doing so would garbage collect the very initrds the
+# new entry is about to reference
+reuse_initrd_from()
+{
+	local snapshot="$1"
+	local kernel_version="$2"
+	local conf v
+	local initrds=()
+
+	settle_entry_token "$snapshot"
+	conf="$(find_conf_file "$kernel_version" "$snapshot")" || return 1
+	mapfile -t initrds < <(entry_field "$conf" initrd)
+	[ "${#initrds[@]}" -ne 0 ] || return 1
+	for v in "${initrds[@]}"; do
+		[ -f "${boot_root}$v" ] || {
+			info "Not reusing the initrds of $conf, $v is missing"
+			return 1
+		}
+	done
+	for v in "${initrds[@]}"; do
+		info "Found existing initrd $v"
+	done
+
+	dstinitrd=("${initrds[@]}")
+	reuse_donor_snapshot="$snapshot"
+	reuse_donor_entry="$(entry_conf_file "$kernel_version" "$snapshot")"
+	reuse_donor_conf="$conf"
+}
+
 reuse_initrd()
 {
 	local snapshot="$1"
 	local subvol="$2"
 	local kernel_version="${3:?}"
-	local conf
+	# Set by "detect_parent", that can return before setting them
+	local parent_subvol= parent_snapshot=
+
+	dstinitrd=()
+	reuse_donor_snapshot=
+	reuse_donor_entry=
+	reuse_donor_conf=
 
 	[ -z "$arg_no_reuse_initrd" ] || return 1
-	settle_entry_token "$snapshot"
 
-	local find_conf_status=0
-	conf="$(find_conf_file "$kernel_version" "$snapshot")" || find_conf_status=$?
+	reuse_initrd_from "$snapshot" "$kernel_version" && return 0
 
-	if [ $find_conf_status -ne 0 ]; then
-		# Check if we can reuse the initrd from the parent to
-		# avoid expensive regeneration
-		detect_parent "$subvol"
-		if [ -n "$parent_subvol" ]; then
-			settle_entry_token "$parent_snapshot"
-			find_conf_status=0
-			conf="$(find_conf_file "$kernel_version" "$parent_snapshot")" || find_conf_status=$?
-		fi
-	fi
-
-	if [ "$find_conf_status" -eq 0 ]; then
-		local v
-		while read -r v; do
-			[ -f "${boot_root}$v" ] || continue
-			info "Found existing initrd $v"
-			dstinitrd+=("$v")
-		done < <(entry_field "$conf" initrd)
-		[ "${#dstinitrd[@]}" -eq 0 ] || return 0
-	fi
-
-	return 1
+	# Check if we can reuse the initrd from the parent to avoid
+	# expensive regeneration
+	detect_parent "$subvol"
+	[ -n "$parent_subvol" ] || return 1
+	reuse_initrd_from "$parent_snapshot" "$kernel_version"
 }
 
 mount_chroot()
@@ -1670,6 +1695,9 @@ snapshots_in_use()
 #   - the default and the selected entries
 #   - the entries of the snapshots in use, except the ones of
 #     "root_snapshot", that are last in the list
+#   - while "install_kernel" reuses initrds, the donor entry and every
+#     entry of the donor snapshot, even when it is "root_snapshot" (see
+#     "reuse_initrd_from")
 #
 # This covers both layouts.  In MicroOS the default snapshot is the
 # newest one and in Tumbleweed it is the oldest one, but in both cases
@@ -1691,6 +1719,7 @@ removable_entries()
 	local in_use
 	mapfile -t in_use < <(snapshots_in_use "$snapshot")
 	dbg "Snapshots that keep their boot entries: ${in_use[*]:-none}"
+	[ -z "$reuse_donor_entry" ] || dbg "Donor of the reused initrds: $reuse_donor_entry${reuse_donor_snapshot:+, snapshot $reuse_donor_snapshot}"
 
 	update_entries_for_this_system
 
@@ -1705,7 +1734,8 @@ removable_entries()
 	#
 	# The columns are never empty, as `read` and `sort` would
 	# collapse consecutive tabs and shift the fields
-	jq -r --arg in_use "${in_use[*]}" --arg last "$root_snapshot" '
+	jq -r --arg in_use "${in_use[*]}" --arg last "$root_snapshot" \
+	   --arg donor_entry "$reuse_donor_entry" --arg donor_snapshot "$reuse_donor_snapshot" '
 		def snapshot_of:
 			((.options // "") | capture("rootflags=subvol=[^ ]*/\\.snapshots/(?<n>[0-9]+)/snapshot") | .n)
 			// ((.version // "") | capture("^(?<n>[0-9]+)[@_]") | .n)
@@ -1719,7 +1749,9 @@ removable_entries()
 		($in_use | split(" ") | map(select(. != ""))) as $in_use
 		| .[]
 		| select(.isDefault != true and .isSelected != true)
+		| select(.id != $donor_entry)
 		| snapshot_of as $s
+		| select($donor_snapshot == "" or $s != $donor_snapshot)
 		| kernel_of as $k
 		| select(($in_use | index($s)) == null or $s == $last)
 		| [ (if $s == $last then 1 else 0 end),
@@ -1821,6 +1853,33 @@ make_free_space()
 	return 1
 }
 
+# A file already in the ESP costs nothing to install only if it stays
+# there.  Being in the ESP is not enough: an orphan goes away with the
+# first cleanup, and the entry that references it can be evicted.  Only
+# the donor entry of the reused initrds is sure to stay for the whole
+# installation, so only the files that it references are free
+reused_file_is_kept()
+{
+	local path="$1"
+	local v
+
+	[ -n "$path" ] && [ -n "$reuse_donor_conf" ] && [ -e "${boot_root}${path}" ] || return 1
+	while read -r v; do
+		[ "$v" != "$path" ] || return 0
+	done < <(entry_files "$reuse_donor_conf")
+	return 1
+}
+
+# Every path given is in the ESP
+esp_has_all()
+{
+	local v
+
+	for v in "$@"; do
+		[ -e "${boot_root}$v" ] || return 1
+	done
+}
+
 make_free_space_for_kernel()
 {
 	local snapshot="$1"
@@ -1831,15 +1890,14 @@ make_free_space_for_kernel()
 	local devicetree_dst="${6:-}"
 
 	# Calculate the free space and the required size.  All sizes
-	# are in Kb to avoid big numbers.  A kernel or devicetree file
-	# that is already on the ESP at its checksummed destination
-	# needs zero bytes: counting it demands space that will never
-	# be written and evicts entries to find it.  Likewise, without
-	# a "$tmpdir/initrd-0" the initrds are reused from the ESP,
-	# so nothing is going to be written for them
+	# are in Kb to avoid big numbers.  A file that is going to
+	# stay in the ESP needs zero bytes: counting it demands space
+	# that will never be written and evicts entries to find it.
+	# Without a "$tmpdir/initrd-0" the initrds are reused, and
+	# their donor entry is never evicted
 	local kernel_size initrds_size devicetree_size total_size
 	kernel_size="$(pending_kernel_size "$kernel")"
-	if [ -n "$kernel_dst" ] && [ -e "${boot_root}${kernel_dst}" ]; then
+	if reused_file_is_kept "$kernel_dst"; then
 		kernel_size=0
 	fi
 	initrds_size="$(pending_initrds_size "$initrds")"
@@ -1847,7 +1905,7 @@ make_free_space_for_kernel()
 		initrds_size=0
 	fi
 	devicetree_size="$(pending_devicetree_size "$devicetree")"
-	if [ -n "$devicetree_dst" ] && [ -e "${boot_root}${devicetree_dst}" ]; then
+	if reused_file_is_kept "$devicetree_dst"; then
 		devicetree_size=0
 	fi
 	total_size=$((kernel_size + initrds_size + devicetree_size))
@@ -1975,6 +2033,8 @@ install_kernel()
 	[ -z "$have_snapshots" ] || subvol="${subvol_prefix}/.snapshots/${snapshot}/snapshot"
 	local kernel_version="$2"
 	local dstinitrd=()
+	# Set by "reuse_initrd", read by "removable_entries"
+	local reuse_donor_snapshot= reuse_donor_entry= reuse_donor_conf=
 	local src="${subvol#"${subvol_prefix}"}/lib/modules/$kernel_version/$image"
 	[ -n "$kernel_version" ] || err "Missing kernel version"
 	[ -e "$src" ] || err "Can't find $src"
@@ -2040,6 +2100,10 @@ install_kernel()
 		devicetree_dst="${dst%/*}/devicetree-$chksum.dtb"
 	fi
 
+	# The previous kernel of "add-all-kernels" leaves its initrd
+	# here when the same one was already in the ESP, and it is not
+	# the initrd of this kernel
+	rm -f "$tmpdir"/initrd-*
 	if [ -e "$initrd" ]; then
 		ln -s "$initrd" "$tmpdir/initrd-0"
 	elif ! reuse_initrd "$snapshot" "$subvol" "$kernel_version"; then
@@ -2076,23 +2140,10 @@ install_kernel()
 
 	make_free_space_for_kernel "$snapshot" "$src" "$tmpdir" "$devicetree_src" "$dst" "$devicetree_dst" || err "No free space in ${boot_root} for new kernel"
 
-	# The eviction above may have unlinked the entry the reused
-	# initrd came from, garbage-collecting the initrd file with
-	# it.  Re-check before writing an entry that points at it
-	if [ -e "$tmpdir/initrd-0" ]; then
-		: # fresh initrd, installed below
-	elif [ "${#dstinitrd[@]}" -ne 0 ]; then
-		local v missing_initrd=
-		for v in "${dstinitrd[@]}"; do
-			[ -e "${boot_root}$v" ] || missing_initrd=1
-		done
-		if [ -n "$missing_initrd" ]; then
-			dstinitrd=()
-			reuse_initrd "$snapshot" "$subvol" "$kernel_version" || {
-				err "The reused initrd for $kernel_version is gone from ${boot_root} after making free space"
-			}
-		fi
-	fi
+	# The donor of the reused initrds is never evicted, but they can
+	# still be gone: something else removed them.  Do not write an
+	# entry that points to a missing initrd
+	[ -e "$tmpdir/initrd-0" ] || esp_has_all "${dstinitrd[@]}" || err "The reused initrd of $kernel_version is gone from ${boot_root}"
 
 	local boot_options
 	[ -z "$in_buildroot" ] || subvol="${subvol_prefix}/.snapshots/${snapshot}/snapshot"
