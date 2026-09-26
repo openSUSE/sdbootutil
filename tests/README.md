@@ -82,6 +82,41 @@ more than the one entry under test.
 # fde-state diff before after
 ```
 
+## Space reclaim (`tests/reclaim`)
+
+`run` hands sdbootutil a `cp -a` copy of the ESP, and a copy has the
+free space of the file system it lives in: it cannot show what happens
+when the ESP is full. `tests/reclaim` covers that part of
+`install_kernel` — which entries are evicted to make room, which
+initrds are reused and from whom, and what happens when a reused
+initrd is gone — without root and without a guest.
+
+The ESP is a directory with a simulated capacity, counted in 4 KiB
+blocks, and `bootctl`, `findmnt`, `btrfs`, `dracut`, `install`, `chroot`
+and `mount` are stubs that act on it and log what they did. Only the
+function definitions of the script under test are loaded, none of its
+top level code, and the real `install_kernel` runs. Everything runs in
+`bwrap(1)` as the calling user: `/usr` and `/etc` are read-only, the
+only writable place is a temporary directory that is also bound on
+`/.snapshots`, and there is no network. A fault is injected by
+removing a file from the ESP the first time the free space is
+queried, that is after the initrd to reuse was chosen.
+
+```console
+$ tests/reclaim --list
+$ tests/reclaim                                  # the sdbootutil of this tree
+$ git show HEAD~3:sdbootutil > /tmp/old
+$ tests/reclaim --script /tmp/old                # the same cases, an older version
+$ VERBOSE=1 tests/reclaim reuse-lost-recovery    # with the stub log and the output
+```
+
+The cases fail against the versions that had the bugs they describe,
+which is the point of running them with `--script`. What they cannot
+see is anything the stubs stand in for: FAT allocation and metadata,
+the real garbage collection of `bootctl`, dracut and the chroot
+mounts, the snapper plugin, booting the result and the TPM2
+predictions. Those need a guest with a small ESP of its own.
+
 ## Secret routing (`tests/unit`)
 
 `run` never writes outside a copy of the ESP, which is what makes it

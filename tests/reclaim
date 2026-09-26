@@ -1,0 +1,684 @@
+#!/bin/bash
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: Copyright 2026 SUSE LLC
+#
+# Space reclaim and initrd reuse in install_kernel, without root, a
+# guest or a real ESP.
+#
+# The scenarios under tests/scenarios run on a guest against a copy of
+# its ESP, and a copy has the free space of the file system it lives
+# in: it cannot reproduce an ESP that is full.  Here the ESP is a
+# directory with a simulated capacity, and bootctl, findmnt, btrfs,
+# dracut and friends are stubs that act on it and log what they did.
+# What runs is the real install_kernel and everything it calls, taken
+# from the script under test: only its function definitions are loaded,
+# none of its top level code.
+#
+# Everything runs inside bwrap(1) as the calling user, with a fresh
+# root where /usr and /etc are read-only and the only writable place
+# is a temporary directory, that is also bound on /.snapshots.  Nothing
+# outside it can be touched, and there is no network.
+#
+# What this does NOT cover, and needs a real (or virtual) machine: FAT
+# allocation and metadata overhead, the real bootctl garbage collection,
+# real dracut and chroot mounts, the snapper plugin, booting the result
+# and TPM2 predictions.
+#
+# Usage:
+#   tests/reclaim [--script PATH] [CASE...]
+#   tests/reclaim --list
+#
+#   --script PATH  sdbootutil to test (default: the one in this tree),
+#                  for example an older version from `git show`
+#
+# Exit status: 0 when every case passed, 1 when one failed, 77 when
+# bwrap is not available.
+
+set -e
+shopt -s nullglob
+export LC_ALL=C
+
+cases=(
+	reuse-no-pressure
+	reuse-root-donor
+	reuse-nonroot-donor
+	reuse-partial-initrd
+	reuse-lost-recovery
+	recovery-dracut-fails
+	recovery-no-space
+	add-all-kernels-root-donor
+	kernel-lost
+	no-pin-leak
+)
+
+case_help()
+{
+	case "$1" in
+		reuse-no-pressure) echo "free space above the reserve: reuse evicts nothing and runs no dracut" ;;
+		reuse-root-donor) echo "below the reserve: an old set is reclaimed, the donor in the root snapshot is kept" ;;
+		reuse-nonroot-donor) echo "below the reserve: the donor is an unused parent snapshot, and is kept" ;;
+		reuse-partial-initrd) echo "a donor with a missing initrd is not reused, a complete initrd is generated" ;;
+		reuse-lost-recovery) echo "the reused initrd disappears after being chosen: it is generated again" ;;
+		recovery-dracut-fails) echo "the regeneration fails: one attempt, error, no entry, the donor is kept" ;;
+		recovery-no-space) echo "the regenerated initrd does not fit: error, no entry, protected entries kept" ;;
+		add-all-kernels-root-donor) echo "add-all-kernels under pressure: every kernel reuses, no donor evicted" ;;
+		kernel-lost) echo "the reused kernel disappears after being budgeted: it is copied again" ;;
+		no-pin-leak) echo "once install_kernel returns, the donor can be removed again" ;;
+	esac
+}
+
+script=
+inner=
+while [ $# -gt 0 ]; do
+	case "$1" in
+		--script) script="$(realpath "$2")"; shift 2 ;;
+		--inner) inner="$2"; shift 2 ;;
+		--list)
+			for c in "${cases[@]}"; do printf '%-28s %s\n' "$c" "$(case_help "$c")"; done
+			exit 0 ;;
+		-h|--help) sed -ne '/^# Usage:/,/^# Exit/s/^# \?//p' "$0"; exit 0 ;;
+		-*) echo "Unknown option $1" >&2; exit 2 ;;
+		*) break ;;
+	esac
+done
+[ $# -eq 0 ] || cases=("$@")
+
+if [ -z "$inner" ]; then
+	command -v bwrap > /dev/null || { echo "SKIP: bwrap(1) is needed to run without root" >&2; exit 77; }
+	script="${script:-$(realpath "${0%/*}/../sdbootutil")}"
+	work="$(mktemp -d -t sdbootutil-reclaim.XXXXXX)"
+	trap 'rm -rf "$work"' EXIT
+	mkdir "$work/snapshots"
+	cp "$script" "$work/sdbootutil"
+	cp "$0" "$work/reclaim"
+	args=(--tmpfs / --ro-bind /usr /usr --ro-bind /etc /etc
+	      --dev /dev --proc /proc --tmpfs /tmp
+	      --bind "$work" "$work" --bind "$work/snapshots" /.snapshots
+	      --unshare-all --die-with-parent --new-session)
+	for d in /bin /sbin /lib /lib64; do
+		[ ! -e "$d" ] || args+=(--ro-bind "$(realpath "$d")" "$d")
+	done
+	# The host configuration must not leak in: "/etc/kernel/cmdline"
+	# and "entry-token" come from the snapshots under test
+	[ ! -d /etc/kernel ] || args+=(--tmpfs /etc/kernel)
+	status=0
+	timeout 600 bwrap "${args[@]}" env -i PATH=/usr/bin:/bin HOME="$work" LC_ALL=C VERBOSE="$VERBOSE" \
+		bash "$work/reclaim" --inner "$work" "${cases[@]}" || status=$?
+	exit "$status"
+fi
+
+#
+# Inside the sandbox
+#
+
+work="$inner"
+bin="$work/bin"
+tok="opensuse-tumbleweed"
+kernel_kb=3000
+initrd_kb=6000
+esp_kb=100000
+K="6.10.1-1-default"
+K2="6.10.2-1-default"
+O="6.9.0-1-default"
+
+mkdir -p "$bin"
+
+# Free bytes in the simulated ESP, in 4 KiB blocks
+cat > "$bin/_avail" <<'EOF'
+#!/bin/bash
+used="$(find "$HARNESS_W/esp" -type f -printf '%s\n' | awk '{ u += int(($1 + 4095) / 4096) * 4096 } END { print u + 0 }')"
+avail=$(($(cat "$HARNESS_W/esp_kb") * 1024 - used))
+[ "$avail" -gt 0 ] || avail=0
+echo "$avail"
+EOF
+
+cat > "$bin/findmnt" <<'EOF'
+#!/bin/bash
+case " $* " in
+	*" --fstab "*) exit 1 ;;
+	*" --json "*) echo '{"filesystems": []}' ;;
+	*" -o SIZE "*) echo $(($(cat "$HARNESS_W/esp_kb") * 1024)) ;;
+	*" -o AVAIL "*)
+		# Fault injection: something else removes a file once
+		# the space is queried, that is after the initrd to
+		# reuse was chosen
+		if [ -s "$HARNESS_W/inject" ]; then
+			while read -r f; do
+				echo "inject $f" >> "$HARNESS_W/log"
+				rm -f "$HARNESS_W/esp$f"
+			done < "$HARNESS_W/inject"
+			: > "$HARNESS_W/inject"
+		fi
+		"${0%/*}/_avail" ;;
+	*" -o UUID "*) echo "1111-2222" ;;
+	*" -o SOURCE "*) echo "/dev/fakeroot" ;;
+	*) echo ;;
+esac
+EOF
+
+cat > "$bin/install" <<'EOF'
+#!/bin/bash
+src="${*: -2:1}"
+dst="${*: -1}"
+need=$((($(stat -L -c %s "$src") + 4095) / 4096 * 4096))
+if [ "$need" -gt "$("${0%/*}/_avail")" ]; then
+	echo "install: error writing '$dst': No space left on device" >&2
+	echo "install-enospc $dst" >> "$HARNESS_W/log"
+	rm -f "$dst"
+	exit 1
+fi
+cp "$src" "$dst"
+echo "install $dst" >> "$HARNESS_W/log"
+EOF
+
+cat > "$bin/btrfs" <<'EOF'
+#!/bin/bash
+case "$1 $2" in
+	"subvol show")
+		if [ "$3" = "-u" ]; then
+			echo "@/.snapshots/${4#uuid-}/snapshot"
+			exit 0
+		fi
+		n="$(sed -ne 's,.*/\.snapshots/\([0-9]\+\)/snapshot.*,\1,p' <<< "$3")"
+		echo "@/.snapshots/$n/snapshot"
+		p="$(cat "/.snapshots/$n/parent" 2> /dev/null || echo -)"
+		echo "	Parent UUID: 		$( [ "$p" = - ] && echo - || echo "uuid-$p")"
+		;;
+	"prop get"|"property get") echo "ro=false" ;;
+	*) echo "btrfs stub: unexpected $*" >&2; exit 1 ;;
+esac
+EOF
+
+cat > "$bin/dracut" <<'EOF'
+#!/bin/bash
+out="${*: -2:1}"
+kv="${*: -1}"
+echo "dracut $kv" >> "$HARNESS_W/log"
+[ ! -e "$HARNESS_W/dracut-fail" ] || exit 1
+n=$(($(cat "$HARNESS_W/dracut-count" 2> /dev/null || echo 0) + 1))
+echo "$n" > "$HARNESS_W/dracut-count"
+{ echo "initrd $kv generated $n"; head -c $(($(cat "$HARNESS_W/dracut_kb") * 1024 - 64)) /dev/zero; } > "$out"
+EOF
+
+cat > "$bin/chroot" <<'EOF'
+#!/bin/bash
+echo "chroot $1" >> "$HARNESS_W/log"
+shift
+exec "$@"
+EOF
+
+for c in mount umount; do
+	printf '#!/bin/bash\necho "%s $*" >> "$HARNESS_W/log"\n' "$c" > "$bin/$c"
+done
+printf '#!/bin/bash\nexit 1\n' > "$bin/mountpoint"
+printf '#!/bin/bash\nexit 1\n' > "$bin/systemd-detect-virt"
+printf '#!/bin/bash\nexit 0\n' > "$bin/lsblk"
+printf '#!/bin/bash\necho "snapper stub: not expected" >&2\nexit 1\n' > "$bin/snapper"
+
+cat > "$bin/bootctl" <<'EOF'
+#!/usr/bin/python3
+# The subset of bootctl that install_kernel uses, over "$HARNESS_W/esp"
+import glob, json, os, re, sys
+
+w = os.environ["HARNESS_W"]
+esp = w + "/esp"
+args = [a for a in sys.argv[1:] if not a.startswith("-")]
+
+def log(line):
+    with open(w + "/log", "a") as f:
+        f.write(line + "\n")
+
+def read(name):
+    try:
+        with open(w + "/" + name) as f:
+            return f.read().strip()
+    except FileNotFoundError:
+        return ""
+
+def confs():
+    return sorted(glob.glob(esp + "/loader/entries/*.conf"))
+
+def fields(path):
+    out = []
+    with open(path) as f:
+        for line in f:
+            parts = line.strip().split(None, 1)
+            if parts and not parts[0].startswith("#"):
+                out.append((parts[0], parts[1] if len(parts) > 1 else ""))
+    return out
+
+def entry_id(path):
+    # The id has no boot counter, like the real bootctl
+    return re.sub(r"\+[0-9]+(-[0-9]+)?\.conf$", ".conf", os.path.basename(path))
+
+def files(path):
+    return [v for k, v in fields(path) if k in ("linux", "initrd", "devicetree")]
+
+def referenced():
+    return {f for c in confs() for f in files(c)}
+
+def gc(candidates):
+    keep = referenced()
+    for f in candidates:
+        if f not in keep and os.path.exists(esp + f):
+            os.remove(esp + f)
+            log("gc " + f)
+
+cmd = args[0] if args else ""
+if cmd == "list":
+    out = []
+    for c in confs():
+        e = {"id": entry_id(c), "path": c, "initrd": []}
+        for k, v in fields(c):
+            if k == "initrd":
+                e["initrd"].append(v)
+            elif k == "options":
+                e["options"] = (e.get("options", "") + " " + v).strip()
+            elif k in ("title", "version", "linux", "devicetree", "sort-key"):
+                e[k] = v
+        e["isDefault"] = e["id"] == read("default")
+        e["isSelected"] = e["id"] == read("selected")
+        out.append(e)
+    print(json.dumps(out))
+elif cmd == "unlink":
+    matches = [c for c in confs() if entry_id(c) == args[1]]
+    if not matches:
+        print("Failed to find boot entry '%s'" % args[1], file=sys.stderr)
+        sys.exit(1)
+    log("unlink " + args[1])
+    for c in matches:
+        owned = files(c)
+        os.remove(c)
+        gc(owned)
+elif cmd == "cleanup":
+    log("cleanup")
+    tracked = []
+    for root, dirs, names in os.walk(esp):
+        rel = os.path.relpath(root, esp)
+        if rel.split("/")[0] in ("loader", "EFI"):
+            continue
+        tracked += ["/" + os.path.relpath(os.path.join(root, n), esp) for n in names]
+    gc(tracked)
+else:
+    print("bootctl stub: unexpected " + " ".join(sys.argv[1:]), file=sys.stderr)
+    sys.exit(1)
+EOF
+chmod +x "$bin"/*
+
+# Only the function definitions of the script under test
+awk '/^[A-Za-z_][A-Za-z0-9_]*\(\) *\{? *$/ { f = 1 } f { print } f && /^}/ { f = 0 }' \
+	"$work/sdbootutil" > "$work/functions.sh"
+bash -n "$work/functions.sh"
+
+# Runs a command line in a shell set up like sdbootutil's at the top
+# level, once it detected a snapshot system with systemd-boot
+cat > "$work/drive.sh" <<'EOF'
+set -e
+shopt -s nullglob
+export LC_ALL=C
+. "$HARNESS_WORK/functions.sh"
+nl=$'\n'
+entry_file_keys=" linux initrd devicetree "
+entry_filter=("cat")
+bootctl_noise="^$"
+keep_entry_conf=
+declare -A found_kernels installed_kernels stale_kernels
+rollback=() created_keys=() restore_crypttab= chroot_dir= update_predictions=
+verbose=1
+have_snapshots=1 in_buildroot= applied_snapshot= TRANSACTIONAL_UPDATE=
+subvol_prefix="@"
+root_snapshot="$HARNESS_ROOT" running_snapshot="$HARNESS_ROOT"
+root_subvol="@/.snapshots/$HARNESS_ROOT/snapshot"
+arg_entry_token="literal:$HARNESS_TOKEN"
+image=vmlinuz firmware_arch=x64 LOADER_TYPE=systemd-boot ESP_FREE_SPACE=10 ROOTFS=uuid
+boot_root="$HARNESS_W/esp" esp_root="$HARNESS_W/esp"
+tmpdir="$HARNESS_W/tmp"
+mkdir -p "$tmpdir"
+entryfile="$tmpdir/entries.json" tmpfile="$tmpdir/tmp" snapperfile="$HARNESS_W/snapper.json"
+trap cleanup EXIT
+eval "$1"
+EOF
+
+#
+# Fixtures
+#
+
+mk_snapshot()
+{
+	local n="$1" parent="$2" kv
+	shift 2
+	local s="/.snapshots/$n/snapshot"
+	mkdir -p "$s/usr/lib/modules" "$s/etc/kernel"
+	ln -s usr/lib "$s/lib"
+	printf 'NAME="openSUSE Tumbleweed"\nID="%s"\nVERSION_ID="20260926"\nPRETTY_NAME="openSUSE Tumbleweed"\n' "$tok" > "$s/usr/lib/os-release"
+	echo "quiet" > "$s/etc/kernel/cmdline"
+	[ -z "$parent" ] || echo "$parent" > "/.snapshots/$n/parent"
+	for kv in "$@"; do
+		mkdir -p "$s/usr/lib/modules/$kv"
+		{ echo "kernel $kv"; head -c $((kernel_kb * 1024 - 64)) /dev/zero; } > "$s/usr/lib/modules/$kv/vmlinuz"
+	done
+}
+
+# The snapshots known to snapper; the root one is the default and the
+# active one, like a Tumbleweed that did not roll back
+mk_snapper()
+{
+	local n sep=
+	{
+		echo '{"root": ['
+		for n in "$@"; do
+			printf '%s{"number": %s, "type": "single", "date": "", "description": "", "userdata": {}, "active": %s, "default": %s}\n' \
+				"$sep" "$n" "$([ "$n" = "$root" ] && echo true || echo false)" "$([ "$n" = "$root" ] && echo true || echo false)"
+			sep=,
+		done
+		echo ']}'
+	} > "$W/snapper.json"
+}
+
+conf()
+{
+	echo "$ESP/loader/entries/$tok-$2-$1.conf"
+}
+
+# An entry like the one sdbootutil writes, and its files.  Every
+# INITRD is a label for the content; "missing:LABEL" is listed in
+# the entry but not present in the ESP
+mk_entry()
+{
+	local n="$1" kv="$2" label chksum
+	shift 2
+	local src="/.snapshots/$n/snapshot/usr/lib/modules/$kv/vmlinuz"
+	read -r chksum _ < <(sha1sum "$src")
+	local linux="/$tok/$kv/linux-$chksum"
+	mkdir -p "$ESP/$tok/$kv" "$ESP/loader/entries"
+	[ -e "$ESP$linux" ] || cp "$src" "$ESP$linux"
+	{
+		echo "title      openSUSE Tumbleweed"
+		echo "version    ${n}_$kv"
+		echo "options    quiet root=UUID=1111-2222 rootflags=subvol=@/.snapshots/$n/snapshot"
+		echo "linux      $linux"
+	} > "$(conf "$n" "$kv")"
+	for label in "$@"; do
+		local body="$W/initrd.tmp"
+		{ echo "initrd $kv ${label#missing:}"; head -c $((initrd_kb * 1024 - 64)) /dev/zero; } > "$body"
+		read -r chksum _ < <(sha1sum "$body")
+		echo "initrd     /$tok/$kv/initrd-$chksum" >> "$(conf "$n" "$kv")"
+		if [[ "$label" == missing:* ]]; then
+			rm -f "$body"
+		else
+			mv "$body" "$ESP/$tok/$kv/initrd-$chksum"
+		fi
+	done
+}
+
+# Other files in the ESP (another OS, for instance), sized to leave
+# FREE KB available
+fill_to_free()
+{
+	local free_kb="$1"
+	local avail
+	avail="$(HARNESS_W="$W" "$bin/_avail")"
+	mkdir -p "$ESP/EFI/other"
+	head -c $((avail - free_kb * 1024)) /dev/zero > "$ESP/EFI/other/filler"
+}
+
+initrds()
+{
+	sed -ne 's/^initrd[[:space:]]\+//p' "$1" 2> /dev/null
+}
+
+# The entry exists, lists an initrd, and every file it names is there
+complete()
+{
+	local c="$1" f
+	[ -f "$c" ] || return 1
+	[ -n "$(initrds "$c")" ] || return 1
+	while read -r f; do
+		[ -e "$ESP$f" ] || return 1
+	done < <(sed -ne 's/^\(linux\|initrd\|devicetree\)[[:space:]]\+//p' "$c")
+}
+
+# Every initrd of the entry is named after the SHA-1 of its content
+hashes_match()
+{
+	local f sum
+	while read -r f; do
+		read -r sum _ < <(sha1sum "$ESP$f" 2> /dev/null) || return 1
+		[ "${f##*/initrd-}" = "$sum" ] || return 1
+	done < <(initrds "$1")
+}
+
+logged()
+{
+	grep -c -- "^$1" "$W/log" || :
+}
+
+run()
+{
+	status=0
+	HARNESS_W="$W" HARNESS_WORK="$work" HARNESS_ROOT="$root" HARNESS_TOKEN="$tok" \
+		PATH="$bin:/usr/bin:/bin" timeout 120 bash "$work/drive.sh" "$1" > "$W/output" 2>&1 || status=$?
+}
+
+expect()
+{
+	local what="$1"
+	shift
+	"$@" || problems+=("$what")
+}
+
+# Snapshot 5 is old and has a kernel of its own.  Snapshot 10 is the
+# root one, with two kernels, and the entry of $K2 is the default one.
+# Snapshot 11 is new and has no entry yet: its kernels can reuse the
+# initrds of the ones in 10, its parent
+layout()
+{
+	mk_snapshot 5 "" "$O"
+	mk_snapshot 10 5 "$K" "$K2"
+	mk_snapshot 11 10 "$K" "$K2"
+	mk_snapper 5 10 11
+	mk_entry 5 "$O" main
+	mk_entry 10 "$K" main
+	mk_entry 10 "$K2" main
+	basename "$(conf 10 "$K2")" > "$W/default"
+}
+
+#
+# Cases
+#
+
+case_reuse-no-pressure()
+{
+	layout
+	# Above the 10% reserve (10000 KB), and below the reserve
+	# plus the size of the kernel that is already there
+	fill_to_free 12000
+	run "install_kernel 11 $K"
+	expect "exit status $status" [ "$status" -eq 0 ]
+	expect "no entry evicted" [ "$(logged unlink)" -eq 0 ]
+	expect "no dracut" [ "$(logged dracut)" -eq 0 ]
+	expect "complete new entry" complete "$(conf 11 "$K")"
+	expect "same initrd as the donor" [ "$(initrds "$(conf 11 "$K")")" = "$(initrds "$(conf 10 "$K")")" ]
+	expect "old snapshot kept" complete "$(conf 5 "$O")"
+}
+
+case_reuse-root-donor()
+{
+	layout
+	# Below the reserve even after reclaiming the old snapshot
+	fill_to_free 500
+	run "install_kernel 11 $K"
+	expect "exit status $status" [ "$status" -eq 0 ]
+	expect "old snapshot reclaimed" [ "$(logged "unlink $tok-$O-5.conf")" -eq 1 ]
+	expect "old initrd freed" [ -z "$(find "$ESP/$tok/$O" -type f)" ]
+	expect "donor kept" complete "$(conf 10 "$K")"
+	expect "default kept" complete "$(conf 10 "$K2")"
+	expect "no dracut" [ "$(logged dracut)" -eq 0 ]
+	expect "complete new entry" complete "$(conf 11 "$K")"
+	expect "same initrd as the donor" [ "$(initrds "$(conf 11 "$K")")" = "$(initrds "$(conf 10 "$K")")" ]
+}
+
+case_reuse-nonroot-donor()
+{
+	# The root snapshot is 12, a rollback target with a kernel of
+	# its own, and 10 is only the parent of 11: not in use
+	root=12
+	mk_snapshot 5 "" "$O"
+	mk_snapshot 10 5 "$K"
+	mk_snapshot 11 10 "$K"
+	mk_snapshot 12 "" "$K2"
+	mk_snapper 5 10 11 12
+	mk_entry 5 "$O" main
+	mk_entry 10 "$K" main
+	mk_entry 12 "$K2" main
+	basename "$(conf 12 "$K2")" > "$W/default"
+	fill_to_free 500
+	run "install_kernel 11 $K"
+	expect "exit status $status" [ "$status" -eq 0 ]
+	expect "old snapshot reclaimed" [ "$(logged "unlink $tok-$O-5.conf")" -eq 1 ]
+	expect "donor kept" complete "$(conf 10 "$K")"
+	expect "default kept" complete "$(conf 12 "$K2")"
+	expect "no dracut" [ "$(logged dracut)" -eq 0 ]
+	expect "complete new entry" complete "$(conf 11 "$K")"
+	expect "same initrd as the donor" [ "$(initrds "$(conf 11 "$K")")" = "$(initrds "$(conf 10 "$K")")" ]
+}
+
+case_reuse-partial-initrd()
+{
+	layout
+	mk_entry 10 "$K" missing:ucode main
+	fill_to_free 50000
+	local partial
+	partial="$(initrds "$(conf 10 "$K")" | tail -n 1)"
+	run "install_kernel 11 $K"
+	expect "exit status $status" [ "$status" -eq 0 ]
+	expect "one dracut" [ "$(logged dracut)" -eq 1 ]
+	expect "generated in snapshot 11" [ "$(logged "chroot /.snapshots/11/snapshot")" -eq 1 ]
+	expect "complete new entry" complete "$(conf 11 "$K")"
+	expect "partial set not reused" eval '! initrds "$(conf 11 "$K")" | grep -qx "$partial"'
+	expect "initrd named after its content" hashes_match "$(conf 11 "$K")"
+}
+
+case_reuse-lost-recovery()
+{
+	layout
+	fill_to_free 50000
+	local old
+	old="$(initrds "$(conf 10 "$K")")"
+	echo "$old" > "$W/inject"
+	run "install_kernel 11 $K"
+	expect "exit status $status" [ "$status" -eq 0 ]
+	expect "fault injected" [ "$(logged inject)" -eq 1 ]
+	expect "one dracut" [ "$(logged dracut)" -eq 1 ]
+	expect "generated in snapshot 11" [ "$(logged "chroot /.snapshots/11/snapshot")" -eq 1 ]
+	expect "complete new entry" complete "$(conf 11 "$K")"
+	expect "lost initrd not referenced" eval '! initrds "$(conf 11 "$K")" | grep -qx "$old"'
+	expect "initrd named after its content" hashes_match "$(conf 11 "$K")"
+	expect "donor entry not evicted" [ -f "$(conf 10 "$K")" ]
+}
+
+case_recovery-dracut-fails()
+{
+	layout
+	fill_to_free 50000
+	initrds "$(conf 10 "$K")" > "$W/inject"
+	touch "$W/dracut-fail"
+	run "install_kernel 11 $K"
+	expect "nonzero exit status" [ "$status" -ne 0 ]
+	expect "fault injected" [ "$(logged inject)" -eq 1 ]
+	expect "one regeneration attempt" [ "$(logged dracut)" -eq 1 ]
+	expect "no new entry" [ ! -e "$(conf 11 "$K")" ]
+	expect "donor entry not evicted" [ -f "$(conf 10 "$K")" ]
+	expect "default kept" complete "$(conf 10 "$K2")"
+}
+
+case_recovery-no-space()
+{
+	mk_snapshot 10 "" "$K" "$K2"
+	mk_snapshot 11 10 "$K" "$K2"
+	mk_snapper 10 11
+	mk_entry 10 "$K" main
+	mk_entry 10 "$K2" main
+	basename "$(conf 10 "$K2")" > "$W/default"
+	fill_to_free 500
+	# The regenerated initrd is bigger than what is free even with
+	# the lost one gone, and nothing else can be removed
+	echo 9000 > "$W/dracut_kb"
+	initrds "$(conf 10 "$K")" > "$W/inject"
+	run "install_kernel 11 $K"
+	expect "nonzero exit status" [ "$status" -ne 0 ]
+	expect "fault injected" [ "$(logged inject)" -eq 1 ]
+	expect "at most one dracut" [ "$(logged dracut)" -le 1 ]
+	expect "no new entry" [ ! -e "$(conf 11 "$K")" ]
+	expect "donor entry not evicted" [ -f "$(conf 10 "$K")" ]
+	expect "default kept" complete "$(conf 10 "$K2")"
+	expect "nothing half installed" [ "$(logged install)" -eq 0 ]
+}
+
+case_add-all-kernels-root-donor()
+{
+	layout
+	fill_to_free 500
+	run "install_all_kernels 11"
+	expect "exit status $status" [ "$status" -eq 0 ]
+	expect "no dracut" [ "$(logged dracut)" -eq 0 ]
+	expect "complete entry for $K" complete "$(conf 11 "$K")"
+	expect "complete entry for $K2" complete "$(conf 11 "$K2")"
+	expect "donor of $K kept" complete "$(conf 10 "$K")"
+	expect "donor of $K2 kept" complete "$(conf 10 "$K2")"
+	expect "same initrd as the donor of $K" [ "$(initrds "$(conf 11 "$K")")" = "$(initrds "$(conf 10 "$K")")" ]
+	expect "same initrd as the donor of $K2" [ "$(initrds "$(conf 11 "$K2")")" = "$(initrds "$(conf 10 "$K2")")" ]
+}
+
+case_kernel-lost()
+{
+	layout
+	fill_to_free 50000
+	sed -ne 's/^linux[[:space:]]\+//p' "$(conf 10 "$K")" > "$W/inject"
+	run "install_kernel 11 $K"
+	expect "exit status $status" [ "$status" -eq 0 ]
+	expect "fault injected" [ "$(logged inject)" -eq 1 ]
+	expect "no dracut" [ "$(logged dracut)" -eq 0 ]
+	expect "complete new entry" complete "$(conf 11 "$K")"
+	expect "same initrd as the donor" [ "$(initrds "$(conf 11 "$K")")" = "$(initrds "$(conf 10 "$K")")" ]
+}
+
+case_no-pin-leak()
+{
+	layout
+	fill_to_free 50000
+	run "install_kernel 11 $K; removable_entries 11 > \"\$HARNESS_W/removable\""
+	expect "exit status $status" [ "$status" -eq 0 ]
+	expect "complete new entry" complete "$(conf 11 "$K")"
+	expect "donor removable afterwards" grep -qx "$(basename "$(conf 10 "$K")")" "$W/removable"
+}
+
+failed=0
+for c in "${cases[@]}"; do
+	declare -F "case_$c" > /dev/null || { echo "Unknown case $c" >&2; exit 2; }
+	W="$work/case-$c"
+	ESP="$W/esp"
+	root=10
+	rm -rf "$W" "$work"/snapshots/*
+	mkdir -p "$ESP"
+	echo "$esp_kb" > "$W/esp_kb"
+	echo "$initrd_kb" > "$W/dracut_kb"
+	: > "$W/log"
+	problems=()
+	status=
+	"case_$c"
+	if [ "${#problems[@]}" -eq 0 ]; then
+		echo "PASS $c"
+		[ -z "$VERBOSE" ] || { sed "s/^/    log: /" "$W/log"; sed "s/^/    out: /" "$W/output"; }
+	else
+		failed=$((failed + 1))
+		echo "FAIL $c: $(IFS=';'; echo "${problems[*]}" | sed 's/;/; /g')"
+		if [ -n "$VERBOSE" ]; then
+			sed 's/^/    log: /' "$W/log"
+			sed 's/^/    out: /' "$W/output"
+		fi
+	fi
+done
+
+echo "$((${#cases[@]} - failed)) passed, $failed failed"
+[ "$failed" -eq 0 ]
