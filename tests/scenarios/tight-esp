@@ -1,0 +1,90 @@
+#!/bin/bash
+# scenario: tight-esp
+# Re-installing a kernel that is already in the ESP needs no space
+#
+# make_free_space unlinks boot entries, from the least to the most
+# valuable one, until the new kernel and initrd fit.  A kernel whose
+# file is already in the ESP is reused, and so is an initrd taken from
+# an existing entry, so neither needs any space.  Counting them anyway
+# (github issue 449) evicts entries that nothing needed gone, and those
+# can be the ones of the default snapshot.
+#
+# The copy of the ESP normally lives in /var/tmp, where the free space
+# is never short and the eviction never runs.  So it is moved to a
+# tmpfs with half a kernel of free space, and the reserve is set to
+# zero: the reinstallation must then leave every entry in place.
+#
+# Scoped to the running subvolume, like boot-counter: that is the entry
+# that add-kernel finds and reinstalls with --force
+version="$(uname -r)"
+subvol="$(findmnt --noheadings -o FSROOT --target / | head -n1)"
+subvol="${subvol#/}"
+
+[ ! -e "/usr/lib/modules/$version/initrd" ] || {
+	echo "a prebuilt initrd is installed, and its size is counted"
+	exit 77
+}
+
+linux="$(bootctl list --json=short | jq -r --arg v "$version" --arg s "$subvol" '
+	[.[] | select(.type=="type1") |
+	 select((.version // "") | endswith($v)) |
+	 select($s == "" or $s == "/" or ((.options // "") | contains("subvol=" + $s)))] |
+	if length == 1 then .[0].linux // empty else empty end')"
+[ -n "$linux" ] && [ -f "$ESP$linux" ] || {
+	echo "expected one entry with a kernel for the running $version"
+	exit 77
+}
+
+tight="$ESP.tight"
+mkdir -p "$tight"
+mount -t tmpfs -o size=1G tmpfs "$tight" || { echo "cannot mount a tmpfs"; exit 77; }
+trap 'umount "$tight"; rmdir "$tight"' EXIT
+cp -a "$ESP"/. "$tight"
+
+used="$(findmnt --noheadings --bytes -o USED --target "$tight")"
+kernel="$(stat -c %s "$ESP$linux")"
+size=$(((used + kernel / 2) / 1024))
+mount -o remount,size="${size}k" "$tight" || { echo "cannot shrink the tmpfs to ${size}k"; exit 77; }
+echo "ESP on a tmpfs of ${size}k, $(findmnt --noheadings -o AVAIL --target "$tight") free, the kernel is $((kernel / 1024))k"
+
+# By id and not by file name: the reinstalled entry can come back
+# with a boot counter, and it is still the same entry
+ids()
+{
+	SYSTEMD_ESP_PATH="$tight" bootctl list --json=short |
+		jq -r '.[] | select(.type=="type1") | .id' | sort
+}
+
+ids > "$tight.before"
+
+SYSTEMD_ESP_PATH="$tight" "$SDBOOTUTIL" --esp-path "$tight" --esp-free-space 0 \
+		--no-variables --disable-predictions --force -v add-kernel "$version" 2>&1 |
+	tee "$tight.log"
+status="${PIPESTATUS[0]}"
+
+ids > "$tight.after"
+changed="$(diff "$tight.before" "$tight.after")"
+rm -f "$tight.before" "$tight.after"
+
+# An initrd that was not found is generated, and then it does need the
+# space: what is evicted for it is the designed behaviour, not this bug.
+# It happens when the entry of the snapshot is under another name
+grep -q "Generating new initrd" "$tight.log" && {
+	rm -f "$tight.log"
+	echo "the initrd was not reused, so there was something to make room for"
+	exit 77
+}
+rm -f "$tight.log"
+
+# The result goes back where fde-state looks, so the invariants are
+# checked on what the tight ESP was left with
+rm -rf "${ESP:?}"/*
+cp -a "$tight"/. "$ESP"
+
+[ "$status" = 0 ] || { echo "FAIL: add-kernel exited with $status"; exit 1; }
+[ -z "$changed" ] || {
+	echo "FAIL: reinstalling $version changed the entries:"
+	echo "$changed"
+	exit 1
+}
+echo "every entry is still in place"
