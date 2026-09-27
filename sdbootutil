@@ -1493,7 +1493,11 @@ reuse_initrd()
 			info "Found existing initrd $v"
 			dstinitrd+=("$v")
 		done < <(entry_field "$conf" initrd)
-		[ "${#dstinitrd[@]}" -eq 0 ] || return 0
+		# Freeing space must not remove the initrd reused here
+		[ "${#dstinitrd[@]}" -eq 0 ] || {
+			reused_entry="$conf"
+			return 0
+		}
 	fi
 
 	return 1
@@ -1589,6 +1593,10 @@ add_version_to_title()
 
 pending_kernel_size()
 {
+	[ -n "$1" ] || {
+		echo 0
+		return 0
+	}
 	echo $(($(stat -c %s "$1") / 1024 + 1))
 }
 
@@ -1705,7 +1713,7 @@ removable_entries()
 	#
 	# The columns are never empty, as `read` and `sort` would
 	# collapse consecutive tabs and shift the fields
-	jq -r --arg in_use "${in_use[*]}" --arg last "$root_snapshot" '
+	jq -r --arg in_use "${in_use[*]}" --arg last "$root_snapshot" --arg keep "${reused_entry:-}" '
 		def snapshot_of:
 			((.options // "") | capture("rootflags=subvol=[^ ]*/\\.snapshots/(?<n>[0-9]+)/snapshot") | .n)
 			// ((.version // "") | capture("^(?<n>[0-9]+)[@_]") | .n)
@@ -1718,7 +1726,7 @@ removable_entries()
 
 		($in_use | split(" ") | map(select(. != ""))) as $in_use
 		| .[]
-		| select(.isDefault != true and .isSelected != true)
+		| select(.isDefault != true and .isSelected != true and .path != $keep)
 		| snapshot_of as $s
 		| kernel_of as $k
 		| select(($in_use | index($s)) == null or $s == $last)
@@ -1956,6 +1964,7 @@ install_kernel()
 	[ -z "$have_snapshots" ] || subvol="${subvol_prefix}/.snapshots/${snapshot}/snapshot"
 	local kernel_version="$2"
 	local dstinitrd=()
+	local reused_entry=
 	local src="${subvol#"${subvol_prefix}"}/lib/modules/$kernel_version/$image"
 	[ -n "$kernel_version" ] || err "Missing kernel version"
 	[ -e "$src" ] || err "Can't find $src"
@@ -2055,7 +2064,11 @@ install_kernel()
 		fi
 	fi
 
-	make_free_space_for_kernel "$snapshot" "$src" "$tmpdir" "$devicetree_src" || err "No free space in ${boot_root} for new kernel"
+	# Files already in the ESP are reused, and need no space
+	local kernel_size_src="$src" devicetree_size_src="$devicetree_src"
+	[ ! -e "${boot_root}$dst" ] || kernel_size_src=
+	[ -z "$devicetree_dst" ] || [ ! -e "${boot_root}$devicetree_dst" ] || devicetree_size_src=
+	make_free_space_for_kernel "$snapshot" "$kernel_size_src" "$tmpdir" "$devicetree_size_src" || err "No free space in ${boot_root} for new kernel"
 
 	local boot_options
 	[ -z "$in_buildroot" ] || subvol="${subvol_prefix}/.snapshots/${snapshot}/snapshot"

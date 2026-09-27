@@ -5,7 +5,8 @@
 # Unit tests for the library half of sdbootutil: the routing of the
 # secrets -- which source wins, what is published to the keyring, and
 # which warnings are printed -- the entry names the boot loaders spell
-# differently, the versions the status report compares, and `grubenv`.
+# differently, the versions the status report compares, `grubenv`, and
+# the entries that may be removed to make room in the ESP.
 #
 # These are decisions the tool takes *before* it writes anything to the
 # TPM2, so they do not need one, and they do not need a guest either: a
@@ -47,7 +48,7 @@ KEYS=(cryptenroll sdbootutil sdbootutil-key sdbootutil-pw sdbootutil-pin
 ENTRY="opensuse-microos-7.2.3-1-default-10"
 
 [ "${1:-}" != "-h" ] && [ "${1:-}" != "--help" ] || {
-	sed -n '4,26p' "${BASH_SOURCE[0]}" | sed 's/^# \?//'
+	sed -n '4,27p' "${BASH_SOURCE[0]}" | sed 's/^# \?//'
 	exit 0
 }
 
@@ -462,6 +463,69 @@ t_grubenv_full()
 	is "size" 1024 "$(stat -c %s "$workdir/grubenv")"
 }
 
+# removable_entries: the entries that make_free_space may unlink when
+# the ESP is short of space.  A new snapshot reuses the initrd of an
+# entry of its parent (github issue 449), and unlinking that entry frees
+# the initrd the new entry is about to point at
+
+# The ESP of a Tumbleweed where snapshot 11 is being created from 10,
+# the default, which has two kernels.  Snapshot 5 is a leftover
+removable_setup()
+{
+	load
+	# shellcheck disable=SC2034  # read by the sourced library
+	have_snapshots=1 root_snapshot=10 entryfile="$workdir/entries.json"
+
+	# What reads the system: bootctl, and the snapper database
+	# shellcheck disable=SC2329  # both are called by the sourced library
+	update_entries_for_this_system() { :; }
+	# shellcheck disable=SC2329
+	snapshots_in_use() { printf '%s\n' 10 11; }
+
+	local e=/boot/efi/loader/entries t=opensuse-tumbleweed s=@/.snapshots
+	jq -n --arg e "$e" --arg t "$t" --arg s "$s" '[
+		{id: "\($t)-6.1.0-1-default-5.conf", path: "\($e)/\($t)-6.1.0-1-default-5.conf",
+		 options: "rootflags=subvol=\($s)/5/snapshot", linux: "/\($t)/6.1.0-1-default/linux-a"},
+		{id: "\($t)-6.1.0-1-default-10.conf", path: "\($e)/\($t)-6.1.0-1-default-10.conf",
+		 options: "rootflags=subvol=\($s)/10/snapshot", linux: "/\($t)/6.1.0-1-default/linux-a"},
+		{id: "\($t)-6.2.0-1-default-10.conf", path: "\($e)/\($t)-6.2.0-1-default-10.conf",
+		 options: "rootflags=subvol=\($s)/10/snapshot", linux: "/\($t)/6.2.0-1-default/linux-b",
+		 isDefault: true}
+	]' > "$entryfile"
+}
+
+t_re_order()
+{
+	removable_setup
+
+	# The leftover first, the default snapshot as a last resort, and
+	# never the default entry
+	is "candidates" \
+	   "opensuse-tumbleweed-6.1.0-1-default-5.conf opensuse-tumbleweed-6.1.0-1-default-10.conf" \
+	   "$(removable_entries 11 | paste -sd' ')"
+}
+
+t_re_reused()
+{
+	removable_setup
+	# shellcheck disable=SC2034  # read by the sourced library
+	reused_entry="/boot/efi/loader/entries/opensuse-tumbleweed-6.1.0-1-default-10.conf"
+
+	is "candidates" "opensuse-tumbleweed-6.1.0-1-default-5.conf" \
+	   "$(removable_entries 11 | paste -sd' ')"
+}
+
+# pending_kernel_size: a kernel that is already in the ESP is reused, so
+# it needs no space
+t_pks_reused()
+{
+	load
+
+	is "no kernel to copy" 0 "$(pending_kernel_size "")"
+	head -c 4096 /dev/zero > "$workdir/linux"
+	is "a 4K kernel" 5 "$(pending_kernel_size "$workdir/linux")"
+}
+
 ####### the runner #######
 
 run_case()
@@ -521,6 +585,9 @@ done <<-'EOF'
 	t_svr_no_system             status_version_row reports a system version that cannot be read
 	t_grubenv_size              grubenv_set writes a block of exactly 1024 bytes
 	t_grubenv_full              grubenv_set does not pad a block that is already full
+	t_re_order                  removable_entries keeps the default and removes leftovers first
+	t_re_reused                 removable_entries keeps the entry whose initrd is being reused
+	t_pks_reused                pending_kernel_size counts nothing for a kernel already in the ESP
 EOF
 
 echo
