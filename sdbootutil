@@ -5520,8 +5520,8 @@ generate_tpm2_predictions_pcr_15()
 		# extensions after the switch root cannot participate
 		# in abort the boot process from initrd itself
 		#
-		# Note that dracut will add the cr_swap partition even
-		# if it is not marked as x-initrd.attach
+		# Note that dracut will add the swap partition even if
+		# it is not marked as x-initrd.attach
 		[[ "$name" = \#* ]] && continue
 		[[ "$opts" != *"tpm2-device="* ]] && continue
 		[[ "$opts" != *"tpm2-measure-pcr="* ]] && continue
