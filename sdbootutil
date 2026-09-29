@@ -966,7 +966,12 @@ bootctl_entries()
 		bootctl "$@"
 		return
 	fi
-	bootctl "$@" 2> >(grep -Ev "$bootctl_noise" >&2)
+	# No `2> >(...)`: it opens /proc/self/fd/N with O_CREAT, which
+	# SELinux denies (dac_override, add_name)
+	local rc=0
+	bootctl "$@" 2> "$tmpdir/bootctl.err" || rc=$?
+	grep -Ev "$bootctl_noise" "$tmpdir/bootctl.err" >&2 || :
+	return "$rc"
 }
 
 entry_filter=("cat")
