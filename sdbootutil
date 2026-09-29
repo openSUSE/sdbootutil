@@ -588,9 +588,12 @@ load_config_file()
 		}
 	done
 
-	# Force back "device" for ROOTFS if is encrypted
+	# Force back "device" for ROOTFS if is encrypted.  Not a user
+	# error: the config file is generated before disk-encryption-tool
+	# encrypts the root on first boot, so it keeps "uuid", and
+	# `status` already reports the value as forced
 	if is_rootfs_crypt; then
-		[ "$ROOTFS" = "device" ] || info "Fix the /etc/default/sdbootutil to set ROOTFS as 'device'"
+		[ "$ROOTFS" = "device" ] || dbg "ROOTFS=$ROOTFS in the config file, forcing 'device' as the root is encrypted"
 		ROOTFS="device"
 	fi
 
