@@ -183,7 +183,7 @@ get_credential recovery_pin "sdbootutil-enroll.recovery-pin"
 # This is not an error: the service is enabled by the image, while the
 # credentials come from the deployment
 [ -n "$rk$pw$tpm2_pin$tpm2$fido2" ] || {
-	echo "No enrollment method requested. The device is still opened only by the key that disk-encryption-tool generated, readable from %user:cryptenroll until this boot ends" > /dev/stderr
+	echo "No enrollment method requested. The device is still opened only by the key that disk-encryption-tool generated, readable from %user:cryptenroll until this boot ends" >&2
 	exit 0
 }
 
@@ -220,7 +220,7 @@ error=0
 			   KEY="$key" sdbootutil enroll --method=recovery-key "$extra")"; then
 		[ -z "$recovery_key" ] || write_issue_file "$recovery_key"
 	else
-		echo "Failed to enroll the recovery key" > /dev/stderr
+		echo "Failed to enroll the recovery key" >&2
 		error=1
 	fi
 }
@@ -236,7 +236,7 @@ error=0
 	fi
 	CURRENT_PW="$current_pw" RECOVERY_PIN="$recovery_pin" \
 		PW="$pw" sdbootutil enroll --method=password "$extra" || {
-		echo "Failed to enroll the password" > /dev/stderr
+		echo "Failed to enroll the password" >&2
 		error=1
 	}
 }
@@ -247,7 +247,7 @@ if [ -n "$tpm2_pin" ]; then
 		  SDB_ADD_INITIAL_COMPONENT=1 PIN="$tpm2_pin" sdbootutil enroll --method=tpm2+pin)"; then
 		write_recovery_pin "$out"
 	else
-		echo "Failed to enroll the TPM2 with PIN" > /dev/stderr
+		echo "Failed to enroll the TPM2 with PIN" >&2
 		error=1
 	fi
 elif [ -n "$tpm2" ]; then
@@ -256,7 +256,7 @@ elif [ -n "$tpm2" ]; then
 		  SDB_ADD_INITIAL_COMPONENT=1 sdbootutil enroll --method=tpm2)"; then
 		write_recovery_pin "$out"
 	else
-		echo "Failed to enroll the TPM2" > /dev/stderr
+		echo "Failed to enroll the TPM2" >&2
 		error=1
 	fi
 fi
@@ -265,7 +265,7 @@ fi
 	echo "Enrolling a FIDO2 key"
 	CURRENT_PW="$current_pw" RECOVERY_PIN="$recovery_pin" \
 		sdbootutil enroll --method=fido2 || {
-		echo "Failed to enroll the FIDO2 key" > /dev/stderr
+		echo "Failed to enroll the FIDO2 key" >&2
 		error=1
 	}
 }
@@ -277,7 +277,7 @@ fi
 # open it.  Exiting non-zero also makes the failure visible, as
 # sdbootutil-enroll.service is the only trace that this ran
 [ "$error" -eq 0 ] || {
-	echo "Keeping the enrollment key, as some enrollment failed" > /dev/stderr
+	echo "Keeping the enrollment key, as some enrollment failed" >&2
 	exit 1
 }
 
@@ -287,9 +287,9 @@ fi
 while read -r dev; do
 	wipe_enrollment_key "$dev"
 	case "$?" in
-		1) echo "Keeping the enrollment key of $dev, as no other method can open it" > /dev/stderr
+		1) echo "Keeping the enrollment key of $dev, as no other method can open it" >&2
 		   error=1 ;;
-		2) echo "Failed to remove the enrollment key of $dev" > /dev/stderr
+		2) echo "Failed to remove the enrollment key of $dev" >&2
 		   error=1 ;;
 	esac
 done < <(sdbootutil list-devices)
