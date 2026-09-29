@@ -105,6 +105,15 @@ sdbootutil_bin()
 # * The same marker file is used to detect that there is a pending
 #   update-predictions
 #
+# * The transient service is ordered before the service, so at
+#   shutdown it is stopped only after the service has finished.  Both
+#   can be pending at once (a new snapshot while the service runs sets
+#   the marker again and re-creates the transient service), and two
+#   concurrent update-predictions are last-writer-wins: an iteration
+#   still predicting for the previous default snapshot can overwrite
+#   the new policy.  Serialized, the ExecStop only acts if the service
+#   left the marker set (it failed, or was killed), so it is the retry
+#
 # * If no device is unlocked with the TPM2 the predictions are a
 #   no-op, so no transient unit is created at all.  This is the same
 #   condition that guards sdbootutil-update-predictions.service
@@ -149,6 +158,7 @@ set_update_predictions_timer()
 			    --property=DefaultDependencies=no \
 			    --property=Conflicts=umount.target \
 			    --property=Before=umount.target \
+			    --property=Before=sdbootutil-update-predictions.service \
 			    --property=RequiresMountsFor="/ /var /run /tmp /boot/efi" \
 			    --property=TimeoutStopSec=120 \
 			    --property=ExecStop='/bin/bash -c "[ $(systemctl is-system-running) = stopping ] || exit 0; [ -f /run/sdbootutil/update-predictions ] || exit 0; exec /usr/bin/sdbootutil -v update-predictions"' \
