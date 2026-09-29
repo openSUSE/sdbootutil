@@ -39,9 +39,16 @@ ExecStopPost=/usr/bin/sh -c '\
         else \
             echo "Command failed. Reason: $SERVICE_RESULT (Status: $EXIT_STATUS). No backup found, keeping the current predictions"; \
         fi; \
+        [ ! -d /run/sdbootutil ] || touch /run/sdbootutil/update-predictions; \
     fi; \
     rm -rf "/tmp/$INVOCATION_ID"'
 ImportCredential=sdbootutil-update-predictions.*
+# On failure the marker is set again, so the predictions are still
+# pending: if this was interrupted by a reboot, the transient
+# sdbootutil-update-predictions-shutdown.service (snapper plugin) is
+# ordered after this service and retries them.  Without the marker the
+# loop has removed it already, and nothing would redo them
+#
 # The service can be triggered by a timer (snapper plugin), this
 # prevents systemd from killing the script mid-run during a reboot,
 # and gives 2 minutes to complete
