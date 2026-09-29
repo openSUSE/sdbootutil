@@ -150,6 +150,13 @@ set_update_predictions_timer()
 	# reboot: if it could not update PCR 15, the next boot halts in
 	# measure-pcr-validator, and this journal entry is the only
 	# warning that it was coming
+	#
+	# /.snapshots is required because update-predictions asks
+	# snapper which snapshots to include.  Being ordered after
+	# sdbootutil-update-predictions.service, this can run late in
+	# the shutdown, and without the mount snapper fails and the
+	# prediction silently loses the snapper default and the last
+	# working snapshots
 	if ! systemctl --quiet is-active sdbootutil-update-predictions-shutdown.service; then
 		systemd-run --unit=sdbootutil-update-predictions-shutdown.service \
 			    --property=Description="Update TPM predictions before shutdown" \
@@ -159,7 +166,7 @@ set_update_predictions_timer()
 			    --property=Conflicts=umount.target \
 			    --property=Before=umount.target \
 			    --property=Before=sdbootutil-update-predictions.service \
-			    --property=RequiresMountsFor="/ /var /run /tmp /boot/efi" \
+			    --property=RequiresMountsFor="/ /.snapshots /var /run /tmp /boot/efi" \
 			    --property=TimeoutStopSec=120 \
 			    --property=ExecStop='/bin/bash -c "[ $(systemctl is-system-running) = stopping ] || exit 0; [ -f /run/sdbootutil/update-predictions ] || exit 0; exec /usr/bin/sdbootutil -v update-predictions"' \
 			    /bin/true
