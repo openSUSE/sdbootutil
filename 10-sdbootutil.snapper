@@ -94,8 +94,8 @@ sdbootutil_bin()
 #   means that it is executed multiple times)
 #
 # * In case that a reboot or shutdown is commanded when the service is
-#   running, it will not accept the SIGTERM signal, and will require 2
-#   minutes before forcing it down
+#   running, it will not accept the SIGTERM signal, and will have 5
+#   minutes to complete before being forced down
 #
 # * Finally, if the reboot or shutdown command is launched before the
 #   timer triggers, a transient service will be executed to run the
@@ -167,7 +167,7 @@ set_update_predictions_timer()
 			    --property=Before=umount.target \
 			    --property=Before=sdbootutil-update-predictions.service \
 			    --property=RequiresMountsFor="/ /.snapshots /var /run /tmp /boot/efi" \
-			    --property=TimeoutStopSec=120 \
+			    --property=TimeoutStopSec=300 \
 			    --property=ExecStop='/bin/bash -c "[ $(systemctl is-system-running) = stopping ] || exit 0; [ -f /run/sdbootutil/update-predictions ] || exit 0; exec /usr/bin/sdbootutil -v update-predictions"' \
 			    /bin/true
 	fi
