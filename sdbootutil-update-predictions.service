@@ -51,9 +51,10 @@ ImportCredential=sdbootutil-update-predictions.*
 #
 # The service can be triggered by a timer (snapper plugin), this
 # prevents systemd from killing the script mid-run during a reboot,
-# and gives 2 minutes to complete
+# and gives 5 minutes to complete.  The loop can run update-predictions
+# more than once, and a single run takes about a minute on a slow VM
 KillSignal=SIGCONT
-TimeoutStopSec=120
+TimeoutStopSec=300
 
 [Install]
 WantedBy=default.target
