@@ -1922,19 +1922,34 @@ kernel_cmdline_files()
 		break
 	done
 
+	# When "subvol" is the system that is running, or there are no
+	# snapshots, the drop-in directories of the snapshot and of the
+	# running system are the same directory: list it once, or every
+	# drop-in is read twice and its parameters are duplicated in the
+	# entry
+	local usr_dirs=("${subvol:1}/usr/kernel/cmdline.d")
+	[ "${subvol:1}/usr/kernel/cmdline.d" -ef /usr/kernel/cmdline.d ] || usr_dirs+=(/usr/kernel/cmdline.d)
+	local etc_dirs=("${subvol:1}/etc/kernel/cmdline.d")
+	[ "${subvol:1}/etc/kernel/cmdline.d" -ef /etc/kernel/cmdline.d ] || etc_dirs+=(/etc/kernel/cmdline.d)
+
 	# A drop-in in "/etc" replaces the one with the same name in
 	# "/usr", and an empty one is a way of masking it
-	for i in "${subvol:1}"/usr/kernel/cmdline.d/* /usr/kernel/cmdline.d/*; do
-		[ -e "${subvol:1}/etc/kernel/cmdline.d/$(basename "$i")" ] && continue
-		[ -s "$i" ] || continue
-		echo "$i"
-		found=1
+	local d
+	for d in "${usr_dirs[@]}"; do
+		for i in "$d"/*; do
+			[ -e "${subvol:1}/etc/kernel/cmdline.d/$(basename "$i")" ] && continue
+			[ -s "$i" ] || continue
+			echo "$i"
+			found=1
+		done
 	done
 
-	for i in "${subvol:1}"/etc/kernel/cmdline.d/* /etc/kernel/cmdline.d/*; do
-		[ -s "$i" ] || continue
-		echo "$i"
-		found=1
+	for d in "${etc_dirs[@]}"; do
+		for i in "$d"/*; do
+			[ -s "$i" ] || continue
+			echo "$i"
+			found=1
+		done
 	done
 
 	[ -n "$found" ]
