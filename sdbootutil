@@ -33,6 +33,9 @@ unset CURRENT_PW KEY PW PIN RECOVERY_PIN
 DEBUG_LOG="/var/log/sdbootutil.log"
 verbose=
 
+# Replaced with the package version by the spec file
+version=git
+
 # The trace can record secrets (passwords and PINs passed as command
 # line arguments to the tools that this script calls), so the log is
 # created 0600 and never with whatever the umask happens to be
@@ -283,6 +286,7 @@ helpandquit()
 		                        (verbose output is enabled)
 		  --stop-trace-code	Remove /var/log/sdbootutil.log to stop tracing the code
 		  -h, --help		This screen
+		  --version		Print the version and exit
 
 		COMMAND:
 		bootloader [SNAPSHOT]
@@ -7728,6 +7732,7 @@ define_commands() {
 define_options() {
 	declare -gA options_with_arg=(
 		[help]=""
+		[version]=""
 		[verbose]=""
 		[start-trace-code]=""
 		[stop-trace-code]=""
@@ -7794,6 +7799,7 @@ eval set -- "$getopt_tmp"
 while true ; do
 	case "$1" in
 		-h|--help) helpandquit ;;
+		--version) echo "sdbootutil $version"; exit 0 ;;
 		-v|--verbose) verbose=$((++verbose)); shift ;;
 		--start-trace-code) shift ;;
 		--stop-trace-code) shift ;;
