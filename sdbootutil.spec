@@ -182,6 +182,8 @@ cd uhmac
 
 %install
 install -D -m 755 %{name} %{buildroot}%{_bindir}/%{name}
+sed -i 's/^version=git$/version="%{version}"/' %{buildroot}%{_bindir}/%{name}
+grep -q '^version="%{version}"$' %{buildroot}%{_bindir}/%{name}
 
 # Install uhmac binary
 pushd uhmac
