@@ -1520,6 +1520,9 @@ mount_chroot()
 	# properly detect the fs type and load the relevant module.
 	findmnt -o TARGET,FSTYPE,FSROOT -Rv --json / > "$tmpdir/mounts"
 	mount --bind "$snapshot_dir" "$snapshot_dir"
+	# The bind is a peer of the shared /.snapshots mount, and every
+	# mount below it would be propagated to the host too
+	mount --make-slave "$snapshot_dir"
 	# Register the chroot before mounting anything else, so a
 	# failure in the middle of the loop is unwound by `cleanup`
 	chroot_dir="$snapshot_dir"
@@ -1564,6 +1567,10 @@ umount_chroot()
 {
 	local snapshot_dir="$1"
 
+	# The binds are peers of the host mounts, and they receive the
+	# ones that the host creates meanwhile (like a FUSE mount in
+	# /home).  Unmounting those copies would unmount the originals
+	mount --make-rslave "$snapshot_dir"
 	umount -R "$snapshot_dir"
 	chroot_dir=
 }
