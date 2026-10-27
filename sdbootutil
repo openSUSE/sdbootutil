@@ -3187,6 +3187,14 @@ bli_efi_var_set()
 	chattr +i "$efi_var"
 }
 
+bli_efi_var_unset()
+{
+	local efi_var="/sys/firmware/efi/efivars/${1:?}-4a67b082-0a4c-41cf-b6c7-440b29bb8c4f"
+	[ -e "$efi_var" ] || return 0
+	chattr -i "$efi_var"
+	rm -f "$efi_var"
+}
+
 loader_conf_set()
 {
 	local key="${1:?}"
@@ -3200,6 +3208,12 @@ loader_conf_set()
 	else
 		echo "$key $value" >> "${esp_root}/loader/loader.conf"
 	fi
+}
+
+loader_conf_unset()
+{
+	local key="${1:?}"
+	[ ! -e "${esp_root}/loader/loader.conf" ] || sed -i -e "/^$key /d" "${esp_root}/loader/loader.conf"
 }
 
 loader_conf_get()
@@ -3250,16 +3264,39 @@ grubenv_get()
 	fi
 }
 
+# systemd-boot boots the default entry even when boot counting marked
+# it as bad, so a snapshot that never boots correctly is tried
+# forever.  The preferred entry (systemd 260) is skipped when it is
+# bad, and the boot loader moves to the first entry that is not marked
+# as preferred
+sdboot_has_preferred()
+{
+	local features
+	features="$(od -An -t u8 -j 4 -N 8 /sys/firmware/efi/efivars/LoaderFeatures-4a67b082-0a4c-41cf-b6c7-440b29bb8c4f 2> /dev/null)" || return 1
+	(( (features >> 19) & 1 ))
+}
+
 set_default_sdboot()
 {
 	local id="${1:?}"
 
-	if ! has_efivars || [ -n "$arg_no_variables" ]; then
-		loader_conf_set "default" "$id"
-	elif ! bli_efi_var_set "LoaderEntryDefault" "$id"; then
-		warn "EFI variable LoaderEntryDefault cannot be set.  Falling back to configuration file"
-		loader_conf_set "default" "$id"
+	# The entry is the preferred or the default one, never both: a
+	# bad preferred entry is skipped, and then the default one is
+	# booted, even when it is the same bad entry
+	local key="default" stale="preferred"
+	if sdboot_has_preferred; then
+		key="preferred"
+		stale="default"
 	fi
+
+	if ! has_efivars || [ -n "$arg_no_variables" ]; then
+		loader_conf_set "$key" "$id"
+	elif ! bli_efi_var_set "LoaderEntry${key^}" "$id"; then
+		warn "EFI variable LoaderEntry${key^} cannot be set.  Falling back to configuration file"
+		loader_conf_set "$key" "$id"
+	fi
+	loader_conf_unset "$stale"
+	[ -n "$arg_no_variables" ] || bli_efi_var_unset "LoaderEntry${stale^}"
 }
 
 set_default_grub2_bls()
@@ -3351,8 +3388,10 @@ get_default_sdboot()
 {
 	local val
 	if has_efivars && [ -z "$arg_no_variables" ]; then
-		val="$(bli_efi_var_get "LoaderEntryDefault")"
+		val="$(bli_efi_var_get "LoaderEntryPreferred")"
+		[ -n "$val" ] || val="$(bli_efi_var_get "LoaderEntryDefault")"
 	fi
+	[ -n "$val" ] || val="$(loader_conf_get "preferred")"
 	[ -n "$val" ] || val="$(loader_conf_get "default")"
 	[ -n "$val" ] || val="$(get_default_bootctl)"
 	[ -z "$val" ] || echo "$val"
