@@ -4096,7 +4096,13 @@ pcrlock_grub2_bls_kernel_initrd_cmdline_initrd()
 	local cmdline="$4"
 	local suffix="$5"
 
-	local elements=("$linux" "$initrd")
+	# GRUB2-BLS >= 2.16 measures the initrd when the kernel loads it,
+	# and the kernel measures the cmdline before that
+	local initrd_in_place=
+	systemd-analyze compare-versions "$(bootloader_version)" "<" "2.16" || initrd_in_place=1
+
+	local elements=("$linux")
+	[ -n "$initrd_in_place" ] || elements+=("$initrd")
 	[ -z "$devicetree" ] || elements+=("$devicetree")
 	local locks=()
 	local n=0
@@ -4132,6 +4138,16 @@ pcrlock_grub2_bls_kernel_initrd_cmdline_initrd()
 	fi
 	locks+=("$tmpdir/element-$n.pcrlock")
 	rm "$tmpdir/cmdline"
+
+	if [ -n "$initrd_in_place" ]; then
+		n=$((n+1))
+		pcrlock \
+			lock-raw \
+			--pcr=9 \
+			--pcrlock "$tmpdir/element-$n.pcrlock" \
+			"$initrd" 2> /dev/null
+		locks+=("$tmpdir/element-$n.pcrlock")
+	fi
 
 	n=$((n+1))
 	pcrlock \
