@@ -7782,6 +7782,23 @@ define_options() {
 	opts_long="${opts_long%,}"
 }
 
+# Two runs at the same time race over the ESP, the boot entries and
+# /var/lib/pcrlock.d.  It happens at boot, when health-checker calls
+# set-default-snapshot while sdbootutil-update-predictions.service is
+# running.  The lock is released when the process exits.  Without
+# permissions to take it the command would fail later anyway
+#
+# Like in the snapper plugin the directory is only for root: any user
+# that can open the lock can also hold it, and block every run
+take_lock()
+{
+	{ mkdir -p /run/sdbootutil && chmod 700 /run/sdbootutil; } 2> /dev/null || return 0
+	exec {lock_fd}> /run/sdbootutil/lock || return 0
+	flock -n "$lock_fd" && return 0
+	info "Waiting for another sdbootutil to finish"
+	flock -w 600 "$lock_fd" || err "Another sdbootutil has been running for 10 minutes"
+}
+
 ####### main #######
 
 if [ "$1" = "_print_bash_completion_data" ]; then
@@ -7871,6 +7888,11 @@ if [ -z "$1" ]; then
 elif [ -z ${commands["$1"]+yes} ]; then
 	err "unknown command $1"
 fi
+
+case "$1" in
+	is-installed|needs-update|list-*|status|show-entry|is-bootable|get-*|print-loader-path|bootloader) ;;
+	*) take_lock ;;
+esac
 
 [ -n "$arg_esp_path" ] && export SYSTEMD_ESP_PATH="$arg_esp_path"
 
