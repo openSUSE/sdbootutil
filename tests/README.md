@@ -124,6 +124,22 @@ of the machine they run on, so they belong to a destructive guest suite
 that does not exist yet, and whose first requirement is a way to put a
 guest back.
 
+## Enrollment service (`tests/enroll`)
+
+`sdbootutil-enroll` decides what to enroll from the credentials and from
+the LUKS2 headers that disk-encryption-tool left behind.  `tests/enroll`
+runs the real script against LUKS2 headers in image files, with
+`sdbootutil` replaced by a stub that enrolls them with `cryptsetup`, in
+a user and mount namespace with a private `/run`.  It does not need
+root.
+
+```console
+$ tests/enroll
+ok   enrolls a recovery key when nothing was requested
+...
+5 cases, all passed
+```
+
 ## Adding a scenario
 
 A scenario is a bash script in `scenarios/`, run on the guest with

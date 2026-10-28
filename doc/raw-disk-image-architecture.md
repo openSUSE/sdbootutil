@@ -826,7 +826,7 @@ initrd-created keyring survives `switch_root`).
 | `firstboot.timezone` | `jeos-firstboot` | Skips the timezone dialog |
 | `sdbootutil-enroll.current-pw` | `sdbootutil-enroll` | Existing password/passphrase needed to authorize enrolling a *new* factor on an already-enrolled device |
 | `sdbootutil-enroll.pw` | `sdbootutil-enroll`, `jeos-firstboot-enroll` | Enroll a password keyslot |
-| `sdbootutil-enroll.rk` | `sdbootutil-enroll` | Enroll a recovery-key keyslot |
+| `sdbootutil-enroll.rk` | `sdbootutil-enroll` | Enroll a recovery-key keyslot. Implied when no `sdbootutil-enroll.*` method is given and a device is still opened only by the transient enrollment key |
 | `sdbootutil-enroll.tpm2` | `sdbootutil-enroll`, `jeos-firstboot-enroll` | Enroll a TPM2 keyslot (no PIN) |
 | `sdbootutil-enroll.tpm2+pin` | `sdbootutil-enroll`, `jeos-firstboot-enroll` | Enroll a TPM2 keyslot; value is the PIN |
 | `sdbootutil-enroll.fido2` | `sdbootutil-enroll`, `jeos-firstboot-enroll` | Enroll a FIDO2 keyslot |

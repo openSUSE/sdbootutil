@@ -1,0 +1,295 @@
+#!/bin/bash
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: Copyright 2026 SUSE LLC
+#
+# Tests for sdbootutil-enroll: which methods it asks sdbootutil for,
+# given the credentials and the LUKS2 headers that disk-encryption-tool
+# left behind, what it shows in the issue file, and which keyslots it
+# wipes at the end.
+#
+# The script runs for real, against LUKS2 headers in image files, with
+# `sdbootutil` replaced by a stub that lists those images and enrolls
+# them with cryptsetup.  It runs in a user and mount namespace with a
+# private /run, so nothing reaches the issue files of the host.
+#
+# Usage:
+#   tests/enroll [-h]
+#
+# Does not need root.  It uses the real %user:cryptenroll keyring entry,
+# so it refuses to start when it is already there.
+
+set -e
+shopt -s nullglob
+
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+top="$(dirname "$here")"
+
+PATH="$PATH:/usr/sbin:/sbin"
+
+# The key that disk-encryption-tool generates, and the recovery key that
+# the stub enrolls
+BOOTSTRAP="bootstrap-password"
+RECOVERY="recovery-key-of-the-stub"
+
+[ "${1:-}" != "-h" ] && [ "${1:-}" != "--help" ] || {
+	sed -n '4,19p' "${BASH_SOURCE[0]}" | sed 's/^# \?//'
+	exit 0
+}
+
+skip()
+{
+	echo "SKIP: $*"
+	exit 77
+}
+
+die()
+{
+	echo "ERROR: $*" >&2
+	exit 1
+}
+
+for cmd in cryptsetup systemd-cryptenroll keyctl jq unshare; do
+	command -v "$cmd" > /dev/null || skip "$cmd is not installed"
+done
+unshare -rm true 2> /dev/null || skip "unprivileged user namespaces are not available"
+keyctl id %user:cryptenroll &> /dev/null && \
+	die "%user:cryptenroll is in the keyring. Purge it first: keyctl purge user cryptenroll"
+
+workdir="$(mktemp -d -t sdbootutil-enroll.XXXXXX)"
+
+cleanup_enroll()
+{
+	rm -rf "$workdir"
+	keyctl purge user cryptenroll &> /dev/null || true
+}
+trap cleanup_enroll EXIT
+
+####### the stubs #######
+
+mkdir "$workdir/bin"
+
+# have_luks2 asks lsblk, that does not see image files
+cat > "$workdir/bin/lsblk" <<-'EOF'
+	#!/bin/bash
+	echo crypto_LUKS
+EOF
+
+# Every call is logged.  The enrollments add a keyslot to every listed
+# device, authorized by the key in %user:cryptenroll, as the real one
+# does through systemd-cryptenroll
+cat > "$workdir/bin/sdbootutil" <<-EOF
+	#!/bin/bash
+	echo "\$*" >> "$workdir/calls"
+	add_key()
+	{
+		local dev
+		while read -r dev; do
+			cryptsetup luksAddKey --batch-mode --force-password \\
+				   --pbkdf pbkdf2 --pbkdf-force-iterations 1000 \\
+				   --key-file <(keyctl pipe %user:cryptenroll) \\
+				   "\$dev" <(echo -n "\$1") || exit 1
+		done < "$workdir/devices"
+	}
+	case "\$1 \$2" in
+		"list-devices "*) cat "$workdir/devices" ;;
+		"enroll --method=recovery-key") add_key "$RECOVERY"; echo "Recovery key: $RECOVERY" ;;
+		"enroll --method=password") add_key "\$PW" ;;
+		*) exit 1 ;;
+	esac
+EOF
+chmod +x "$workdir/bin/lsblk" "$workdir/bin/sdbootutil"
+
+####### the fixtures #######
+
+# A device as disk-encryption-tool leaves it: a single keyslot, with the
+# key in %user:cryptenroll, marked with the "enrollment-key" token
+new_device()
+{
+	local img="$workdir/$1.img"
+	truncate -s 32M "$img"
+	cryptsetup luksFormat --type luks2 --batch-mode --force-password \
+		   --pbkdf pbkdf2 --pbkdf-force-iterations 1000 \
+		   "$img" <<<"$BOOTSTRAP"
+	echo '{"type":"enrollment-key","keyslots":["0"]}' | cryptsetup token import "$img"
+	echo "$img" >> "$workdir/devices"
+}
+
+credential()
+{
+	mkdir -p "$workdir/creds"
+	echo "$2" > "$workdir/creds/sdbootutil-enroll.$1"
+}
+
+# Run sdbootutil-enroll with a private /run, and without the
+# reconfig_system flag or the issue-generator of the host
+run_enroll()
+{
+	# shellcheck disable=SC2016 # expanded by the inner bash
+	unshare -rm bash -c '
+		mount -t tmpfs tmpfs /run
+		[ ! -d /var/lib/YaST2 ] || mount -t tmpfs tmpfs /var/lib/YaST2
+		[ ! -e /usr/sbin/issue-generator ] || mount --bind /dev/null /usr/sbin/issue-generator
+		rc=0
+		PATH="$1/bin:$PATH" CREDENTIALS_DIRECTORY="$1/creds" "$2/sdbootutil-enroll" || rc=$?
+		cat /run/issue.d/* > "$1/issue" 2> /dev/null
+		exit "$rc"
+	' - "$workdir" "$top" > "$workdir/out" 2>&1
+}
+
+####### the assertions #######
+
+fail()
+{
+	echo "     $*"
+	case_failed=1
+}
+
+is()
+{
+	[ "$2" = "$3" ] || fail "$1: expected '$2', got '$3'"
+}
+
+says()
+{
+	grep -qF -- "$3" "$2" 2> /dev/null || fail "$1: '$3' was not said"
+}
+
+says_not()
+{
+	! grep -qF -- "$3" "$2" 2> /dev/null || fail "$1: '$3' was said, and should not"
+}
+
+opens()
+{
+	cryptsetup luksOpen --test-passphrase --disable-external-tokens \
+		   "$workdir/$1.img" <<<"$2" &> /dev/null || \
+		fail "$1: '$2' does not open the device"
+}
+
+opens_not()
+{
+	! cryptsetup luksOpen --test-passphrase --disable-external-tokens \
+		   "$workdir/$1.img" <<<"$2" &> /dev/null || \
+		fail "$1: '$2' still opens the device"
+}
+
+####### the cases #######
+
+# The bug: the deployment requested nothing, and the device was left
+# with a key that nobody saw, and with an initrd that does not ask for it
+t_no_credentials()
+{
+	new_device root
+	run_enroll
+	is "exit status" 0 "$?"
+
+	says "calls" "$workdir/calls" "enroll --method=recovery-key --no-reuse-initrd"
+	says "issue file" "$workdir/issue" "Recovery key: $RECOVERY"
+	opens root "$RECOVERY"
+	opens_not root "$BOOTSTRAP"
+}
+
+# Every disk that disk-encryption-tool encrypted shares its key, and
+# sdbootutil enrolls all of them in a single call
+t_multiple_disks()
+{
+	new_device root
+	new_device home
+	run_enroll
+	is "exit status" 0 "$?"
+
+	is "recovery key enrollments" 1 "$(grep -c "enroll --method=recovery-key" "$workdir/calls" 2> /dev/null)"
+	opens root "$RECOVERY"
+	opens home "$RECOVERY"
+	opens_not root "$BOOTSTRAP"
+	opens_not home "$BOOTSTRAP"
+}
+
+# The enroll module of jeos-firstboot runs before, and leaves the key
+# in the keyring after it wiped the keyslot
+t_already_enrolled()
+{
+	new_device root
+	cryptsetup luksAddKey --batch-mode --force-password \
+		   --pbkdf pbkdf2 --pbkdf-force-iterations 1000 \
+		   --key-file <(echo -n "$BOOTSTRAP") \
+		   "$workdir/root.img" <(echo -n "jeos-password")
+	systemd-cryptenroll --wipe-slot=0 "$workdir/root.img" &> /dev/null
+	run_enroll
+	is "exit status" 0 "$?"
+
+	says_not "calls" "$workdir/calls" "enroll"
+	[ ! -s "$workdir/issue" ] || fail "issue file: written, and should not"
+}
+
+# A requested method is the only one enrolled
+t_password()
+{
+	new_device root
+	credential pw "requested-password"
+	run_enroll
+	is "exit status" 0 "$?"
+
+	says "calls" "$workdir/calls" "enroll --method=password --no-reuse-initrd"
+	says_not "calls" "$workdir/calls" "enroll --method=recovery-key"
+	opens root "requested-password"
+	opens_not root "$BOOTSTRAP"
+}
+
+# Without the key of disk-encryption-tool there is nothing to do
+t_no_keyring()
+{
+	new_device root
+	keyctl purge user cryptenroll &> /dev/null
+	run_enroll
+	is "exit status" 0 "$?"
+
+	[ ! -e "$workdir/calls" ] || fail "calls: sdbootutil was called"
+	opens root "$BOOTSTRAP"
+}
+
+####### the runner #######
+
+run_case()
+{
+	local fn="$1"; shift
+	local desc="$*"
+	local rc=0
+
+	rm -rf "$workdir"/{*.img,devices,calls,issue,out,creds}
+	keyctl purge user cryptenroll &> /dev/null || true
+	echo -n "$BOOTSTRAP" | keyctl padd user cryptenroll @u > /dev/null
+
+	( set +e; case_failed=; "$fn"; [ -z "$case_failed" ] ) || rc=$?
+
+	total=$((total + 1))
+	if [ "$rc" = 0 ]; then
+		echo "ok   $desc"
+	else
+		failed=$((failed + 1))
+		echo "FAIL $desc"
+		sed 's/^/     | /' "$workdir/out" 2> /dev/null || true
+	fi
+}
+
+total=0
+failed=0
+
+while read -r fn desc; do
+	[ -n "$fn" ] || continue
+	run_case "$fn" "$desc"
+done <<-'EOF'
+	t_no_credentials    enrolls a recovery key when nothing was requested
+	t_multiple_disks    enrolls the same recovery key in every disk
+	t_already_enrolled  enrolls nothing when the enrollment key was already wiped
+	t_password          enrolls only the requested method
+	t_no_keyring        does nothing without the key of disk-encryption-tool
+EOF
+
+echo
+if [ "$failed" = 0 ]; then
+	echo "$total cases, all passed"
+else
+	echo "$total cases, $failed failed"
+	exit 1
+fi
