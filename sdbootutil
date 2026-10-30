@@ -256,7 +256,7 @@ helpandquit()
 		  --ask-current-pw	Ask the password that already opens the devices
 		  --method		"tpm2", "tpm2+pin", "fido2", "password", "recovery-key"
 		  --no-measure-pcr	During enrollment, do not include PCR 15 protection
-		  --measure-pcr		Update the PCR 15 prediction if needed
+		  --measure-pcr		Update the PCR 15 measurements if needed
 		                        (the LUKS2 password will be asked)
 		  --pcr			Comma seperated list of PCRs to enroll
 		                        (the ones that cannot be predicted are dropped,
@@ -528,10 +528,10 @@ set_default_config_values()
 	fi
 
 	if is_rootfs_crypt; then
-		# `measure-pcr-validator` (PRC15) protect from
-		# impostor LUKS2 volumes, as it measures the volume
-		# key.  But if there is a volume in a non-encrypted
-		# device (USB, for example) that has the same metadata
+		# PCR 15 in the TPM2 policy protects from impostor
+		# LUKS2 volumes, as it measures the volume key.  But
+		# if there is a volume in a non-encrypted device
+		# (USB, for example) that has the same metadata
 		# (referenced by /etc/fstab) as the internal volume in
 		# the encrypted root device, then there is a chance
 		# that this will get mounted in /sysroot.  systemd can
@@ -7010,7 +7010,7 @@ status_policy_stale=
 status_tpm2_device=
 status_pin_reachable=
 status_dangling=
-status_pcr15_halt=
+status_pcr15_missing=
 
 # Whether "$status_dangling" holds this entry.  The names in it carry
 # the ".conf" that the boot loader interface variables leave out, so
@@ -7261,6 +7261,10 @@ status_policy()
 		[ -n "$i" ] || continue
 		[ -n "$requested" ] && requested="$requested,$i" || requested="$i"
 	done
+	# Added by `generate_tpm2_predictions_pcrlock`, not by the config
+	if [[ ",$requested," != *",15,"* ]] && grep -qs "tpm2-measure-pcr=yes" /etc/crypttab; then
+		requested="${requested:-none} (+15, /etc/crypttab measures it)"
+	fi
 	status_row "Requested PCRs" "${requested:-none}"
 
 	echo "  Bound PCRs:"
@@ -7340,23 +7344,29 @@ status_policy()
 	done
 }
 
-# Replay the sha256 PCR 15 events that systemd recorded for this boot,
-# and return the value that PCR 15 had once the last one was measured.
-# Empty when nothing was measured
+# The measurements of the volume keys, in crypttab order, as written in
+# their pcrlock components by `pcrlock_volume_keys`
+pcr15_volume_keys()
+{
+	local component
+	for component in /var/lib/pcrlock.d/790-volume-key-*.pcrlock.d/generated.pcrlock; do
+		jq -r '.records[0].digests[0].digest' "$component"
+	done
+}
+
+# Replay sha256 digests, one per line in stdin, as PCR 15 extensions
+# from 0, and return the final value.  Empty when there is none
 #
 # The measurements of interest are the volume keys, one per encrypted
 # device that carries `tpm2-measure-pcr=yes`, extended in the order in
 # which the devices were unlocked.  That order is what
-# measure-pcr-generator fixes, and it is why the prediction is tied to
-# the crypttab
-status_pcr15_replay()
+# measure-pcr-generator fixes, and it is why the measurements are tied
+# to the crypttab
+pcr15_replay()
 {
-	local log="${1:?}"
 	local value="0000000000000000000000000000000000000000000000000000000000000000"
 	local digest measured=
 
-	# The log is RFC 7464 JSON-seq, so every record is introduced by a
-	# 0x1e separator that jq refuses to read as JSON
 	while read -r digest; do
 		# TPM_Extend is a hash over the concatenation of the two
 		# binary digests.  `printf %b` writes the NUL bytes
@@ -7369,18 +7379,26 @@ status_pcr15_replay()
 		value="$(printf '%b' "$(sed 's/../\\x&/g' <<<"$value$digest")" | \
 				openssl dgst -sha256 -r | cut -d' ' -f1)"
 		measured=1
-	done < <(tr -d '\036' < "$log" | \
-			jq -r 'select(.pcr == 15 and .content.eventType == "volume-key")
-			       | .digests[] | select(.hashAlg == "sha256") | .digest' \
-			   2> /dev/null)
+	done
 
 	[ -z "$measured" ] || echo "$value"
 }
 
+# The sha256 digests that systemd recorded in PCR 15 for this boot with
+# the event type "$2", from the log "$1"
+pcr15_events()
+{
+	# The log is RFC 7464 JSON-seq, so every record is introduced by a
+	# 0x1e separator that jq refuses to read as JSON
+	tr -d '\036' < "$1" | \
+		jq -r --arg type "$2" \
+		   'select(.pcr == 15 and .content.eventType == $type)
+		    | .digests[] | select(.hashAlg == "sha256") | .digest' \
+		   2> /dev/null
+}
+
 status_pcr15()
 {
-	local prediction=/var/lib/sdbootutil/measure-pcr-prediction
-
 	echo "PCR 15"
 
 	if ! grep -q "tpm2-measure-pcr=yes" /etc/crypttab 2> /dev/null; then
@@ -7389,77 +7407,54 @@ status_pcr15()
 	fi
 	status_row "Enabled" "yes"
 
-	# The same three checks that `measure-pcr-validator` makes at
-	# boot, in the same order.  Any of them failing ends in
-	# `FailureAction=poweroff-immediate`, so this is not a detail of
-	# the report but the answer to "why did the machine power off"
-	if [ ! -e "$prediction" ]; then
-		status_pcr15_halt="there is no prediction file"
-	elif [ ! -e "$prediction.sha256" ]; then
-		status_pcr15_halt="the prediction is not signed"
-	elif ! openssl dgst -sha256 \
-			-verify /var/lib/sdbootutil/measure-pcr-public.pem \
-			-signature "$prediction.sha256" \
-			"$prediction" &> /dev/null; then
-		status_pcr15_halt="the signature of the prediction is not valid"
+	# Without them `pcrlock_pcr_15` cannot describe PCR 15, and the
+	# policy is created without it, so a rogue volume is not noticed
+	if [ -z "$(pcr15_volume_keys)" ]; then
+		status_pcr15_missing=1
+		status_row "Measurements" "MISSING"
+	else
+		status_row "Measurements" "present"
+	fi
+
+	if grep -qs '"pcr":15' /var/lib/systemd/pcrlock.json; then
+		status_row "In the policy" "yes"
+	else
+		status_row "In the policy" "no"
 	fi
 
 	if [ -n "$arg_full" ]; then
-		if [ -n "$status_pcr15_halt" ]; then
-			status_row "Prediction" "UNUSABLE, $status_pcr15_halt"
-		else
-			status_row "Prediction" "present, signed"
-		fi
-
-		if [ -e /var/lib/sdbootutil/measure-pcr-public.pem ]; then
-			status_row "Public key" "yes"
-		else
-			status_row "Public key" "no"
-		fi
-
 		if [ -d /usr/lib/dracut/modules.d/50measure-pcr ]; then
 			status_row "Dracut module" "yes"
 		else
 			status_row "Dracut module" "no"
 		fi
 
-		# The prediction is tied to the crypttab it was made
-		# from: the order of the entries decides the order of the
-		# extensions, so a crypttab that changed invalidates it
+		# The measurements are tied to the crypttab they were
+		# made from: the order of the entries decides the order of
+		# the extensions, so a crypttab that changed invalidates
+		# them
 		local crypttab_sha1
 		if [ ! -e /etc/crypttab ] || [ ! -e /var/lib/sdbootutil/crypttab.sha1 ]; then
 			status_row "Crypttab" "unknown"
 		else
 			read -r crypttab_sha1 _ < <(sha1sum /etc/crypttab)
 			if grep -Fixq "$crypttab_sha1" /var/lib/sdbootutil/crypttab.sha1; then
-				status_row "Crypttab" "unchanged since the prediction"
+				status_row "Crypttab" "unchanged since the measurements"
 			else
-				status_row "Crypttab" "CHANGED after the prediction, the order of the extensions may differ"
+				status_row "Crypttab" "CHANGED after the measurements, the order of the extensions may differ"
 			fi
 		fi
 	fi
 
-	# The prediction has one line per digest, in the order that
-	# `generate_tpm2_predictions_pcr_15` writes them, and the second
-	# one is sha256
-	local predicted=""
-	[ ! -r "$prediction" ] || predicted="$(sed -n 2p "$prediction")"
-	predicted="${predicted,,}"
-
-	# Do *not* compare against the register in /sys.  The prediction
-	# describes PCR 15 right after the volume keys are measured, which
-	# is the only moment measure-pcr-validator looks at it, and after
-	# that anything is free to extend it further (systemd-pcrfs and
-	# systemd-pcrmachine do, on the systems that ship them).  A machine
-	# that booted perfectly then reads back a value that matches
-	# nothing, and reporting that as a mismatch is a false alarm
-	#
-	# Replay instead systemd's own record of what it measured in this
-	# boot, which is what the validator saw.  Its absence is not an
-	# error either: it lives in /run and only exists once something has
-	# been measured
-	local measured="" log=/run/log/systemd/tpm2-measure.log
-	[ ! -r "$log" ] || measured="$(status_pcr15_replay "$log")"
+	# Do *not* compare against the register in /sys: after the volume
+	# keys PCR 15 is extended at the end of the initrd, and on some
+	# systems by systemd-pcrfs and systemd-pcrmachine too.  Replay
+	# instead systemd's own record of what it measured in this boot.
+	# Its absence is not an error either: it lives in /run and only
+	# exists once something has been measured
+	local expected="" measured="" log=/run/log/systemd/tpm2-measure.log
+	expected="$(pcr15_volume_keys | pcr15_replay)"
+	[ ! -r "$log" ] || measured="$(pcr15_events "$log" volume-key | pcr15_replay)"
 
 	# Nothing measured at all is a different failure from a wrong
 	# measurement: it is what happens when the initrd carries no
@@ -7467,12 +7462,20 @@ status_pcr15()
 	# device, and it leaves PCR 15 untouched instead of wrong
 	if [ -r "$log" ] && [ -z "$measured" ]; then
 		status_row "This boot" "NOTHING was measured into PCR 15"
-	elif [ -z "$predicted" ] || [ -z "$measured" ]; then
+	elif [ -z "$expected" ] || [ -z "$measured" ]; then
 		status_row "This boot" "cannot be told, systemd recorded no measurement"
-	elif [ "$predicted" = "$measured" ]; then
-		status_row "This boot" "measured as predicted"
+	elif [ "${expected,,}" = "$measured" ]; then
+		status_row "This boot" "measured as expected"
 	else
-		status_row "This boot" "the measurement DOES NOT MATCH the prediction"
+		status_row "This boot" "the measurement DOES NOT MATCH the volume keys"
+	fi
+
+	# Without it the policy does not include PCR 15 (see
+	# measure-pcr-boundary.service)
+	if [ -r "$log" ] && [ -n "$(pcr15_events "$log" phase)" ]; then
+		status_row "End of initrd" "measured"
+	elif [ -r "$log" ]; then
+		status_row "End of initrd" "NOT measured in this boot, the initrd has no measure-pcr-boundary.service"
 	fi
 }
 
@@ -7859,14 +7862,12 @@ fde_status()
 		warn "Run 'sdbootutil cleanup --repair' to write them again from the kernels that are still installed"
 	}
 
-	# The validator runs on every boot and powers the machine off
-	# when the prediction it needs is not usable.  Nothing else in
-	# the report says that the next boot does not finish, and the
-	# rows that carry the two halves of it are behind `--full`
-	[ -z "$status_pcr15_halt" ] || {
+	# A policy without PCR 15 does not notice a rogue volume, and
+	# nothing else in the report says why it is missing
+	[ -z "$status_pcr15_missing" ] || {
 		echo
-		warn "/etc/crypttab asks to measure PCR 15, but $status_pcr15_halt. 'measure-pcr-validator' powers the machine off at the next boot"
-		warn "Run 'sdbootutil update-predictions' to write it, or boot once with 'measure-pcr-validator.ignore=yes' in the cmdline"
+		warn "/etc/crypttab asks to measure PCR 15, but the measurements of the volume keys are missing, so the policy does not include PCR 15"
+		warn "Run 'sdbootutil update-predictions --measure-pcr' to write them"
 	}
 
 	# A policy with no device behind it is not an error, but it is
