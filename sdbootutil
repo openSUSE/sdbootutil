@@ -2054,17 +2054,17 @@ kernel_cmdline_files()
 		break
 	done
 
-	local usr_dropins=("${subvol:1}"/usr/kernel/cmdline.d/*)
+	local usr_dropins=("${subvol:1}"/usr/lib/kernel/cmdline.d/*)
 	local etc_dropins=("${subvol:1}"/etc/kernel/cmdline.d/*)
 	# For the running snapshot, and when there are no snapshots, the
 	# subvolume is "/", and its drop-ins would be read twice
 	if ! [ "${subvol:1}/" -ef / ]; then
-		usr_dropins+=(/usr/kernel/cmdline.d/*)
+		usr_dropins+=(/usr/lib/kernel/cmdline.d/*)
 		etc_dropins+=(/etc/kernel/cmdline.d/*)
 	fi
 
 	# A drop-in in "/etc" replaces the one with the same name in
-	# "/usr", and an empty one is a way of masking it
+	# "/usr/lib", and an empty one is a way of masking it
 	for i in "${usr_dropins[@]}"; do
 		[ -e "${subvol:1}/etc/kernel/cmdline.d/$(basename "$i")" ] && continue
 		[ -s "$i" ] || continue
