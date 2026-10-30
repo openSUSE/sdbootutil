@@ -5,8 +5,9 @@
 # Unit tests for the library half of sdbootutil: the routing of the
 # secrets -- which source wins, what is published to the keyring, and
 # which warnings are printed -- the entry names the boot loaders spell
-# differently, the versions the status report compares, `grubenv`, and
-# the entries that may be removed to make room in the ESP.
+# differently, the versions the status report compares, `grubenv`, the
+# entries that may be removed to make room in the ESP, and the files of
+# the ESP that may reach a TPM2 policy.
 #
 # These are decisions the tool takes *before* it writes anything to the
 # TPM2, so they do not need one, and they do not need a guest either: a
@@ -526,6 +527,129 @@ t_pks_reused()
 	is "a 4K kernel" 5 "$(pending_kernel_size "$workdir/linux")"
 }
 
+# verify_esp_files: only the files that sdbootutil installed in the ESP
+# can reach a new TPM2 policy (github issue 465)
+
+# A scratch ESP with an entry, a kernel and an initrd, and the record in
+# the working directory instead of /var/lib/sdbootutil
+esp_setup()
+{
+	load
+	# shellcheck disable=SC2034  # read by the sourced library
+	esp_files="$workdir/esp-files" esp_root="$workdir/esp" boot_root="$workdir/esp" esp_dst="/EFI/systemd" arg_force=
+	rm -rf "$workdir/esp" "$esp_files"
+	mkdir -p "$workdir/esp/loader/entries" "$workdir/esp/token/7.2.3"
+	echo "options root=UUID=x" > "$workdir/esp/loader/entries/$ENTRY+3.conf"
+	echo "kernel" > "$workdir/esp/token/7.2.3/linux-1"
+	echo "initrd" > "$workdir/esp/token/7.2.3/initrd-1"
+
+	# What `bootctl list` reports for that ESP
+	# shellcheck disable=SC2329  # called by the sourced library
+	bootctl_entries()
+	{
+		jq -n --arg path "$workdir/esp/loader/entries/$ENTRY+3.conf" \
+		   '[{"type": "type1", "path": $path, "linux": "/token/7.2.3/linux-1", "initrd": ["/token/7.2.3/initrd-1"]}]'
+	}
+}
+
+# What `update-predictions` hashes for the entry
+esp_track()
+{
+	# shellcheck disable=SC2154  # set by the sourced library
+	rm -f "$tmpdir/esp-files"
+	track_esp_file "$(echo "$workdir"/esp/loader/entries/*.conf)"
+	track_esp_file "$workdir/esp//token/7.2.3/linux-1"
+	track_esp_file "$workdir/esp/token/7.2.3/initrd-1"
+}
+
+t_efk_counter()
+{
+	load
+
+	is "counter" "/esp/loader/entries/$ENTRY.conf" "$(esp_file_key "/esp/loader/entries/$ENTRY+2-1.conf")"
+	is "double slash" "/esp/token/linux-1" "$(esp_file_key "/esp//token/linux-1")"
+	is "not an entry" "/esp/token/linux-1+3.conf" "$(esp_file_key "/esp/token/linux-1+3.conf")"
+}
+
+t_vef_seed()
+{
+	esp_setup
+
+	record_esp_file "$workdir/esp/token/7.2.3/linux-1"
+	[ ! -e "$esp_files" ] || fail "a writer created the record before the first prediction"
+
+	esp_track
+	echo "changed" > "$workdir/esp/token/7.2.3/initrd-1"
+	( verify_esp_files ) &> /dev/null || fail "the first prediction was refused"
+	is "seeded files" 3 "$(wc -l < "$esp_files")"
+	is "seeded as found" "$(sha256sum < "$workdir/esp/token/7.2.3/initrd-1" | cut -d' ' -f1)" \
+	   "$(esp_file_digest "$workdir/esp/token/7.2.3/initrd-1")"
+}
+
+t_vef_unchanged()
+{
+	esp_setup
+	esp_track
+	verify_esp_files &> /dev/null
+
+	# systemd-boot counts a boot attempt, and later blesses it
+	mv "$workdir/esp/loader/entries/$ENTRY+3.conf" "$workdir/esp/loader/entries/$ENTRY+2-1.conf"
+	esp_track
+	( verify_esp_files ) &> /dev/null || fail "a counted boot was refused"
+	mv "$workdir/esp/loader/entries/$ENTRY+2-1.conf" "$workdir/esp/loader/entries/$ENTRY.conf"
+	esp_track
+	( verify_esp_files ) &> /dev/null || fail "a blessed entry was refused"
+}
+
+t_vef_modified()
+{
+	esp_setup
+	esp_track
+	verify_esp_files &> /dev/null
+
+	echo "options root=UUID=x quiet" > "$workdir/esp/loader/entries/$ENTRY+3.conf"
+	local out rc=0
+	out="$( verify_esp_files 2>&1 )" || rc=$?
+	is "exit status" 1 "$rc"
+	says "error" "$out" "$workdir/esp/loader/entries/$ENTRY+3.conf"
+	says_not "error" "$out" "initrd-1"
+}
+
+t_vef_new_file()
+{
+	esp_setup
+	esp_track
+	verify_esp_files &> /dev/null
+
+	# A file that sdbootutil installs is accepted, one that appears
+	# by other means is not
+	echo "initrd 2" > "$tmpdir/initrd"
+	install_with_rollback "$tmpdir/initrd" "$workdir/esp/token/7.2.3/initrd-2" &> /dev/null
+	echo "unknown" > "$workdir/esp/token/7.2.3/initrd-3"
+	esp_track
+	track_esp_file "$workdir/esp/token/7.2.3/initrd-2"
+	track_esp_file "$workdir/esp/token/7.2.3/initrd-3"
+	local out rc=0
+	out="$( verify_esp_files 2>&1 )" || rc=$?
+	is "exit status" 1 "$rc"
+	says "error" "$out" "initrd-3"
+	says_not "error" "$out" "initrd-2"
+}
+
+t_vef_force()
+{
+	esp_setup
+	esp_track
+	verify_esp_files &> /dev/null
+
+	echo "options root=UUID=x quiet" > "$workdir/esp/loader/entries/$ENTRY+3.conf"
+	local out
+	# shellcheck disable=SC2034  # read by the sourced library
+	out="$( arg_force=1; verify_esp_files 2>&1 )" || fail "--force was refused"
+	says "warning" "$out" "Accepting"
+	( verify_esp_files ) &> /dev/null || fail "the accepted change was refused later"
+}
+
 ####### the runner #######
 
 run_case()
@@ -588,6 +712,12 @@ done <<-'EOF'
 	t_re_order                  removable_entries keeps the default and removes leftovers first
 	t_re_reused                 removable_entries keeps the entry whose initrd is being reused
 	t_pks_reused                pending_kernel_size counts nothing for a kernel already in the ESP
+	t_efk_counter               esp_file_key drops the boot counter of an entry, and nothing else
+	t_vef_seed                  verify_esp_files records the ESP on the first prediction
+	t_vef_unchanged             verify_esp_files accepts recorded files, also after a boot counter rename
+	t_vef_modified              verify_esp_files refuses an entry changed outside sdbootutil
+	t_vef_new_file              verify_esp_files refuses a file that sdbootutil did not install
+	t_vef_force                 verify_esp_files accepts a change with --force
 EOF
 
 echo

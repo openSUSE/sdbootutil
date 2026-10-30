@@ -137,6 +137,9 @@ fi
 # State file for transactional systems
 state_file="/var/lib/misc/transactional-update.state"
 
+# Files that sdbootutil installed in the ESP, see `verify_esp_files`
+esp_files="/var/lib/sdbootutil/esp-files"
+
 update_predictions=
 # Set only when "update-predictions" is the command, to tell it apart
 # from the predictions that are a side effect of another command
@@ -271,8 +274,11 @@ helpandquit()
 		                        resolved file must exist and be readable, and
 		                        must be usable without Secure Boot, or kernel
 		                        installation is aborted.
-		  --force		Force certain operations inside a transaction, and
-		                        force the regeneration of the TPM2 policy
+		  --force		Force certain operations inside a transaction,
+		                        force the regeneration of the TPM2 policy, and
+		                        accept in the TPM2 policy the files in the ESP
+		                        that sdbootutil did not install, or that changed
+		                        after it installed them
 		  --strict		Every requested PCR must be part of the TPM2 policy,
 		                        or nothing is applied (like systemd-pcrlock --strict=)
 		  --disable-predictions	Disable automatic update predictions
@@ -1401,6 +1407,121 @@ install_with_rollback()
 	rollback+=("$old")
 	install -p -m 0644 -o root -g root "$src" "$dst" || return "$?"
 	info "Installed $dst"
+	record_esp_file "$dst"
+}
+
+# The ESP is not encrypted, and anyone with physical access can change
+# it.  The TPM2 policy is built from the files found there, so a file
+# that someone else placed or modified would be sealed by the next
+# `update-predictions`, and would unlock the disk.  Every file that
+# sdbootutil installs in the ESP, and that is measured during boot, is
+# recorded with its digest in /var/lib/sdbootutil/esp-files, and only
+# recorded files can be part of a new policy (`verify_esp_files`).
+#
+# Only the files that sdbootutil hashes itself are tracked.  The
+# firmware components are read from the event log, that the TPM2
+# validates, and a .pcrlock file shipped by a package is not computed
+# by sdbootutil at all
+
+# Boot counting renames the entry ("+3.conf" to "+2-1.conf", and to
+# ".conf" once blessed), and the content is the same
+esp_file_key()
+{
+	local path
+	path="$(realpath -m -s -- "${1:?}")"
+	[[ "$path" != */loader/entries/*.conf ]] || path="${path%/*}/$(entry_key "${path##*/}").conf"
+	echo "$path"
+}
+
+# Digest of the file when it was recorded, empty if it was not
+esp_file_digest()
+{
+	local key digest path
+	key="$(esp_file_key "$1")"
+	[ -e "$esp_files" ] || return 0
+	while read -r digest path; do
+		[ "$path" != "$key" ] || echo "$digest"
+	done < "$esp_files"
+}
+
+record_esp_file()
+{
+	local path="${1:?}"
+
+	# The record is created by the first prediction, from all the
+	# files in the ESP.  Before that a partial record would make
+	# every file installed by an older version look foreign
+	[ -e "$esp_files" ] || return 0
+	[ -f "$path" ] || return 0
+
+	local key digest line_digest line_path
+	key="$(esp_file_key "$path")"
+	read -r digest _ < <(sha256sum "$path")
+	dbg "Recording $key ($digest)"
+	{
+		while read -r line_digest line_path; do
+			[ "$line_path" = "$key" ] || echo "$line_digest  $line_path"
+		done < "$esp_files"
+		echo "$digest  $key"
+	} > "$esp_files.new"
+	mv "$esp_files.new" "$esp_files"
+}
+
+# A file from the ESP that is hashed for the prediction
+track_esp_file()
+{
+	echo "${1:?}" >> "$tmpdir/esp-files"
+}
+
+# Trust on first use: the first prediction after an enrollment, or
+# after updating from a version without the record, takes the files in
+# the ESP as they are.  A change made before that cannot be detected
+seed_esp_files()
+{
+	local path
+
+	mkdir -p "${esp_files%/*}"
+	: > "$esp_files"
+	while read -r path; do
+		[ -n "$path" ] || continue
+		record_esp_file "$path"
+	done < <(
+		cat "$tmpdir/esp-files"
+		echo "${esp_root}/loader/loader.conf"
+		echo "${esp_root}${esp_dst}/grubenv"
+		bootctl_entries list --json=short | \
+			jq -r --arg root "$boot_root" '.[] | select(.type == "type1") | .path, ($root + (.linux // "")), ($root + .initrd[]?), ($root + (.devicetree // ""))'
+	)
+}
+
+# Every file hashed for the prediction must be as sdbootutil installed
+# it.  A change made by the administrator is accepted with --force
+verify_esp_files()
+{
+	[ -s "$tmpdir/esp-files" ] || return 0
+
+	if [ ! -e "$esp_files" ]; then
+		info "Recording the files in the ESP that are measured during boot"
+		seed_esp_files
+		return 0
+	fi
+
+	local path digest
+	local foreign=()
+	while read -r path; do
+		read -r digest _ < <(sha256sum "$path")
+		[ "$(esp_file_digest "$path")" = "$digest" ] || foreign+=("$path")
+	done < <(sort -u "$tmpdir/esp-files")
+
+	[ "${#foreign[@]}" -ne 0 ] || return 0
+
+	[ -n "$arg_force" ] || \
+		err "These files in the ESP were not installed by sdbootutil, or changed after it installed them:\n$(printf '  %s\n' "${foreign[@]}")\nA new TPM2 policy would unlock the disk when booting them.  If the change is expected, use --force"
+
+	for path in "${foreign[@]}"; do
+		warn "Accepting $path (--force)"
+		record_esp_file "$path"
+	done
 }
 
 update_snapper()
@@ -2953,7 +3074,10 @@ install_extra_entry()
 
 	mkdir -p "${esp_root}/EFI/extra"
 	install -p -D "${subvol:1}${e[EFI]}" "${esp_root}/EFI/extra"
-	[ -z "${e[ENTRY]}" ] || install -p -D "${subvol:1}${e[ENTRY]}" "${boot_root}/loader/entries"
+	[ -z "${e[ENTRY]}" ] || {
+		install -p -D "${subvol:1}${e[ENTRY]}" "${boot_root}/loader/entries"
+		record_esp_file "${boot_root}/loader/entries/$(basename "${e[ENTRY]}")"
+	}
 }
 
 install_extra_entries()
@@ -3057,12 +3181,16 @@ install_bootloader()
 		install -p -D "$prefix$shimdir/MokManager.efi" "${esp_root}/EFI/BOOT/MokManager.efi"
 		[ -n "$arg_portable" ] || install -p -D "$prefix$shimdir/fallback.efi" "${esp_root}/EFI/BOOT/fallback.efi"
 		install -p -D "$prefix$shimdir/shim.efi" "${esp_root}/EFI/BOOT/BOOT${firmware_arch^^}.EFI"
+		[ -n "$arg_portable" ] || record_esp_file "${esp_root}${esp_dst}/shim.efi"
+		record_esp_file "${esp_root}${esp_dst}/grub.efi"
 	else
 		info "Installing $bldr_name without shim into $esp_root"
 		entry="$esp_dst/${bootloader##*/}"
 		[ -n "$arg_portable" ] || install -p -D "$bootloader" "${esp_root}$entry"
 		install -p -D "$bootloader" "${esp_root}/EFI/BOOT/BOOT${firmware_arch^^}.EFI"
+		[ -n "$arg_portable" ] || record_esp_file "${esp_root}$entry"
 	fi
+	record_esp_file "${esp_root}/EFI/BOOT/BOOT${firmware_arch^^}.EFI"
 
 	# shellcheck disable=SC2154
 	[ -n "${os_release_NAME}" ] || set_os_release "${snapshot}"
@@ -3082,7 +3210,10 @@ install_bootloader()
 	update_random_seed
 
 	if is_sdboot "$snapshot"; then
-		[ -e "${esp_root}/loader/loader.conf" ] || echo -e "#timeout 3\n#console-mode keep\n" > "${esp_root}/loader/loader.conf"
+		[ -e "${esp_root}/loader/loader.conf" ] || {
+			echo -e "#timeout 3\n#console-mode keep\n" > "${esp_root}/loader/loader.conf"
+			record_esp_file "${esp_root}/loader/loader.conf"
+		}
 		[ -s "${boot_root}/loader/entries.srel" ] || echo type1 > "${boot_root}/loader/entries.srel"
 	fi
 
@@ -3208,12 +3339,14 @@ loader_conf_set()
 	else
 		echo "$key $value" >> "${esp_root}/loader/loader.conf"
 	fi
+	record_esp_file "${esp_root}/loader/loader.conf"
 }
 
 loader_conf_unset()
 {
 	local key="${1:?}"
 	[ ! -e "${esp_root}/loader/loader.conf" ] || sed -i -e "/^$key /d" "${esp_root}/loader/loader.conf"
+	record_esp_file "${esp_root}/loader/loader.conf"
 }
 
 loader_conf_get()
@@ -3252,6 +3385,7 @@ grubenv_set()
 	printf '%*s' "$filler" "" | tr ' ' '#' >> "$grubenv"
 
 	mv "$grubenv" "${esp_root}${esp_dst}/grubenv"
+	record_esp_file "${esp_root}${esp_dst}/grubenv"
 }
 
 grubenv_get()
@@ -4201,6 +4335,7 @@ pcrlock_grub2_bls_entry_files()
 	local n=0
 	for i in "$base"/loader/entries/*.conf; do
 		n=$((n+1))
+		[ "$base" != "${boot_root}" ] || track_esp_file "$i"
 		pcrlock \
 			lock-raw \
 			--pcr=9 \
@@ -4225,6 +4360,7 @@ pcrlock_sdboot()
 	# standards
 	if [ -e "${esp_root}/loader/loader.conf" ]; then
 		shift_component 641-sdboot-loader-conf
+		track_esp_file "${esp_root}/loader/loader.conf"
 		pcrlock \
 			lock-raw \
 			--pcr=5 \
@@ -4251,6 +4387,7 @@ pcrlock_sdboot()
 			info "More than 4 variations for 650-kernel-efi-application"
 			continue
 		}
+		track_esp_file "${boot_root}/$linux"
 		pcrlock \
 			lock-pe \
 			--pcrlock="/var/lib/pcrlock.d/650-kernel-efi-application.pcrlock.d/linux-$n.pcrlock" \
@@ -4263,6 +4400,7 @@ pcrlock_sdboot()
 	n=0
 	while read -r cmdline; do
 		read -r initrd
+		read -r conf
 		[ -f "${boot_root}$initrd" ] || {
 			info "Missing ${boot_root}$initrd, ignoring entry for prediction"
 			continue
@@ -4281,8 +4419,11 @@ pcrlock_sdboot()
 			info "More than 4 variations for 710-kernel-cmdline-initrd-entry"
 			continue
 		}
+		# The command line is the "options" line of the entry
+		track_esp_file "$conf"
+		track_esp_file "${boot_root}$initrd"
 		pcrlock_cmdline_initrd "initrd=$cmdline" "${boot_root}$initrd" "$n"
-	done < <(jq --raw-output 'sort_by(.priority, (.kernel | map(-.))) | .[] | ([(.initrd[0] | sub("/"; "\\"; "g")), .options] | join(" ")), .initrd[0]' "$entryfile")
+	done < <(jq --raw-output 'sort_by(.priority, (.kernel | map(-.))) | .[] | ([(.initrd[0] | sub("/"; "\\"; "g")), .options] | join(" ")), .initrd[0], .path' "$entryfile")
 
 	# Generate variation for 710-kernel-cmdline-initrd-entry
 	# component that contains the current cmdline and the current
@@ -4318,6 +4459,7 @@ pcrlock_grub2_bls()
 	# standards
 	if [ -e "${esp_root}${esp_dst}/grubenv" ]; then
 		shift_component 641-grub2-bls-grubenv
+		track_esp_file "${esp_root}${esp_dst}/grubenv"
 		pcrlock \
 			lock-raw \
 			--pcr=9 \
@@ -4428,6 +4570,7 @@ pcrlock_grub2_bls()
 				info "More than 4 variations for 650-kernel-efi-application"
 				continue
 			}
+			track_esp_file "${esp_root}/$linux"
 			pcrlock \
 				lock-pe \
 				--pcrlock="/var/lib/pcrlock.d/650-kernel-efi-application.pcrlock.d/linux-$n.pcrlock" \
@@ -4528,6 +4671,9 @@ pcrlock_grub2_bls()
 			info "More than 2 variations for 710-grub2-bls-kernel-initrd-kernel-cmdline-initrd-entry"
 			continue
 		}
+		track_esp_file "${esp_root}$linux"
+		track_esp_file "${esp_root}$initrd"
+		[ -z "$devicetree" ] || track_esp_file "${esp_root}$devicetree"
 		pcrlock_grub2_bls_kernel_initrd_cmdline_initrd \
 			"${esp_root}$linux" "${esp_root}$initrd" \
 			"${devicetree:+${esp_root}$devicetree}" \
@@ -5119,6 +5265,7 @@ generate_tpm2_predictions_pcrlock()
 	select_entries_for_prediction
 
 	clean_pcrlock_d
+	rm -f "$tmpdir/esp-files"
 
 	shift_component 250-firmware-code-early
 	shift_component 550-firmware-code-late
@@ -5175,6 +5322,7 @@ generate_tpm2_predictions_pcrlock()
 		# standards
 		# TODO: move to shim-pcrlock.rpm
 		shift_component 630-shim-efi-application
+		track_esp_file "${shim_path}"
 		pcrlock \
 			lock-pe \
 			--pcrlock=/var/lib/pcrlock.d/630-shim-efi-application.pcrlock.d/generated.pcrlock \
@@ -5186,6 +5334,7 @@ generate_tpm2_predictions_pcrlock()
 	# This is measuring the grub / systemd-boot EFI binary
 	# TODO: move to systemd-boot-pcrlock.rpm / grub2-bls.rpm
 	shift_component 640-boot-loader-efi-application
+	track_esp_file "${bootloader_path}"
 	pcrlock \
 		lock-pe \
 		--pcrlock=/var/lib/pcrlock.d/640-boot-loader-efi-application.pcrlock.d/generated.pcrlock \
@@ -5196,6 +5345,9 @@ generate_tpm2_predictions_pcrlock()
 	elif is_grub2_bls; then
 		pcrlock_grub2_bls
 	fi
+
+	# Nothing that sdbootutil did not install can reach the policy
+	verify_esp_files
 
 	drop_duplicated_shifts
 
@@ -6617,6 +6769,8 @@ unenroll_all_pcrlock()
 	rm -f "${esp_root}${esp_dst}/pcrlock.json"
 	rm -f /var/lib/sdbootutil/pcrlock-hashes
 	rm -f /var/lib/sdbootutil/crypttab.sha1
+	# The next enrollment records the ESP as it is then
+	rm -f "$esp_files"
 	rm -f /var/lib/sdbootutil/measure-pcr-private.pem
 	rm -f /var/lib/sdbootutil/measure-pcr-public.pem
 	rm -f /var/lib/sdbootutil/measure-pcr-prediction
