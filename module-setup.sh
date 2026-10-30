@@ -19,8 +19,8 @@ check() {
 }
 
 depends() {
-    # Since systemd 262 the volume keys are measured via
-    # systemd-pcrextend
+    # Measures the volume keys (since systemd 262) and the end of
+    # the initrd
     echo systemd-pcrextend
     return 0
 }
@@ -33,4 +33,6 @@ install() {
     [ -f "/var/lib/sdbootutil/measure-pcr-public.pem" ] && inst_simple "/var/lib/sdbootutil/measure-pcr-public.pem"
     $SYSTEMCTL -q --root "$initdir" enable measure-pcr-validator.service
     inst_simple "$moddir/measure-pcr-pcrextend.conf" "$systemdsystemunitdir/systemd-pcrextend.socket.d/50-measure-pcr.conf"
+    inst_simple "$moddir/measure-pcr-boundary.service" "$systemdsystemunitdir/measure-pcr-boundary.service"
+    $SYSTEMCTL -q --root "$initdir" enable measure-pcr-boundary.service
 }
