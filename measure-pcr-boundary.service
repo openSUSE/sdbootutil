@@ -1,0 +1,26 @@
+[Unit]
+Description=Measure the end of the initrd into PCR 15
+DefaultDependencies=false
+
+# PCR 15 is part of the TPM2 policy with the values it has while the
+# initrd runs: 0 before the volume keys are measured, and the ones
+# after.  Extending it again just before switching root moves it out
+# of those values, so the init of a rogue root file system, or one
+# whose volume key was not measured, cannot unseal the key anymore.
+# The legitimate system ends in a value that is also predicted
+ConditionPathExists=/etc/initrd-release
+
+After=tpm2.target cryptsetup.target
+Conflicts=initrd-switch-root.target shutdown.target
+Before=initrd-switch-root.target shutdown.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# Not booted from a UKI, the extension is skipped without it
+Environment=SYSTEMD_FORCE_MEASURE=1
+ExecStart=/bin/true
+ExecStop=/usr/lib/systemd/systemd-pcrextend --pcr=15 leave-initrd
+
+[Install]
+WantedBy=initrd.target
