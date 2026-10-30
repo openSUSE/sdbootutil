@@ -3305,13 +3305,6 @@ bootloader_update()
 	install_extra_entries "${1:-$root_snapshot}"
 }
 
-hex_to_binary()
-{
-	local s="$1"
-	local i
-	for ((i=0;i<${#s};i+=2)); do echo -ne "\x${s:$i:2}"; done
-}
-
 # `bootctl random-seed` hashes fresh entropy together with the seed
 # that is already in the ESP, it also writes the "LoaderSystemToken"
 # EFI variable.
@@ -5794,59 +5787,6 @@ volume_key_hmac()
 	echo -ne "$2" | /usr/libexec/sdbootutil/uhmac "$1" <(echo "${vks[$3]}")
 }
 
-extend_pcr()
-{
-	local dgst="$1"
-	local pcr="$2"
-	local val="$3"
-	local digest
-
-	command -v "${dgst}sum" &> /dev/null || { warn "${dgst}sum not found"; return 1; }
-	hex_to_binary "$pcr$val" > "$tmpdir/pcr"
-	read -r digest _ < <("${dgst}sum" "$tmpdir/pcr")
-	echo "$digest"
-}
-
-# Create the key pair that signs the PCR 15 prediction, if it is not
-# already there.  The public key is copied into the initrd by dracut
-# (module-setup.sh), so any initrd generated before a new pair cannot
-# validate PCR 15, and the callers have to tell the three outcomes
-# apart: 0 a new pair was created, 1 it was already there, 2 it could
-# not be created
-create_measure_pcr_keys()
-{
-	local private="/var/lib/sdbootutil/measure-pcr-private.pem"
-	local public="/var/lib/sdbootutil/measure-pcr-public.pem"
-
-	[ ! -f "$private" ] || [ ! -f "$public" ] || return 1
-
-	# A private key can be there and still be unusable: openssl
-	# creates the file before it writes to it, so an interrupted or
-	# failed run leaves an empty one behind.  Only the "-f" test
-	# above guarded this, and it kept skipping the generation while
-	# the public key was never written, on every run from then on
-	if [ -f "$private" ] && ! openssl rsa -in "$private" -noout &> /dev/null; then
-		warn "Replacing $private, which cannot be read"
-		rm -f "$private"
-	fi
-
-	if [ ! -f "$private" ]; then
-		info "Creating the key pair that signs the PCR 15 prediction"
-		# A public key that comes from a different private key
-		# cannot validate anything
-		rm -f "$public"
-		# The half-written file is removed, so that the next run
-		# does not find it and take it for a usable key
-		openssl genrsa -out "$private" 4096 || { rm -f "$private"; return 2; }
-	fi
-	# Writes "writing RSA key" in stderr and -noout is not doing
-	# what I was expecting
-	[ -f "$public" ] || openssl rsa -in "$private" -pubout -out "$public" 2> /dev/null || {
-		rm -f "$public"
-		return 2
-	}
-}
-
 # Write the measurements of the volume keys, one sha256 digest per
 # line in stdin, in crypttab order, as the pcrlock components that
 # describe PCR 15.  They are the only copy, as computing them again
@@ -5881,7 +5821,7 @@ generate_tpm2_predictions_pcr_15()
 	local vks=()
 	local name dev opts extra uuid pw
 
-	info "Generating predictions for PCR15"
+	info "Generating the measurements of PCR 15"
 
 	# Read /etc/crypttab lines that contains tpm2-device and
 	# tpm2-measure-pcr.  This code is the similar from
@@ -5936,73 +5876,20 @@ generate_tpm2_predictions_pcr_15()
 		get_volume_key "$dev" vks || { warn "Volume key cannot be extracted. Dropping PCR 15"; return 0; }
 	done
 
-	# The key pair is created during the enrollment, but not when
-	# `--no-measure-pcr` is used.  If PCR 15 is enabled later in
-	# /etc/crypttab there is nothing to sign the prediction with,
-	# and an unsigned prediction also halts the boot
-	local private="/var/lib/sdbootutil/measure-pcr-private.pem"
-	# "|| rc=$?" and not a bare call, that with "set -e" would end
-	# the script on any return that is not 0
-	local rc=0
-	create_measure_pcr_keys || rc="$?"
-	case "$rc" in
-		0) warn "The public key is only added to the initrd by 'sdbootutil mkinitrd'" ;;
-		# Not fatal here on purpose.  The signing below fails
-		# too, and that is the path that removes the stale
-		# prediction and its signature from the ESP, which the
-		# next boot would otherwise still find and trust
-		2) warn "The key pair that signs the PCR 15 prediction cannot be created" ;;
-	esac
-
-	rm -f /var/lib/sdbootutil/measure-pcr-prediction
-	rm -f /var/lib/sdbootutil/measure-pcr-prediction.sha256
-	local dgsts=("sha1" "sha256" "sha384" "sha512")
-	local sizes=(40 64 96 128)
-	local pcr15 hmac
-	local measurements=()
-
-	for i in "${!dgsts[@]}"; do
-		pcr15="$(printf '0%.0s' $(seq 1 "${sizes[i]}"))"
-		for j in "${!msgs[@]}"; do
-			hmac="$(volume_key_hmac "${dgsts[i]}" "${msgs[j]}" "$j")"
-			# `extend_pcr` reports why it failed, but with
-			# `set -e` the script would end here, leaving
-			# an incomplete and unsigned prediction behind.
-			# Drop only the affected hash algorithm
-			pcr15="$(extend_pcr "${dgsts[i]}" "$pcr15" "$hmac")" || continue 2
-			dbg "${msgs[j]} (${dgsts[i]}): $hmac"
-			[ "${dgsts[i]}" != "sha256" ] || measurements+=("$hmac")
-		done
-		echo "$pcr15" >> "/var/lib/sdbootutil/measure-pcr-prediction"
-	done
-
-	# The measurements that the pcrlock policy describes
-	printf '%s\n' "${measurements[@]}" | pcrlock_volume_keys
-
-	# An unsigned prediction is worse than no prediction at all, as
-	# the ESP can still contain the signature of a previous one
-	openssl dgst -sha256 \
-		-sign "$private" \
-		-out /var/lib/sdbootutil/measure-pcr-prediction.sha256 \
-		/var/lib/sdbootutil/measure-pcr-prediction || {
-		rm -f /var/lib/sdbootutil/measure-pcr-prediction
-		rm -f /var/lib/sdbootutil/measure-pcr-prediction.sha256
-		rm -f "${esp_root}${esp_dst}/measure-pcr-prediction"
-		rm -f "${esp_root}${esp_dst}/measure-pcr-prediction.sha256"
-		err "The PCR 15 prediction cannot be signed with $private"
-	}
+	# The measurements that the pcrlock policy describes.  The
+	# prediction signed by older versions is left in the ESP, as the
+	# initrd of an old snapshot still checks it
+	local j hmac
+	for j in "${!msgs[@]}"; do
+		hmac="$(volume_key_hmac sha256 "${msgs[j]}" "$j")"
+		dbg "${msgs[j]}: $hmac"
+		echo "$hmac"
+	done | pcrlock_volume_keys
 
 	# Register the hash of the parsed crypttab
 	local crypttab_sha1
 	read -r crypttab_sha1 _ < <(sha1sum /etc/crypttab)
 	echo "$crypttab_sha1" > /var/lib/sdbootutil/crypttab.sha1
-
-	# Publish the assets in the ESP, so can be imported by
-	# dracut-pcr-signature
-	[ ! -e /var/lib/sdbootutil/measure-pcr-prediction ] || \
-		cp /var/lib/sdbootutil/measure-pcr-prediction "${esp_root}${esp_dst}"
-	[ ! -e /var/lib/sdbootutil/measure-pcr-prediction.sha256 ] || \
-		cp /var/lib/sdbootutil/measure-pcr-prediction.sha256 "${esp_root}${esp_dst}"
 }
 
 updated_crypttab()
@@ -6093,29 +5980,19 @@ generate_tpm2_predictions()
 	local missing_pcr_15=
 	updated_crypttab || {
 		generate_tpm2_predictions_pcr_15
-		# shellcheck disable=SC2015
-		if ! updated_crypttab || [ ! -f "/var/lib/sdbootutil/measure-pcr-prediction" ]; then
-			warn "File measure-pcr-prediction should be updated"
+		if ! updated_crypttab; then
+			warn "The measurements of PCR 15 should be updated"
 			warn "Call sdbootutil update-predictions --measure-pcr"
 			missing_pcr_15=1
 		fi
 	}
 
-	# The user can remove measure-pcr-prediction file from the
-	# ESP, but generate_tpm2_predictions_pcr_15 will not be called
-	[ -f "${esp_root}${esp_dst}/measure-prediction" ] || {
-		[ ! -e /var/lib/sdbootutil/measure-pcr-prediction ] || \
-			cp /var/lib/sdbootutil/measure-pcr-prediction "${esp_root}${esp_dst}"
-		[ ! -e /var/lib/sdbootutil/measure-pcr-prediction.sha256 ] || \
-			cp /var/lib/sdbootutil/measure-pcr-prediction.sha256 "${esp_root}${esp_dst}"
-	}
-
-	# /etc/crypttab measures PCR 15 but the prediction does not
-	# match it anymore, so `measure-pcr-validator` will halt the
-	# next boot.  Report it to the caller of "update-predictions",
+	# /etc/crypttab measures PCR 15 but the measurements do not
+	# match it anymore, so PCR 15 leaves the policy at the next
+	# update.  Report it to the caller of "update-predictions",
 	# that can be a script that is about to do something
 	# irreversible, like removing the key that is needed to
-	# recompute the prediction.  When the predictions are a side
+	# recompute the measurements.  When the predictions are a side
 	# effect of another command (a kernel or a bootloader update)
 	# the warning is enough, as failing there would also abort the
 	# RPM transaction that triggered it
@@ -6864,42 +6741,6 @@ enroll()
 			have_tpm2 || err "No TPM2 found"
 			have_pcrlock || err "No systemd-pcrlock found"
 			! in_lockout || err "The TPM2 is in lockout. Use 'tpm2_dictionarylockout -c [ -p passwd ]' to continue"
-			# For predicting PCR 15 we need to sign a file.
-			# Create the public and private key if missing,
-			# before the initrd is regenerated below, as the
-			# public key is installed inside it
-			if [ -z "$arg_no_measure_pcr" ]; then
-				# "|| rc=$?" and not a bare call, that
-				# with "set -e" would end the script on
-				# any return that is not 0
-				local rc=0
-				create_measure_pcr_keys || rc="$?"
-				case "$rc" in
-					# A new key pair must reach the
-					# initrd, as the validator checks
-					# the signature of the prediction
-					# with the public key installed
-					# there.  The rebuild below is
-					# driven by /etc/crypttab, that can
-					# be already correct (an image where
-					# the device is enrolled after the
-					# deployment, or a re-enrollment),
-					# so ask for it here.  Otherwise the
-					# prediction is signed with a key
-					# that the initrd does not know, and
-					# measure-pcr-validator.service
-					# powers the machine off
-					0) arg_no_reuse_initrd=1 ;;
-					# Fatal, and here rather than a few
-					# lines below, so that it happens
-					# before /etc/crypttab is touched
-					# and there is nothing to undo.
-					# Carrying on would enroll the TPM2
-					# against a prediction that cannot
-					# be signed
-					2) err "The key pair that signs the PCR 15 prediction cannot be created" ;;
-				esac
-			fi
 			for dev in "${tracked_devices[@]}"; do
 				add_crypttab_option "$dev" 'tpm2-device=auto'
 				[ -n "$arg_no_measure_pcr" ] || add_crypttab_option "$dev" 'tpm2-measure-pcr=yes'
