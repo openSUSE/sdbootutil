@@ -33,8 +33,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
    - `50-sdbootutil.install` - kernel-install plugin script
 
 4. **FDE/TPM Components:**
-   - `measure-pcr-generator.sh` - Generates PCR 15 predictions
-   - `measure-pcr-validator.sh` - Validates PCR measurements at boot
+   - `measure-pcr-generator.sh` - Enables and orders the PCR 15 volume key measurements
+   - `measure-pcr-boundary.service` - Measures the end of the initrd into PCR 15
    - `sdbootutil-enroll` - Enrollment service wrapper
    - `jeos-firstboot-enroll` - JEOS integration for first-boot enrollment
 
@@ -210,17 +210,21 @@ Function `install_kernel()` uses SHA-256 checksums to:
 
 ### PCR Prediction System
 
-Full disk encryption relies on PCR (Platform Configuration Register) predictions:
+Full disk encryption relies on PCR (Platform Configuration Register)
+predictions made with `systemd-pcrlock`.  PCR 15 (volume keys) is part of
+the same policy:
 
-1. **Generation** (`measure-pcr-generator.sh`):
-   - Calculates expected PCR 15 values for initrd measurements
-   - Signs predictions with private key
-   - Stores in `/var/lib/sdbootutil/measure-pcr-prediction`
+1. **Measurement** (initrd): `systemd-cryptsetup` extends PCR 15 with an
+   HMAC of each volume key (`measure-pcr-generator.sh` enables and orders
+   it), and `measure-pcr-boundary.service` extends it with `leave-initrd`
+   just before switching root.
 
-2. **Validation** (`measure-pcr-validator.sh`, `measure-pcr-validator.service`):
-   - Runs at boot to verify PCR 15 matches prediction
-   - Checks signature validity
-   - Prevents boot if validation fails (unless `measure-pcr-validator.ignore` set)
+2. **Prediction**: sdbootutil writes the HMACs as the pcrlock components
+   `790-volume-key-NN` (`pcrlock_volume_keys`, when crypttab changed or
+   with `--measure-pcr`, as it needs the volume keys), and adds the end
+   of the initrd (`pcrlock_pcr_15`).  The policy accepts PCR 15 while it is 0 (the
+   initrd unseals the key) and after the expected measurements, so the
+   init of a rogue volume cannot unseal it.
 
 ### State File for Transactional Systems
 
