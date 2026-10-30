@@ -527,6 +527,31 @@ t_pks_reused()
 	is "a 4K kernel" 5 "$(pending_kernel_size "$workdir/linux")"
 }
 
+# kernel_cmdline_files: the drop-ins that packages ship are beside
+# "/usr/lib/kernel/cmdline" (github issue 467)
+t_kcf_dropins()
+{
+	load
+	# shellcheck disable=SC2329  # called by the sourced library
+	foreign_system() { return 0; }
+
+	local root="$workdir/root"
+	rm -rf "$root"
+	mkdir -p "$root/etc/kernel/cmdline.d" "$root/usr/lib/kernel/cmdline.d"
+	echo "quiet" > "$root/etc/kernel/cmdline"
+	echo "foo=1" > "$root/usr/lib/kernel/cmdline.d/10-foo.conf"
+	echo "bar=1" > "$root/usr/lib/kernel/cmdline.d/20-bar.conf"
+	: > "$root/etc/kernel/cmdline.d/20-bar.conf"
+	echo "baz=1" > "$root/etc/kernel/cmdline.d/30-baz.conf"
+
+	# The first character of the subvolume is dropped, like the "@"
+	local files
+	files="$(kernel_cmdline_files "@$root" | grep "^$root/")"
+	is "files" \
+	   "$root/etc/kernel/cmdline $root/usr/lib/kernel/cmdline.d/10-foo.conf $root/etc/kernel/cmdline.d/30-baz.conf" \
+	   "$(echo "$files" | paste -sd' ')"
+}
+
 # verify_esp_files: only the files that sdbootutil installed in the ESP
 # can reach a new TPM2 policy (github issue 465)
 
@@ -712,6 +737,7 @@ done <<-'EOF'
 	t_re_order                  removable_entries keeps the default and removes leftovers first
 	t_re_reused                 removable_entries keeps the entry whose initrd is being reused
 	t_pks_reused                pending_kernel_size counts nothing for a kernel already in the ESP
+	t_kcf_dropins               kernel_cmdline_files reads /usr/lib/kernel/cmdline.d, masked by /etc
 	t_efk_counter               esp_file_key drops the boot counter of an entry, and nothing else
 	t_vef_seed                  verify_esp_files records the ESP on the first prediction
 	t_vef_unchanged             verify_esp_files accepts recorded files, also after a boot counter rename
