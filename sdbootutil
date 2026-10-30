@@ -7051,6 +7051,7 @@ status_tpm2_device=
 status_pin_reachable=
 status_dangling=
 status_pcr15_missing=
+status_pcr15_mismatch=
 
 # Whether "$status_dangling" holds this entry.  The names in it carry
 # the ".conf" that the boot loader interface variables leave out, so
@@ -7451,7 +7452,11 @@ status_pcr15()
 	# policy is created without it, so a rogue volume is not noticed
 	if [ -z "$(pcr15_volume_keys)" ]; then
 		status_pcr15_missing=1
-		status_row "Measurements" "MISSING"
+		if [ -e /var/lib/sdbootutil/measure-pcr-prediction ]; then
+			status_row "Measurements" "MISSING, a signed prediction of an older version is present"
+		else
+			status_row "Measurements" "MISSING"
+		fi
 	else
 		status_row "Measurements" "present"
 	fi
@@ -7507,6 +7512,7 @@ status_pcr15()
 	elif [ "${expected,,}" = "$measured" ]; then
 		status_row "This boot" "measured as expected"
 	else
+		status_pcr15_mismatch=1
 		status_row "This boot" "the measurement DOES NOT MATCH the volume keys"
 	fi
 
@@ -7907,7 +7913,17 @@ fde_status()
 	[ -z "$status_pcr15_missing" ] || {
 		echo
 		warn "/etc/crypttab asks to measure PCR 15, but the measurements of the volume keys are missing, so the policy does not include PCR 15"
-		warn "Run 'sdbootutil update-predictions --measure-pcr' to write them"
+		warn "'sdbootutil update-predictions' migrates them from the signed prediction of an older version, if the volume keys of this boot match it, and 'sdbootutil update-predictions --measure-pcr' computes them from the volume keys"
+	}
+
+	# The disk was unlocked, as the initrd unseals the key before
+	# PCR 15 is measured, but nothing after this boot's measurements
+	# satisfies the policy, so it cannot be updated without the
+	# recovery PIN, and the devices unlocked later do not unseal
+	[ -z "$status_pcr15_mismatch" ] || {
+		echo
+		warn "The volume keys measured in this boot do not match the measurements in the policy: a volume was changed (re-encrypted, a new LUKS2 header, a renamed crypttab entry), or it is not the expected one"
+		warn "If the change is expected, run 'sdbootutil update-predictions --measure-pcr', with the recovery PIN, to describe it"
 	}
 
 	# A policy with no device behind it is not an error, but it is
