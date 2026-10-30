@@ -16,7 +16,7 @@
 #
 #   I2  Unlock continuity.  Every device that the TPM2 is supposed to
 #       open is still covered by a policy that matches the PCRs as they
-#       are now, and the PCR 15 prediction still describes the devices
+#       are now, and the PCR 15 measurements still describe the devices
 #       that are in `/etc/crypttab`.
 #
 # It deliberately does NOT use sdbootutil.  A harness written in terms
@@ -284,13 +284,13 @@ capture_pcrlock()
 	' < /var/lib/systemd/pcrlock.json >> "$statefile"
 }
 
-capture_pcr15_prediction()
+capture_pcr15_measurements()
 {
 	local f
-	for f in measure-pcr-prediction measure-pcr-prediction.sha256 measure-pcr-public.pem; do
-		[ -e "/var/lib/sdbootutil/$f" ] || continue
-		read -r sum _ < <(sha256sum "/var/lib/sdbootutil/$f")
-		emit "pcr15/$f" "$sum"
+	for f in /var/lib/pcrlock.d/790-volume-key-*.pcrlock.d/generated.pcrlock; do
+		[ -e "$f" ] || continue
+		read -r sum _ < <(sha256sum "$f")
+		emit "pcr15/$(basename "$(dirname "$f")")" "$sum"
 	done
 }
 
@@ -328,7 +328,7 @@ do_capture()
 	capture_crypttab
 	capture_luks
 	capture_pcrlock
-	capture_pcr15_prediction
+	capture_pcr15_measurements
 	capture_volatile
 
 	sort "$statefile"
@@ -752,11 +752,11 @@ check_policy_binds()
 	fi
 }
 
-# I2.4 -- the PCR 15 prediction still describes the current crypttab and
-# is signed by the key the initrd validator carries.  Mechanism-specific
-# on purpose: if PCR 15 moves to a systemd primitive this check is
-# replaced rather than kept
-check_pcr15_prediction()
+# I2.4 -- the PCR 15 measurements still describe the current crypttab,
+# and the policy includes PCR 15.  A boot whose initrd did not measure
+# the end of the initrd (measure-pcr-boundary.service) is only skipped,
+# as pcrlock can drop PCR 15 when the event log does not match
+check_pcr15_measurements()
 {
 	if [ ! -e /etc/crypttab ] || ! grep -q "tpm2-measure-pcr=yes" /etc/crypttab; then
 		skip "I2.4 no device measures PCR 15"
@@ -764,29 +764,29 @@ check_pcr15_prediction()
 	fi
 
 	local dir=/var/lib/sdbootutil
-	if [ ! -e "$dir/measure-pcr-prediction" ]; then
-		fail "I2.4 crypttab measures PCR 15 but there is no prediction; the next boot halts"
-		return
-	fi
-	if [ ! -e "$dir/measure-pcr-prediction.sha256" ]; then
-		fail "I2.4 the PCR 15 prediction has no signature; the next boot halts"
-		return
-	fi
-	if ! openssl dgst -sha256 -verify "$dir/measure-pcr-public.pem" \
-		-signature "$dir/measure-pcr-prediction.sha256" \
-		"$dir/measure-pcr-prediction" &> /dev/null; then
-		fail "I2.4 the PCR 15 prediction is not signed by measure-pcr-public.pem"
+	if [ ! -e /var/lib/pcrlock.d/790-volume-key-01.pcrlock.d/generated.pcrlock ]; then
+		fail "I2.4 crypttab measures PCR 15 but there are no measurements; the policy cannot include it"
 		return
 	fi
 
 	local current
 	read -r current _ < <(sha1sum /etc/crypttab)
 	if ! grep -Fixq "$current" "$dir/crypttab.sha1" 2> /dev/null; then
-		fail "I2.4 the PCR 15 prediction was made for a different /etc/crypttab"
+		fail "I2.4 the PCR 15 measurements were made for a different /etc/crypttab"
 		return
 	fi
 
-	pass "I2.4 the PCR 15 prediction is signed and matches the current crypttab"
+	# The log is RFC 7464 JSON-seq, with a 0x1e separator per record
+	local log=/run/log/systemd/tpm2-measure.log boundary=
+	[ ! -r "$log" ] || boundary="$(tr -d '\036' < "$log" | \
+		jq -r 'select(.pcr == 15 and .content.eventType == "phase") | .pcr' 2> /dev/null)"
+	if grep -qs '"pcr":15' /var/lib/systemd/pcrlock.json; then
+		pass "I2.4 the PCR 15 measurements match the current crypttab, and the policy includes PCR 15"
+	elif [ -z "$boundary" ]; then
+		skip "I2.4 the policy does not include PCR 15, and the end of the initrd was not measured in this boot"
+	else
+		fail "I2.4 the end of the initrd was measured, but the policy does not include PCR 15"
+	fi
 }
 
 do_check()
@@ -803,7 +803,7 @@ do_check()
 	check_tpm2_tokens
 	check_policy_fresh
 	check_policy_binds
-	check_pcr15_prediction
+	check_pcr15_measurements
 
 	echo
 	echo "$checks checks, $failures failed"
