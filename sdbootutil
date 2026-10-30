@@ -5892,6 +5892,43 @@ generate_tpm2_predictions_pcr_15()
 	echo "$crypttab_sha1" > /var/lib/sdbootutil/crypttab.sha1
 }
 
+# Older versions stored the measurements only as a signed prediction
+# of the final PCR 15 value, made for the current crypttab.  If the
+# volume keys measured in this boot replay to it, they are the expected
+# ones, and are stored without asking for the password.  Otherwise the
+# measurements stay missing, and `--measure-pcr` computes them from the
+# volume keys
+migrate_pcr_15_measurements()
+{
+	local dir=/var/lib/sdbootutil
+	local log=/run/log/systemd/tpm2-measure.log
+
+	[ ! -e /var/lib/pcrlock.d/790-volume-key-01.pcrlock.d/generated.pcrlock ] || return 0
+	[ -r "$log" ] || return 0
+	[ -e "$dir/measure-pcr-prediction" ] || return 0
+	[ -e "$dir/measure-pcr-prediction.sha256" ] || return 0
+	[ -e "$dir/measure-pcr-public.pem" ] || return 0
+
+	# The order of the entries is the order of the extensions
+	local crypttab_sha1
+	read -r crypttab_sha1 _ < <(sha1sum /etc/crypttab)
+	grep -Fixq "$crypttab_sha1" "$dir/crypttab.sha1" 2> /dev/null || return 0
+
+	openssl dgst -sha256 \
+		-verify "$dir/measure-pcr-public.pem" \
+		-signature "$dir/measure-pcr-prediction.sha256" \
+		"$dir/measure-pcr-prediction" &> /dev/null || return 0
+
+	# One line per digest, and the second one is sha256
+	local predicted measured
+	predicted="$(sed -n 2p "$dir/measure-pcr-prediction")"
+	measured="$(pcr15_events "$log" volume-key | pcr15_replay)"
+	[ -n "$measured" ] && [ "${predicted,,}" = "$measured" ] || return 0
+
+	info "Migrating the measurements of PCR 15 from the signed prediction"
+	pcr15_events "$log" volume-key | pcrlock_volume_keys
+}
+
 updated_crypttab()
 {
 	local crypttab_sha1
@@ -5952,6 +5989,8 @@ generate_tpm2_predictions()
 				warn "$dev is enrolled with a signed PCR policy. Re-enroll to use systemd-pcrlock"
 		done
 	fi
+
+	migrate_pcr_15_measurements
 
 	generate_tpm2_predictions_pcrlock
 
