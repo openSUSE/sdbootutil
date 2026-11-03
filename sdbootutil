@@ -7998,12 +7998,12 @@ define_options() {
 # running.  The lock is released when the process exits.  Without
 # permissions to take it the command would fail later anyway
 #
-# Like in the snapper plugin the directory is only for root: any user
-# that can open the lock can also hold it, and block every run
+# The lock is the ESP directory itself: it is the shared resource,
+# only root can open it (dmask=0077), and SELinux already lets
+# sdbootutil_t lock it, while a lock file in /run needs a new policy
 take_lock()
 {
-	{ mkdir -p /run/sdbootutil && chmod 700 /run/sdbootutil; } 2> /dev/null || return 0
-	exec {lock_fd}> /run/sdbootutil/lock || return 0
+	exec {lock_fd}< "$esp_root" || return 0
 	flock -n "$lock_fd" && return 0
 	info "Waiting for another sdbootutil to finish"
 	flock -w 600 "$lock_fd" || err "Another sdbootutil has been running for 10 minutes"
@@ -8099,14 +8099,14 @@ elif [ -z ${commands["$1"]+yes} ]; then
 	err "unknown command $1"
 fi
 
+[ -n "$arg_esp_path" ] && export SYSTEMD_ESP_PATH="$arg_esp_path"
+
+eval_bootctl
+
 case "$1" in
 	is-installed|needs-update|list-*|status|show-entry|is-bootable|get-*|print-loader-path|bootloader) ;;
 	*) take_lock ;;
 esac
-
-[ -n "$arg_esp_path" ] && export SYSTEMD_ESP_PATH="$arg_esp_path"
-
-eval_bootctl
 
 root_subvol=""
 subvol_prefix=""
