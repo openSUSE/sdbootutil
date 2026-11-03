@@ -18,6 +18,13 @@ check() {
     return 0
 }
 
+depends() {
+    # Since systemd 262 the volume keys are measured via
+    # systemd-pcrextend
+    echo systemd-pcrextend
+    return 0
+}
+
 install() {
     inst_multiple grep openssl
     inst_script "$moddir/measure-pcr-generator.sh" "/usr/lib/systemd/system-generators/measure-pcr-generator"
@@ -25,4 +32,5 @@ install() {
     inst_simple "$moddir/measure-pcr-validator.service" "$systemdsystemunitdir/measure-pcr-validator.service"
     [ -f "/var/lib/sdbootutil/measure-pcr-public.pem" ] && inst_simple "/var/lib/sdbootutil/measure-pcr-public.pem"
     $SYSTEMCTL -q --root "$initdir" enable measure-pcr-validator.service
+    inst_simple "$moddir/measure-pcr-pcrextend.conf" "$systemdsystemunitdir/systemd-pcrextend.socket.d/50-measure-pcr.conf"
 }
