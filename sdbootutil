@@ -4863,9 +4863,10 @@ predict_pcrs()
 {
 	local pcrs="$1"
 
-	# The components that cannot be aligned are reported at
-	# `notice` level, and `mask_unmatched_components` needs them
-	SYSTEMD_LOG_LEVEL=notice pcrlock --pcr="$pcrs" --json=short predict 2>"$tmpfile"
+	# `mask_unmatched_components` needs the components that cannot
+	# be aligned.  They are reported at `info` level since systemd
+	# 262 (`notice` before), so `notice` would silently hide them
+	SYSTEMD_LOG_LEVEL=info pcrlock --pcr="$pcrs" --json=short predict 2>"$tmpfile"
 }
 
 remove_pcr()
