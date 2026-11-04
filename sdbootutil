@@ -5512,6 +5512,14 @@ generate_tpm2_predictions_pcrlock()
 	local pcrlock_status=0
 	output="$(PIN="$pin" pcrlock --pcr="$final_pcrs" "${extra[@]}" make-policy 2>"$tmpfile")" || pcrlock_status=$?
 
+	# `make-policy` also writes the policy as a credential, that
+	# systemd-stub passes to the initrd of every UKI.  It is measured
+	# into PCR 9 and PCR 12, and a policy cannot predict its own
+	# digest, so neither PCR could be sealed for a UKI.  The initrd
+	# gets the policy from the ESP instead (dracut-pcr-signature).
+	# There is no option to skip it
+	rm -f "${boot_root}/loader/credentials/pcrlock.${entry_token}.cred"
+
 	# `systemd-pcrlock` explains in stderr what it did, but the
 	# messages are discarded when the command succeeds
 	dbg_cat "$tmpfile"
