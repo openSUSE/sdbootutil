@@ -2855,20 +2855,24 @@ shim_version()
 	echo "$v"
 }
 
+# The boot loader as deployed in the ESP
+deployed_bootloader()
+{
+	if is_shim_installed; then
+		echo "${esp_root}${esp_dst}/grub.efi"
+	elif [ -n "$arg_portable" ]; then
+		echo "${esp_root}/EFI/BOOT/BOOT${firmware_arch^^}.EFI"
+	else
+		local bootloader
+		bootloader="$(find_bootloader)"
+		echo "${esp_root}${esp_dst}/${bootloader##*/}"
+	fi
+}
+
 bootloader_version()
 {
 	local fn="$1"
-	if [ -z "$1" ]; then
-		if is_shim_installed; then
-			fn="${esp_root}${esp_dst}/grub.efi"
-		elif [ -n "$arg_portable" ]; then
-			fn="${esp_root}/EFI/BOOT/BOOT${firmware_arch^^}.EFI"
-		else
-			local bootloader
-			bootloader="$(find_bootloader)"
-			fn="${esp_root}${esp_dst}/${bootloader##*/}"
-		fi
-	fi
+	[ -n "$fn" ] || fn="$(deployed_bootloader)"
 	[ -e "$fn" ] || return 1
 	if is_sdboot; then
 		read -r _ _ _ v _ < <(grep -ao '#### LoaderInfo: systemd-boot [^#]\+ ####' "$fn")
@@ -3011,6 +3015,14 @@ bootloader_needs_update()
 	bldr_name=$(bootloader_name "$snapshot")
 	if [ "$status" = "12" ]; then
 		info "$bldr_name needs to be updated"
+		return 0
+	fi
+
+	# The same version can be a different binary: a package rebuilt
+	# with a patch, or re-signed.  It is installed as is, so compare
+	# the files, as `extra_entry_needs_update` does
+	if [ "$status" = "0" ] && ! cmp -s "$(deployed_bootloader)" "$(find_bootloader "$snapshot")"; then
+		info "$bldr_name has the same version, but a different binary"
 		return 0
 	fi
 
