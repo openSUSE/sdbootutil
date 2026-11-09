@@ -74,6 +74,15 @@ for key in "${KEYS[@]}"; do
 		die "%user:$key is in the keyring. Purge it first: keyctl purge user $key"
 done
 
+# The PCR 15 cases read and write fixed paths of the host (/etc/crypttab,
+# /var/lib/sdbootutil, /var/lib/pcrlock.d, the measurement log).  They
+# put scratch mounts over them, so everything runs in a mount namespace
+# of its own, and nothing reaches the host
+if [ -z "${SDBOOTUTIL_UNIT_NS:-}" ]; then
+	command -v unshare > /dev/null || skip "unshare is not installed"
+	exec env SDBOOTUTIL_UNIT_NS=1 unshare --mount --propagation private "${BASH_SOURCE[0]}" "$@"
+fi
+
 # The library half of sdbootutil.  Everything below the marker is the
 # command dispatcher, which would run on source; everything above it is
 # definitions, and the marker is already there for the completion data
@@ -830,6 +839,219 @@ t_tr_generated_key()
 	not_traced "$key" "$BOOTSTRAP"
 }
 
+# PCR 15: the measurements of the volume keys, their pcrlock components,
+# the migration from the signed prediction of older versions, and the
+# report.  The digests are the ones measured on a guest: the volume key
+# of its root, and the end of the initrd
+
+VK="3dc9970202dc971eff4a39c3282e850e7218af84d60334b5937f988da8ddf0bb"
+LEAVE="3be261aff7db92bf507eae947f4003ffa2bcad0bffe3524601d62d0bc8be7135"
+# PCR 15 after the volume key, and after the end of the initrd too
+PCR15_VK="47213c494b32c9f1f7905887bbb66101672b94fa628c225ecef188abd4a8d6b3"
+PCR15_VK_LEAVE="af1580f2a8d43bc468264f3ae5e5bf2e46f2d2458f4e52533532525287b58dbf"
+# PCR 15 after the end of the initrd only, no volume key measured
+PCR15_LEAVE="4cc7f58e12f3393e31f32b547e15a980435e42c492f672f52adcea43cf4595a2"
+
+# Empty scratch copies of the paths that the PCR 15 code uses
+pcr15_setup()
+{
+	load
+	local d
+	for d in /var/lib/sdbootutil /var/lib/pcrlock.d /var/lib/systemd /run/log/systemd; do
+		mkdir -p "$d"
+		mountpoint -q "$d" || mount -t tmpfs tmpfs "$d"
+		rm -rf "${d:?}"/*
+	done
+	[ -e /etc/crypttab ] || skip "/etc/crypttab is needed as a mount point"
+	echo "root UUID=1 none x-initrd.attach,tpm2-device=auto,tpm2-measure-pcr=yes" > "$workdir/crypttab"
+	mountpoint -q /etc/crypttab || mount --bind "$workdir/crypttab" /etc/crypttab
+	sha1sum /etc/crypttab | cut -d' ' -f1 > /var/lib/sdbootutil/crypttab.sha1
+}
+
+# A systemd measurement log (RFC 7464 JSON-seq) with one record per
+# argument, "PCR:TYPE:DIGEST"
+pcr15_log()
+{
+	local r pcr type digest
+	for r in "$@"; do
+		IFS=: read -r pcr type digest <<<"$r"
+		printf '\036{"pcr":%s,"digests":[{"hashAlg":"sha256","digest":"%s"}],"content_type":"systemd","content":{"eventType":"%s"}}\n' \
+		       "$pcr" "$digest" "$type"
+	done > /run/log/systemd/tpm2-measure.log
+}
+
+# The signed prediction that older versions wrote, for a PCR 15 value
+pcr15_prediction()
+{
+	local value="$1"
+	openssl genrsa -out /var/lib/sdbootutil/measure-pcr-private.pem 2048 2> /dev/null
+	openssl rsa -in /var/lib/sdbootutil/measure-pcr-private.pem -pubout \
+		-out /var/lib/sdbootutil/measure-pcr-public.pem 2> /dev/null
+	printf '%s\n%s\n' "$(printf '0%.0s' $(seq 1 40))" "$value" > /var/lib/sdbootutil/measure-pcr-prediction
+	openssl dgst -sha256 -sign /var/lib/sdbootutil/measure-pcr-private.pem \
+		-out /var/lib/sdbootutil/measure-pcr-prediction.sha256 \
+		/var/lib/sdbootutil/measure-pcr-prediction
+}
+
+t_p15_replay()
+{
+	load
+
+	is "nothing" "" "$(pcr15_replay < /dev/null)"
+	is "volume key" "$PCR15_VK" "$(echo "$VK" | pcr15_replay)"
+	is "volume key, end of initrd" "$PCR15_VK_LEAVE" "$(printf '%s\n%s\n' "$VK" "$LEAVE" | pcr15_replay)"
+	is "end of initrd only" "$PCR15_LEAVE" "$(echo "$LEAVE" | pcr15_replay)"
+}
+
+t_p15_events()
+{
+	pcr15_setup
+	pcr15_log "15:volume-key:$VK" "11:phase:$LEAVE" "15:phase:$LEAVE" "15:machine-id:$PCR15_VK"
+
+	is "volume keys" "$VK" "$(pcr15_events /run/log/systemd/tpm2-measure.log volume-key)"
+	is "end of initrd" "$LEAVE" "$(pcr15_events /run/log/systemd/tpm2-measure.log phase)"
+}
+
+t_p15_keys()
+{
+	pcr15_setup
+	# Pretend that the event log was already parsed, empty.  The
+	# library is sourced inside `load`, so its `declare -A eventlog` is
+	# local there, and the array has to be declared again
+	declare -gA eventlog=(["none"]=1)
+
+	printf '%s\n%s\n' "$VK" "$PCR15_VK" | pcrlock_volume_keys
+	local d=/var/lib/pcrlock.d
+	is "first volume key" "$VK" \
+	   "$(jq -r '.records[0].digests[0].digest' "$d/790-volume-key-01.pcrlock.d/generated.pcrlock")"
+	is "second volume key" "$PCR15_VK" \
+	   "$(jq -r '.records[0].digests[0].digest' "$d/790-volume-key-02.pcrlock.d/generated.pcrlock")"
+	is "PCR" 15 "$(jq -r '.records[0].pcr' "$d/790-volume-key-01.pcrlock.d/generated.pcrlock")"
+	is "read back in order" "$(printf '%s\n%s' "$VK" "$PCR15_VK")" "$(pcr15_volume_keys)"
+}
+
+t_p15_keys_shift()
+{
+	pcr15_setup
+	# The old measurement is the one in the event log of this boot
+	declare -gA eventlog=(["$PCR15_VK"]=1)
+	echo "$PCR15_VK" | pcrlock_volume_keys
+
+	echo "$VK" | pcrlock_volume_keys
+	local d=/var/lib/pcrlock.d/790-volume-key-01.pcrlock.d
+	is "new measurement" "$VK" "$(jq -r '.records[0].digests[0].digest' "$d/generated.pcrlock")"
+	is "shifted measurement" "$PCR15_VK" "$(jq -r '.records[0].digests[0].digest' "$d/shift-generated.pcrlock" 2> /dev/null)"
+}
+
+t_p15_keys_gone()
+{
+	pcr15_setup
+	# shellcheck disable=SC2034  # read by the sourced library
+	declare -gA eventlog=(["none"]=1)
+	printf '%s\n%s\n' "$VK" "$PCR15_VK" | pcrlock_volume_keys
+
+	echo "$VK" | pcrlock_volume_keys
+	[ ! -e /var/lib/pcrlock.d/790-volume-key-02.pcrlock.d ] || fail "the component of a device that is gone is still there"
+	pcrlock_volume_keys < /dev/null
+	[ ! -e /var/lib/pcrlock.d/790-volume-key-01.pcrlock.d ] || fail "a component without a measurement is still there"
+}
+
+t_p15_lock()
+{
+	pcr15_setup
+	have_pcrlock || skip "systemd-pcrlock is not installed"
+	local rc=0
+	pcrlock_pcr_15 || rc=$?
+	is "no volume keys" 1 "$rc"
+
+	# shellcheck disable=SC2034  # read by the sourced library
+	declare -gA eventlog=(["none"]=1)
+	echo "$VK" | pcrlock_volume_keys
+	pcrlock_pcr_15 || fail "PCR 15 could not be described"
+	local leave=/var/lib/pcrlock.d/795-leave-initrd.pcrlock
+	is "end of initrd" "$LEAVE" \
+	   "$(jq -r '.records[0].digests[] | select(.hashAlg == "sha256") | .digest' "$leave")"
+	is "PCR" 15 "$(jq -r '.records[0].pcr' "$leave")"
+
+	pcrlock_volume_keys < /dev/null
+	pcrlock_pcr_15 && fail "PCR 15 was described without volume keys"
+	[ ! -e "$leave" ] || fail "the end of the initrd is described without volume keys"
+}
+
+t_p15_migrate()
+{
+	pcr15_setup
+	# shellcheck disable=SC2034  # read by the sourced library
+	declare -gA eventlog=(["none"]=1)
+	pcr15_prediction "$PCR15_VK"
+	pcr15_log "15:volume-key:$VK" "15:phase:$LEAVE"
+
+	migrate_pcr_15_measurements &> /dev/null
+	is "migrated" "$VK" "$(pcr15_volume_keys)"
+}
+
+t_p15_migrate_refused()
+{
+	pcr15_setup
+	# shellcheck disable=SC2034  # read by the sourced library
+	declare -gA eventlog=(["none"]=1)
+	pcr15_prediction "$PCR15_VK"
+
+	# A different volume key in this boot
+	pcr15_log "15:volume-key:$LEAVE"
+	migrate_pcr_15_measurements &> /dev/null
+	[ -z "$(pcr15_volume_keys)" ] || fail "a different volume key was migrated"
+
+	# A prediction that is not signed by the key
+	pcr15_log "15:volume-key:$VK"
+	echo "garbage" > /var/lib/sdbootutil/measure-pcr-prediction.sha256
+	migrate_pcr_15_measurements &> /dev/null
+	[ -z "$(pcr15_volume_keys)" ] || fail "a prediction with a bad signature was migrated"
+
+	# A crypttab that changed after the prediction
+	pcr15_prediction "$PCR15_VK"
+	echo "changed" > /var/lib/sdbootutil/crypttab.sha1
+	migrate_pcr_15_measurements &> /dev/null
+	[ -z "$(pcr15_volume_keys)" ] || fail "a prediction for another crypttab was migrated"
+
+	# Measurements that are already there are kept
+	sha1sum /etc/crypttab | cut -d' ' -f1 > /var/lib/sdbootutil/crypttab.sha1
+	echo "$PCR15_VK" | pcrlock_volume_keys
+	migrate_pcr_15_measurements &> /dev/null
+	is "kept" "$PCR15_VK" "$(pcr15_volume_keys)"
+}
+
+t_p15_status()
+{
+	pcr15_setup
+	# shellcheck disable=SC2034  # read by the sourced library
+	declare -gA eventlog=(["none"]=1)
+	local out
+
+	# shellcheck disable=SC2154  # set by the sourced library
+	out="$(status_pcr15; echo "missing=$status_pcr15_missing")"
+	says "missing" "$out" "MISSING"
+	says "flag" "$out" "missing=1"
+
+	echo "$VK" | pcrlock_volume_keys
+	echo '{"pcrValues":[{"pcr":15,"values":[]}]}' > /var/lib/systemd/pcrlock.json
+	pcr15_log "15:volume-key:$VK" "15:phase:$LEAVE"
+	# shellcheck disable=SC2154  # set by the sourced library
+	out="$(status_pcr15; echo "mismatch=$status_pcr15_mismatch")"
+	says "in the policy" "$out" "In the policy:   yes"
+	says "this boot" "$out" "measured as expected"
+	says "end of initrd" "$out" "End of initrd:   measured"
+	says "no mismatch" "$out" "mismatch="
+	says_not "no mismatch" "$out" "mismatch=1"
+
+	pcr15_log "15:volume-key:$PCR15_VK"
+	# shellcheck disable=SC2154  # set by the sourced library
+	out="$(status_pcr15; echo "mismatch=$status_pcr15_mismatch")"
+	says "mismatch" "$out" "DOES NOT MATCH"
+	says "flag" "$out" "mismatch=1"
+	says "no boundary" "$out" "NOT measured in this boot"
+}
+
 ####### the runner #######
 
 run_case()
@@ -907,6 +1129,15 @@ done <<-'EOF'
 	t_tr_enroll_password        enroll --method=password enrolls PW, untraced
 	t_tr_enroll_recovery_key    enroll_recovery_key enrolls KEY, untraced
 	t_tr_generated_key          enroll_recovery_key prints the generated key, untraced
+	t_p15_replay                pcr15_replay extends PCR 15 like the TPM2 does
+	t_p15_events                pcr15_events takes the PCR 15 records of one type from the log
+	t_p15_keys                  pcrlock_volume_keys writes one component per volume key, read back in order
+	t_p15_keys_shift            pcrlock_volume_keys shifts a measurement that changed, as it is in the event log
+	t_p15_keys_gone             pcrlock_volume_keys removes the components of the devices that are gone
+	t_p15_lock                  pcrlock_pcr_15 describes the end of the initrd only with volume keys
+	t_p15_migrate               migrate_pcr_15_measurements takes the volume keys of a boot that matches the prediction
+	t_p15_migrate_refused       migrate_pcr_15_measurements refuses another key, a bad signature or another crypttab
+	t_p15_status                status_pcr15 reports missing, matching and mismatching measurements
 EOF
 
 echo
