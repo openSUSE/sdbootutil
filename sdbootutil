@@ -6047,7 +6047,8 @@ luks_header()
 # systemd-cryptenroll exits successfully even when it did not enroll
 # anything.  A slot of the expected kind is not evidence by itself, as
 # it can come from a previous enrollment, so the LUKS2 header is
-# compared with the one collected before the enrollment
+# compared with the one collected before the enrollment (with one
+# exception for TPM2, see below)
 check_enrolled()
 {
 	local dev="${1:?}"
@@ -6060,6 +6061,15 @@ check_enrolled()
 	# "/etc/crypttab" and the initrd are rolled back by the caller,
 	# never the LUKS2 header, so whatever was written stays
 	if [ "$header" = "$(luks_header "$dev")" ]; then
+		# The exception is TPM2: systemd-cryptenroll does nothing
+		# when a slot with the same policy hash is already there
+		# (unless a PIN is set), and with pcrlock that hash depends
+		# only on the NV index, so enrolling again never changes the
+		# header.  The slot that is there is the one that was asked
+		if [ "$kind" = "tpm2" ] && have_slot "$dev" "tpm2"; then
+			dbg "The TPM2 policy of $dev is already enrolled"
+			return 0
+		fi
 		warn "systemd-cryptenroll reported no error, but it left the header of $dev untouched: nothing was enrolled with $kind"
 		return 1
 	fi
