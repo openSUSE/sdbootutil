@@ -221,6 +221,9 @@ load()
 	# shellcheck source=/dev/null
 	. "$lib"
 	set +e
+	# grubenv_set and the installers record into it, never the host's
+	# shellcheck disable=SC2034  # read by the sourced library
+	esp_files="$workdir/esp-files"
 }
 
 ####### the cases #######
