@@ -6892,14 +6892,16 @@ enroll()
 	local failed=
 	for dev in "${tracked_devices[@]}"; do
 		enroll_device "$dev" pin_or_pw || { failed="$dev"; break; }
+		# A slot is in place, so the options in /etc/crypttab are
+		# backed and must stay, also if a later device fails:
+		# without "tpm2-device" the policy of this slot would never
+		# be updated.  A device left without a slot is harmless
+		# with them, it asks for the password as before
+		restore_crypttab=
 	done
 
-	# /etc/crypttab is put back by the trap
+	# /etc/crypttab is put back by the trap, if no device was enrolled
 	[ -z "$failed" ] || err "Failed to enroll ($arg_method): $failed"
-
-	# The slots are in place, so the options in /etc/crypttab are
-	# backed now and must stay
-	restore_crypttab=
 }
 
 unenroll_all_pcrlock()
