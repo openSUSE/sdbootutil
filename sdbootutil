@@ -5881,10 +5881,26 @@ updated_crypttab()
 	grep -Fixq "$crypttab_sha1" /var/lib/sdbootutil/crypttab.sha1 2> /dev/null
 }
 
+# systemd-cryptsetup tries the LUKS2 tokens on its own, so a TPM2 slot
+# keeps opening the device when /etc/crypttab does not ask for it.  But
+# nothing updates its policy then: `generate_tpm2_predictions` and the
+# boot service both look for "tpm2-device" in /etc/crypttab.  It works
+# until the next change of a sealed PCR, and then asks for the password
+warn_tpm2_slot_without_option()
+{
+	local dev
+	detect_tracked_devices || return 0
+	for dev in "${tracked_devices[@]}"; do
+		have_slot "$dev" "tpm2" || continue
+		warn "$dev has a TPM2 slot, but no \"tpm2-device\" option in /etc/crypttab, so its TPM2 policy is never updated"
+		warn "Add \"tpm2-device=auto\" to /etc/crypttab and call 'sdbootutil update-predictions', or enroll it again"
+	done
+}
+
 generate_tpm2_predictions()
 {
 	[ -e /etc/crypttab ] || return 0
-	grep -q "tpm2-device" /etc/crypttab || return 0
+	grep -q "tpm2-device" /etc/crypttab || { warn_tpm2_slot_without_option; return 0; }
 	! in_lockout || err "The TPM2 is in lockout. Use 'tpm2_dictionarylockout -c [ -p passwd ]' to clear the DA lockout and re-try the sdbootutil command"
 
 	info "Updating predictions"
@@ -6026,7 +6042,10 @@ detect_tracked_devices()
 		is_tracked_device "$dev" || continue
 		dbg "Tracking encrypted device $dev"
 		tracked_devices+=("$dev")
-	done < <(lsblk --noheadings -o PATH,FSTYPE)
+	# --list prints every device once.  The default tree repeats a
+	# device under each of its parents, so a RAID would be tracked
+	# (and enrolled) once per member disk
+	done < <(lsblk --noheadings --list -o PATH,FSTYPE)
 	have_tracked_devices
 }
 
@@ -7093,12 +7112,12 @@ status_device()
 
 	# A device that only the TPM2 can open is one firmware update
 	# away from being unopenable, and that is worth saying out loud
-	local tpm2_only="" m
+	local tpm2_only="" has_tpm2="" m
 	if [ "${#unique[@]}" -gt 0 ]; then
 		tpm2_only=1
 		for m in "${unique[@]}"; do
 			[[ "$m" == tpm2* ]] || tpm2_only=
-			[[ "$m" != tpm2* ]] || status_tpm2_device=1
+			[[ "$m" != tpm2* ]] || { status_tpm2_device=1; has_tpm2=1; }
 		done
 	fi
 
@@ -7136,6 +7155,10 @@ status_device()
 	[ -z "$tpm2_only" ] || \
 		echo "    WARNING: only the TPM2 can open this device.  A firmware update, a bootloader update or a cleared TPM2 leaves it unopenable"
 
+	# See `warn_tpm2_slot_without_option`
+	[ -z "$has_tpm2" ] || [ -z "$tracked" ] || [ -n "$ignored" ] || [[ "$opts" == *"tpm2-device"* ]] || \
+		echo "    WARNING: there is a TPM2 slot, but no \"tpm2-device\" option in /etc/crypttab, so the TPM2 policy is never updated"
+
 	[ -z "$arg_full" ] || \
 		while IFS=$'\t' read -r slot method token extra; do
 			[ -n "$slot" ] || continue
@@ -7157,7 +7180,7 @@ status_devices()
 		[ "$fstype" = 'crypto_LUKS' ] || continue
 		cryptsetup isLuks --type luks2 "$dev" 2> /dev/null || continue
 		all+=("$dev")
-	done < <(lsblk --noheadings -o PATH,FSTYPE)
+	done < <(lsblk --noheadings --list -o PATH,FSTYPE)
 
 	echo "Devices"
 	if [ "${#all[@]}" -eq 0 ]; then
