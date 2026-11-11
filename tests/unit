@@ -177,6 +177,33 @@ opens()
 		fail "$2: the value does not open the device"
 }
 
+# Run "$@" with the trace of --start-trace-code going to $workdir/trace,
+# as sdbootutil does it: `set -x` on a separate descriptor
+traced()
+{
+	local fd
+	: > "$workdir/trace"
+	exec {fd}>> "$workdir/trace"
+	BASH_XTRACEFD="$fd"
+	set -x
+	"$@"
+	{ set +x; } 2> /dev/null
+	unset BASH_XTRACEFD
+	exec {fd}>&-
+}
+
+# None of the values reached the trace
+not_traced()
+{
+	local value
+	[ -s "$workdir/trace" ] || fail "trace: nothing was traced, the check proves nothing"
+	for value in "$@"; do
+		[ -n "$value" ] || continue
+		! grep -qF -- "$value" "$workdir/trace" || \
+			fail "trace: a secret was recorded ('${value:0:6}...')"
+	done
+}
+
 # Source the library with whatever the case put in the environment, and
 # take back the `set -e` that sdbootutil turns on: an assertion has to
 # be able to fail without ending the case
@@ -196,7 +223,9 @@ t_gdp_current_pw()
 {
 	CURRENT_PW="$BOOTSTRAP" load
 
-	is "returned" "$BOOTSTRAP" "$(get_device_password "$dev")"
+	get_device_password "$dev"
+	# shellcheck disable=SC2154  # set by the sourced library
+	is "returned" "$BOOTSTRAP" "$device_pw"
 	key_is cryptenroll "$BOOTSTRAP"
 }
 
@@ -204,14 +233,16 @@ t_gdp_key()
 {
 	KEY="$BOOTSTRAP" load
 
-	is "returned" "$BOOTSTRAP" "$(get_device_password "$dev")"
+	get_device_password "$dev"
+	is "returned" "$BOOTSTRAP" "$device_pw"
 }
 
 t_gdp_pw()
 {
 	PW="$BOOTSTRAP" load
 
-	is "returned" "$BOOTSTRAP" "$(get_device_password "$dev")"
+	get_device_password "$dev"
+	is "returned" "$BOOTSTRAP" "$device_pw"
 }
 
 # The recovery PIN is the recovery key while the two are linked, so the
@@ -220,7 +251,8 @@ t_gdp_recovery_pin()
 {
 	RECOVERY_PIN="$BOOTSTRAP" load
 
-	is "returned" "$BOOTSTRAP" "$(get_device_password "$dev")"
+	get_device_password "$dev"
+	is "returned" "$BOOTSTRAP" "$device_pw"
 }
 
 t_gdp_keyring_recovery_pin()
@@ -228,7 +260,8 @@ t_gdp_keyring_recovery_pin()
 	load
 	keyctl padd user sdbootutil-recovery-pin @u <<<"$BOOTSTRAP" > /dev/null
 
-	is "returned" "$BOOTSTRAP" "$(get_device_password "$dev")"
+	get_device_password "$dev"
+	is "returned" "$BOOTSTRAP" "$device_pw"
 }
 
 # %user:sdbootutil holds "any secret" and is deprecated as a name, but
@@ -238,14 +271,16 @@ t_gdp_keyring_deprecated()
 	load
 	keyctl padd user sdbootutil @u <<<"$BOOTSTRAP" > /dev/null
 
-	is "returned" "$BOOTSTRAP" "$(get_device_password "$dev")"
+	get_device_password "$dev"
+	is "returned" "$BOOTSTRAP" "$device_pw"
 }
 
 t_gdp_all_wrong()
 {
 	CURRENT_PW="wrong-1" KEY="wrong-2" PW="wrong-3" RECOVERY_PIN="wrong-4" load
 
-	is "returned" "" "$(get_device_password "$dev")"
+	get_device_password "$dev"
+	is "returned" "" "$device_pw"
 	# A wrong candidate must not displace a good entry, so nothing
 	# is written when nothing validated
 	no_key cryptenroll
@@ -255,7 +290,8 @@ t_gdp_wrong_then_valid()
 {
 	CURRENT_PW="wrong-1" KEY="$BOOTSTRAP" load
 
-	is "returned" "$BOOTSTRAP" "$(get_device_password "$dev")"
+	get_device_password "$dev"
+	is "returned" "$BOOTSTRAP" "$device_pw"
 	key_is cryptenroll "$BOOTSTRAP"
 }
 
@@ -675,6 +711,125 @@ t_vef_force()
 	( verify_esp_files ) &> /dev/null || fail "the accepted change was refused later"
 }
 
+####### --start-trace-code: the secrets stay out of the trace, and the
+####### paths that keep them out still work
+
+SECRET="trace-sentinel-9f4c2a"
+
+t_tr_device_password()
+{
+	CURRENT_PW="wrong-1" KEY="$BOOTSTRAP" load
+
+	traced get_device_password "$dev"
+
+	is "returned" "$BOOTSTRAP" "$device_pw"
+	not_traced "$BOOTSTRAP" "wrong-1"
+}
+
+t_tr_volume_key()
+{
+	CURRENT_PW="$BOOTSTRAP" load
+	local vks=()
+
+	traced get_volume_key "$dev" vks
+
+	is "volume keys" 1 "${#vks[@]}"
+	[ -n "${vks[0]}" ] || fail "the volume key is empty"
+	not_traced "$BOOTSTRAP" "${vks[0]}"
+}
+
+t_tr_recovery_pin()
+{
+	RECOVERY_PIN="$SECRET" load
+	local pin extra=()
+
+	traced recovery_pin_for_policy pin extra
+
+	is "recovery PIN" "$SECRET" "$pin"
+	is "option" "--recovery-pin=yes" "${extra[*]}"
+	not_traced "$SECRET"
+}
+
+# The PIN that systemd-pcrlock generates is printed, which is the point,
+# and kept in the keyring, but never traced
+t_tr_generated_pin()
+{
+	load
+	# shellcheck disable=SC2034  # read by name
+	local output="o-, Selected recovery PIN is: $SECRET" out
+
+	traced show_generated_recovery_pin output > "$workdir/out"
+
+	out="$(cat "$workdir/out")"
+	says "output" "$out" "Recovery PIN: $SECRET"
+	key_is sdbootutil-recovery-pin "$SECRET"
+	not_traced "$SECRET"
+}
+
+# The secret reaches the environment of the command, also when the
+# command is a shell function like `pcrlock`
+t_tr_run_with_secret()
+{
+	load
+	# shellcheck disable=SC2034  # read by name
+	local secret="$SECRET" out
+	# Called through run_with_secret
+	# shellcheck disable=SC2329
+	show_env() { printf '%s' "$NEWPIN"; }
+
+	traced run_with_secret NEWPIN secret show_env > "$workdir/out"
+
+	out="$(cat "$workdir/out")"
+	is "environment" "$SECRET" "$out"
+	not_traced "$SECRET"
+}
+
+t_tr_enroll_password()
+{
+	CURRENT_PW="$BOOTSTRAP" PW="$SECRET" load
+	# shellcheck disable=SC2034  # read by the sourced library
+	arg_method=password
+	# What `enroll` does with the secret, without the rest of it.
+	# Called through `traced`
+	# shellcheck disable=SC2329
+	enroll_password_device()
+	{
+		# shellcheck disable=SC2034  # passed by name
+		local pin_or_pw=
+		enroll_secret pin_or_pw
+		enroll_device "$dev" pin_or_pw
+	}
+
+	traced enroll_password_device &> /dev/null
+
+	opens "$SECRET" "enrolled password"
+	not_traced "$SECRET" "$BOOTSTRAP"
+}
+
+t_tr_enroll_recovery_key()
+{
+	CURRENT_PW="$BOOTSTRAP" KEY="$SECRET" load
+
+	traced enroll_recovery_key "$dev" &> /dev/null
+
+	opens "$SECRET" "enrolled key"
+	not_traced "$SECRET" "$BOOTSTRAP"
+}
+
+# The generated recovery key is printed once, and only there
+t_tr_generated_key()
+{
+	CURRENT_PW="$BOOTSTRAP" load
+	local key
+
+	traced enroll_recovery_key "$dev" > "$workdir/out" 2>&1
+
+	key="$(sed -n 's/^Recovery key: //p' "$workdir/out")"
+	[ -n "$key" ] || fail "output: no recovery key was printed"
+	opens "$key" "generated key"
+	not_traced "$key" "$BOOTSTRAP"
+}
+
 ####### the runner #######
 
 run_case()
@@ -744,6 +899,14 @@ done <<-'EOF'
 	t_vef_modified              verify_esp_files refuses an entry changed outside sdbootutil
 	t_vef_new_file              verify_esp_files refuses a file that sdbootutil did not install
 	t_vef_force                 verify_esp_files accepts a change with --force
+	t_tr_device_password        get_device_password keeps the candidates out of the trace
+	t_tr_volume_key             get_volume_key keeps the password and the volume key out of the trace
+	t_tr_recovery_pin           recovery_pin_for_policy keeps RECOVERY_PIN out of the trace
+	t_tr_generated_pin          show_generated_recovery_pin prints and stores the PIN, untraced
+	t_tr_run_with_secret        run_with_secret passes the secret to a function, untraced
+	t_tr_enroll_password        enroll --method=password enrolls PW, untraced
+	t_tr_enroll_recovery_key    enroll_recovery_key enrolls KEY, untraced
+	t_tr_generated_key          enroll_recovery_key prints the generated key, untraced
 EOF
 
 echo

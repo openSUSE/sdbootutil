@@ -36,9 +36,10 @@ verbose=
 # Replaced with the package version by the spec file
 version=git
 
-# The trace can record secrets (passwords and PINs passed as command
-# line arguments to the tools that this script calls), so the log is
-# created 0600 and never with whatever the umask happens to be
+# The functions that handle secrets keep them out of the trace (see
+# "Secrets and --start-trace-code"), but one missed is enough, so the
+# log is still created 0600 and never with whatever the umask happens
+# to be
 if [[ "$*" =~ "--start-trace-code" ]] && ! (umask 077; touch "$DEBUG_LOG") 2>/dev/null; then
 	echo "Cannot enable the code trace, $DEBUG_LOG is not writable" >&2
 	exit 1
@@ -108,6 +109,8 @@ applied_snapshot=
 # Possible values: vmlinuz image vmlinux linux bzImage uImage Image zImage
 image=
 unlock_method=
+# Set by `get_device_password`
+device_pw=
 
 chroot_dir=
 
@@ -702,10 +705,39 @@ recovery_pin_keyid()
 	fi
 }
 
+# Secrets and --start-trace-code
+#
+# The trace records every command after its expansion, so a secret
+# that reaches a traced line ends in /var/log/sdbootutil.log, and that
+# file is what users attach to bug reports.  Two rules keep them out:
+#
+# - A function that needs the value of a secret starts with
+#   `local -; set +x`.  `local -` makes the shell options local to the
+#   function, so the trace comes back when it returns, also on error.
+#   Its own locals are prefixed, as it reaches the secrets of the
+#   caller by name (`local -n`) and a homonym would shadow them
+# - Everywhere else a secret is only named: it is passed as the name
+#   of the variable that holds it, and tested with "${var:+set}", that
+#   expands to "set" and never to the value
+
+# Run "$@" with the secret in the variable named $2 exported as $1.
+# The traced call shows the whole command, with the name of the
+# variable in place of the value
+run_with_secret()
+{
+	local -; set +x
+	local -n rws_secret="$2"
+	local -x "$1=$rws_secret"
+	shift 2
+	"$@"
+}
+
+# Store the secret in the variable named $2 as %user:$1
 keyctl_add_with_timeout()
 {
-	local key="$1"
-	local value="$2"
+	local -; set +x
+	local kawt_name="$1"
+	local -n kawt_value="$2"
 
 	# Installers do not agree on the keyring: yast-bootloader,
 	# disk-encryption-tool and jeos-firstboot use @u, but
@@ -714,28 +746,28 @@ keyctl_add_with_timeout()
 	# displaces (and destroys) a homonym entry of the destination,
 	# so any fixed keyring damages one of them.  `keyctl pupdate`
 	# rewrites the payload where the entry already lives
-	local keyid
-	if keyid="$(keyctl id %user:"$key" 2> /dev/null)"; then
-		info "Updating key $key"
-		echo -n "$value" | keyctl pupdate "$keyid" || \
-			warn "Failed to update the key $key"
+	local kawt_keyid
+	if kawt_keyid="$(keyctl id %user:"$kawt_name" 2> /dev/null)"; then
+		info "Updating key $kawt_name"
+		echo -n "$kawt_value" | keyctl pupdate "$kawt_keyid" || \
+			warn "Failed to update the key $kawt_name"
 		# The entry belongs to somebody else, so neither its
 		# permissions nor its lifetime are changed here
 		return 0
 	fi
 
-	info "Creating key $key with timeout"
+	info "Creating key $kawt_name with timeout"
 	# When we create a new key with sudo, we do not create a new
 	# login session, so the key is not accessible to the owner
 	# See https://mjg59.dreamwidth.org/37333.html
-	keyid="$(echo -n "$value" | keyctl padd user "$key" @u)"
+	kawt_keyid="$(echo -n "$kawt_value" | keyctl padd user "$kawt_name" @u)"
 	# Remove permission from the possesor.  For some reason that I
 	# do not understand, this can fail in YaST when called via
 	# cheetah
 	# Returning here would leave the secret in the keyring with no
 	# expiry at all, which is worse than the wrong permissions
-	keyctl setperm "$keyid" 0x003f0000 2> /dev/null || \
-		warn "Failed to change the permissions of $key"
+	keyctl setperm "$kawt_keyid" 0x003f0000 2> /dev/null || \
+		warn "Failed to change the permissions of $kawt_name"
 	# The countdown starts here only as a backstop for a run that is
 	# killed before `cleanup` can restart it.  Every consumer is
 	# behind a slow step (dracut, `systemd-pcrlock make-policy`) or
@@ -743,12 +775,12 @@ keyctl_add_with_timeout()
 	# --method=recovery-key and --method=tpm2, and the recovery key
 	# that the first one leaves here is what authorizes the new slot
 	# in the second one
-	keyctl timeout "$keyid" "$keyctl_timeout"
-	created_keys+=("$keyid")
-	# systemd tools are doing `keyctl request user "$key"`, and for
+	keyctl timeout "$kawt_keyid" "$keyctl_timeout"
+	created_keys+=("$kawt_keyid")
+	# systemd tools are doing `keyctl request user "$kawt_name"`, and for
 	# some reason this means that the key must also be reachable
 	# from the session keyring
-	keyctl link "$keyid" @s
+	keyctl link "$kawt_keyid" @s
 }
 
 ask_password()
@@ -768,6 +800,7 @@ ask_password()
 
 ask_new_password()
 {
+	local -; set +x
 	local msg="$1"
 	local -n nameref_pw="$2"
 	local pw1 pw2
@@ -4971,7 +5004,7 @@ recovery_pin_sources()
 	local keyring="" environment=""
 
 	! recovery_pin_keyid > /dev/null 2>&1 || keyring=1
-	[ -z "$env_recovery_pin$env_pin" ] || environment=1
+	[ -z "${env_recovery_pin:+set}${env_pin:+set}" ] || environment=1
 
 	echo "$keyring:$environment"
 }
@@ -5065,14 +5098,16 @@ explain_pcrlock_recovery()
 explain_pcrlock_policy_error()
 {
 	local errorfile="$1"
-	local pin="$2"
+	# The name of the variable with the recovery PIN, see "Secrets and
+	# --start-trace-code"
+	local pin_name="$2"
 
 	# A recovery PIN was used, so the PCRs were not part of the
 	# authorization and this is a different problem: the PIN is what has
 	# to satisfy the PolicySigned of the NVIndex, and the TPM2 refusing
 	# the write is what a wrong one looks like.  Saying anything about
 	# PCRs here would only send the reader the wrong way
-	if [ -n "$pin" ]; then
+	if [ -n "${!pin_name:+set}" ]; then
 		grep -q "Failed to write to NV index" "$errorfile" || return 0
 
 		warn "The TPM2 rejected the recovery PIN, so the NVIndex keeps the policy it had"
@@ -5085,7 +5120,7 @@ explain_pcrlock_policy_error()
 		# NVIndex with the PIN that sealed it, and only with it
 		local dev
 		for dev in "${tracked_devices[@]}"; do
-			valid_password "$dev" "$pin" || continue
+			valid_password "$dev" "$pin_name" || continue
 			warn "That value opens $dev, so it is the recovery key and not the recovery PIN of the NVIndex"
 			break
 		done
@@ -5254,6 +5289,97 @@ get_final_pcrs()
 		err "Not all the requested PCRs can be predicted ($pcrs -> ${pcrs_policy:-none}). No policy is applied, run without --strict to accept the subset"
 
 	echo "$pcrs_policy"
+}
+
+# The recovery PIN for `make-policy`, from the first source that has
+# one, into the variable named $1, and the --recovery-pin option that
+# goes with it into the array named $2.  Untraced, see "Secrets and
+# --start-trace-code"
+# shellcheck disable=SC2034  # the namerefs are written for the caller
+recovery_pin_for_policy()
+{
+	local -; set +x
+	local rpp_name="$1"
+	local -n rpp_pin="$1" rpp_extra="$2"
+	local keyid keyid_int
+	keyid="$(keyctl id %user:sdbootutil 2> /dev/null)" || true
+	keyid_int="$(recovery_pin_keyid)" || true
+	# For "tpm2+pin" both PIN and %user:sdbootutil hold the TPM2
+	# PIN that is typed at every boot, and that one must not be the
+	# recovery PIN too: it re-authorizes the NVIndex, so seeing the
+	# boot PIN once would be enough to rewrite the policy.  With
+	# --ask-pin the two are already asked separately, and both
+	# RECOVERY_PIN and %user:sdbootutil-recovery-pin name the
+	# recovery PIN, so all of them are still read.  Left with no
+	# source, systemd-pcrlock generates one and it is printed below
+	local pin_env="$env_pin"
+	if [ "$arg_method" = "tpm2+pin" ]; then
+		pin_env=
+		keyid=
+	fi
+	# RECOVERY_PIN is unambiguous, so it wins over the overloaded
+	# PIN and is the only environment variable for "tpm2+pin"
+	[ -z "$env_recovery_pin" ] || pin_env="$env_recovery_pin"
+	if [ -n "$arg_ask_pin$arg_ask_recovery_pin" ]; then
+		# When enrolling, we should ask two times
+		if [ -n "$arg_method" ]; then
+			info "The recovery PIN is used when the TPM2 policy needs to be updated"
+			ask_new_password "recovery PIN" "$rpp_name"
+		else
+			ask_password "Recovery PIN" "$rpp_name"
+		fi
+		rpp_extra=("--recovery-pin=yes")
+	elif [ -n "$pin_env" ]; then
+		rpp_pin="$pin_env"
+		rpp_extra=("--recovery-pin=yes")
+	elif [ -n "$keyid_int" ]; then
+		rpp_pin="$(keyctl pipe "$keyid_int")"
+		rpp_extra=("--recovery-pin=yes")
+	elif [ -n "$keyid" ]; then
+		deprecated_keyring_secret "recovery PIN" "sdbootutil-recovery-pin"
+		rpp_pin="$(keyctl pipe "$keyid")"
+		rpp_extra=("--recovery-pin=yes")
+	else
+		# No PIN was provided, systemd-pcrlock will generate
+		# one
+		rpp_extra=("--recovery-pin=show")
+	fi
+}
+
+# `make-policy` with the recovery PIN in the variable named $1.  Its
+# output names the PIN that systemd-pcrlock generates when there was
+# none, so it is stored untraced too, in the variable named $2
+# shellcheck disable=SC2034  # the namerefs are written for the caller
+pcrlock_make_policy()
+{
+	local -; set +x
+	local pmp_pin_name="$1"
+	local -n pmp_output="$2"
+	shift 2
+	pmp_output="$(run_with_secret PIN "$pmp_pin_name" pcrlock "$@" make-policy 2>"$tmpfile")"
+}
+
+# Show the recovery PIN that `make-policy` generated, if the output in
+# the variable named $1 names one, and add it to the kernel keyring, so
+# that it is available to `sdbootutil enroll --method=recovery-key`
+show_generated_recovery_pin()
+{
+	local -; set +x
+	local -n sgrp_output="$1"
+	local sgrp_split sgrp_pin
+	echo "$sgrp_output" | grep -q "recovery PIN" || return 1
+	IFS=":" read -r -a sgrp_split <<<"$sgrp_output"
+	sgrp_pin="${sgrp_split[1]}"
+	sgrp_pin="${sgrp_pin## }"
+	sgrp_pin="${sgrp_pin%% }"
+
+	echo "Recovery PIN: $sgrp_pin"
+	if [ -x /usr/bin/qrencode ]; then
+		echo "You can also scan it with your mobile phone:"
+		echo -n "$sgrp_pin" | qrencode -t utf8i
+	fi
+
+	keyctl_add_with_timeout "sdbootutil-recovery-pin" sgrp_pin
 }
 
 generate_tpm2_predictions_pcrlock()
@@ -5447,49 +5573,7 @@ generate_tpm2_predictions_pcrlock()
 	# variables, or the --ask-recovery-pin parameter.
 	local pin
 	local extra=()
-	local keyid keyid_int
-	keyid="$(keyctl id %user:sdbootutil 2> /dev/null)" || true
-	keyid_int="$(recovery_pin_keyid)" || true
-	# For "tpm2+pin" both PIN and %user:sdbootutil hold the TPM2
-	# PIN that is typed at every boot, and that one must not be the
-	# recovery PIN too: it re-authorizes the NVIndex, so seeing the
-	# boot PIN once would be enough to rewrite the policy.  With
-	# --ask-pin the two are already asked separately, and both
-	# RECOVERY_PIN and %user:sdbootutil-recovery-pin name the
-	# recovery PIN, so all of them are still read.  Left with no
-	# source, systemd-pcrlock generates one and it is printed below
-	local pin_env="$env_pin"
-	if [ "$arg_method" = "tpm2+pin" ]; then
-		pin_env=
-		keyid=
-	fi
-	# RECOVERY_PIN is unambiguous, so it wins over the overloaded
-	# PIN and is the only environment variable for "tpm2+pin"
-	[ -z "$env_recovery_pin" ] || pin_env="$env_recovery_pin"
-	if [ -n "$arg_ask_pin$arg_ask_recovery_pin" ]; then
-		# When enrolling, we should ask two times
-		if [ -n "$arg_method" ]; then
-			info "The recovery PIN is used when the TPM2 policy needs to be updated"
-			ask_new_password "recovery PIN" pin
-		else
-			ask_password "Recovery PIN" pin
-		fi
-		extra=("--recovery-pin=yes")
-	elif [ -n "$pin_env" ]; then
-		pin="$pin_env"
-		extra=("--recovery-pin=yes")
-	elif [ -n "$keyid_int" ]; then
-		pin="$(keyctl pipe "$keyid_int")"
-		extra=("--recovery-pin=yes")
-	elif [ -n "$keyid" ]; then
-		deprecated_keyring_secret "recovery PIN" "sdbootutil-recovery-pin"
-		pin="$(keyctl pipe "$keyid")"
-		extra=("--recovery-pin=yes")
-	else
-		# No PIN was provided, systemd-pcrlock will generate
-		# one
-		extra=("--recovery-pin=show")
-	fi
+	recovery_pin_for_policy pin extra
 
 	# Rewrite the NV index even if systemd-pcrlock considers the
 	# prediction unchanged
@@ -5510,7 +5594,7 @@ generate_tpm2_predictions_pcrlock()
 	# reason that `systemd-pcrlock` left in $tmpfile
 	local output
 	local pcrlock_status=0
-	output="$(PIN="$pin" pcrlock --pcr="$final_pcrs" "${extra[@]}" make-policy 2>"$tmpfile")" || pcrlock_status=$?
+	pcrlock_make_policy pin output --pcr="$final_pcrs" "${extra[@]}" || pcrlock_status=$?
 
 	# `make-policy` also writes the policy as a credential, that
 	# systemd-stub passes to the initrd of every UKI.  It is measured
@@ -5526,26 +5610,9 @@ generate_tpm2_predictions_pcrlock()
 
 	if [ "$pcrlock_status" -ne 0 ]; then
 		warn "Error creating the systemd-pcrlock policy!\n$(cat "$tmpfile")"
-		explain_pcrlock_policy_error "$tmpfile" "$pin"
+		explain_pcrlock_policy_error "$tmpfile" pin
 		return 1
-	elif echo "$output" | grep -q "recovery PIN"; then
-		local split
-		IFS=":" read -r -a split <<<"$output"
-		pin="${split[1]}"
-		pin="${pin## }"
-		pin="${pin%% }"
-
-		echo "Recovery PIN: $pin"
-		if [ -x /usr/bin/qrencode ]; then
-			echo "You can also scan it with your mobile phone:"
-			echo -n "$pin" | qrencode -t utf8i
-		fi
-
-		# Add the generated recovery PIN to the kernel
-		# keyring, so that it is available to `sdbootutil
-		# enroll --method=recovery-key`
-		keyctl_add_with_timeout "sdbootutil-recovery-pin" "$pin"
-
+	elif show_generated_recovery_pin output; then
 		# A recovery key that is already in the LUKS2 header was
 		# made equal to the recovery PIN of that moment, and
 		# `enroll_recovery_key` says so when it enrolls it.  This
@@ -5588,24 +5655,30 @@ generate_tpm2_predictions_pcrlock()
 		# correct, and it is asked to do it when the NVIndex is
 		# written.  Without this message a wrong PIN looks
 		# accepted, as the command succeeds
-		[ -z "$pin" ] || \
+		[ -z "${pin:+set}" ] || \
 			warn "The recovery PIN was not needed, so it was not validated. Use --force to rewrite the NVIndex with it"
 	fi
 }
 
+# The password is in the variable named $2
 valid_password()
 {
-	local dev="${1:?}"
-	local pw="$2"
+	local -; set +x
+	local vp_dev="${1:?}"
+	local -n vp_pw="$2"
 
-	[ -n "$pw" ] || return 1
+	[ -n "$vp_pw" ] || return 1
 	# Without --disable-external-tokens an enrolled TPM2 or FIDO2
 	# token opens the device and any password is reported as valid
-	cryptsetup luksOpen --test-passphrase --disable-external-tokens "$dev" <<<"$pw" &> /dev/null
+	cryptsetup luksOpen --test-passphrase --disable-external-tokens "$vp_dev" <<<"$vp_pw" &> /dev/null
 }
 
+# A password that opens the device, in $device_pw (empty if there is
+# none), and in %user:cryptenroll.  A global and not the output, so
+# that the caller does not trace it in an assignment
 get_device_password()
 {
+	local -; set +x
 	local dev="${1:?}"
 	local pw='' keyid candidate
 	local from_keyring=()
@@ -5644,14 +5717,14 @@ get_device_password()
 
 	local in_keyring=
 	for candidate in "${from_keyring[@]}"; do
-		valid_password "$dev" "$candidate" || continue
+		valid_password "$dev" candidate || continue
 		pw="$candidate"
 		in_keyring=1
 		break
 	done
 	if [ -z "$pw" ]; then
 		for candidate in "${candidates[@]}"; do
-			valid_password "$dev" "$candidate" || continue
+			valid_password "$dev" candidate || continue
 			pw="$candidate"
 			break
 		done
@@ -5663,32 +5736,45 @@ get_device_password()
 	# willing to type it
 	if [ -z "$pw" ] && { [ -n "$arg_measure_pcr" ] || [ -n "$arg_ask_key$arg_ask_pin$arg_ask_recovery_pin$arg_ask_pw$arg_ask_current_pw" ]; }; then
 		ask_password "Password for $dev" pw
-		valid_password "$dev" "$pw" || {
+		valid_password "$dev" pw || {
 			warn "The password does not unlock $dev"
 			pw=''
 		}
 	fi
 
 	if [ -n "$pw" ] && [ -z "$in_keyring" ]; then
-		keyctl_add_with_timeout "cryptenroll" "$pw"
+		keyctl_add_with_timeout "cryptenroll" pw
 	fi
 
-	echo "$pw"
+	device_pw="$pw"
 }
 
+# Append the volume key of the device to the array named $2
 get_volume_key()
 {
-	local dev="$1"
-	local pw out
-	pw="$(get_device_password "$dev")"
-	# The error is signaled by an empty volume key.  There is no
-	# retry: the password was already validated against the device,
-	# so a second call returns the same one.  Revoking
+	local -; set +x
+	local gvk_dev="$1"
+	local -n gvk_keys="$2"
+	local gvk_out gvk_key
+	get_device_password "$gvk_dev"
+	# There is no retry: the password was already validated against
+	# the device, so a second call returns the same one.  Revoking
 	# %user:cryptenroll to force a different answer is not an
 	# option either, as it can hold the password of another device
-	[ -n "$pw" ] || return 0
-	out="$(cryptsetup luksDump --batch-mode --dump-master-key "$dev" 2> /dev/null<<<"$pw")" || return 0
-	echo "$out" | sed -n '/MK dump:/,$p' | sed -E 's/MK dump:|[[:blank:]]+//g' | sed -z 's/\n//g'
+	[ -n "$device_pw" ] || return 1
+	gvk_out="$(cryptsetup luksDump --batch-mode --dump-master-key "$gvk_dev" 2> /dev/null<<<"$device_pw")" || return 1
+	gvk_key="$(echo "$gvk_out" | sed -n '/MK dump:/,$p' | sed -E 's/MK dump:|[[:blank:]]+//g' | sed -z 's/\n//g')"
+	[ -n "$gvk_key" ] || return 1
+	gvk_keys+=("$gvk_key")
+}
+
+# The HMAC of the message $2 with the volume key number $3 of the "vks"
+# array of the caller, with the algorithm $1.  The HMAC is what PCR 15
+# is extended with, so only the key is kept out of the trace
+volume_key_hmac()
+{
+	local -; set +x
+	echo -ne "$2" | /usr/libexec/sdbootutil/uhmac "$1" <(echo "${vks[$3]}")
 }
 
 extend_pcr()
@@ -5803,10 +5889,7 @@ generate_tpm2_predictions_pcr_15()
 	# cannot nest two reads (one for crypttab and another for the
 	# password)
 	for dev in "${devs[@]}"; do
-		local vk
-		vk="$(get_volume_key "$dev")"
-		[ -n "$vk" ] || { warn "Volume key cannot be extracted. Dropping PCR 15"; return 0; }
-		vks+=("$vk")
+		get_volume_key "$dev" vks || { warn "Volume key cannot be extracted. Dropping PCR 15"; return 0; }
 	done
 
 	# The key pair is created during the enrollment, but not when
@@ -5836,7 +5919,7 @@ generate_tpm2_predictions_pcr_15()
 	for i in "${!dgsts[@]}"; do
 		pcr15="$(printf '0%.0s' $(seq 1 "${sizes[i]}"))"
 		for j in "${!msgs[@]}"; do
-			hmac="$(echo -ne "${msgs[j]}" | /usr/libexec/sdbootutil/uhmac "${dgsts[i]}" <(echo "${vks[j]}"))"
+			hmac="$(volume_key_hmac "${dgsts[i]}" "${msgs[j]}" "$j")"
 			# `extend_pcr` reports why it failed, but with
 			# `set -e` the script would end here, leaving
 			# an incomplete and unsigned prediction behind.
@@ -6380,7 +6463,8 @@ require_unlock()
 	# is not used here, the side effect of get_device_password is
 	# what matters: a valid one is left in %user:cryptenroll,
 	# where systemd-cryptenroll looks for it
-	[ -z "$(get_device_password "$dev")" ] || return 0
+	get_device_password "$dev"
+	[ -z "${device_pw:+set}" ] || return 0
 
 	# Do not use TPM2 slot for enrolling TPM2
 	if [ "$arg_method" != "tpm2" ] && [ "$arg_method" != "tpm2+pin" ] && can_unlock "$dev" "tpm2"; then
@@ -6403,13 +6487,14 @@ require_unlock()
 	return 0
 }
 
+# The TPM2 PIN, empty for "tpm2", is in the variable named $2
 enroll_tpm2()
 {
 	local dev="$1"
-	local tpm2_pin="$2"
+	local pin_name="$2"
 	local extra_args=()
 
-	if [ -z "$tpm2_pin" ]; then
+	if [ -z "${!pin_name:+set}" ]; then
 		info "Enrolling with TPM2: $dev"
 	else
 		info "Enrolling with TPM2+PIN: $dev"
@@ -6440,7 +6525,7 @@ enroll_tpm2()
 	header="$(luks_header "$dev")"
 
 	# Note that the PCRs are now not stored in the LUKS2 header
-	NEWPIN="$tpm2_pin" systemd-cryptenroll \
+	run_with_secret NEWPIN "$pin_name" systemd-cryptenroll \
 	       --wipe-slot=tpm2 \
 	       --tpm2-device=auto \
 	       --tpm2-public-key= \
@@ -6476,10 +6561,11 @@ enroll_fido2()
 	check_enrolled "$dev" "fido2" "$header" || return 1
 }
 
+# The new password is in the variable named $2
 enroll_password()
 {
 	local dev="$1"
-	local pw="$2"
+	local pw_name="$2"
 
 	info "Enrolling with password: $dev"
 
@@ -6494,7 +6580,7 @@ enroll_password()
 	local header
 	header="$(luks_header "$dev")"
 
-	NEWPASSWORD="$pw" systemd-cryptenroll --wipe-slot=password --password "${extra_args[@]}" "$dev" || return 1
+	run_with_secret NEWPASSWORD "$pw_name" systemd-cryptenroll --wipe-slot=password --password "${extra_args[@]}" "$dev" || return 1
 	check_enrolled "$dev" "password" "$header" || return 1
 }
 
@@ -6511,6 +6597,10 @@ enroll_recovery_key()
 	if [ -n "$unlock_method" ]; then
 		extra_args+=("$unlock_method")
 	fi
+
+	# From here on the recovery key is handled, see "Secrets and
+	# --start-trace-code"
+	local -; set +x
 
 	# If no recovery key is provided, systemd-cryptenroll will
 	# generate one
@@ -6586,7 +6676,7 @@ enroll_recovery_key()
 	# keyring, so that it is available to systemd-cryptenroll
 	keyid="$(keyctl id %user:cryptenroll 2> /dev/null)" || true
 	if [ -z "$keyid" ] && [ -z "$unlock_method" ]; then
-		keyctl_add_with_timeout "cryptenroll" "$key"
+		keyctl_add_with_timeout "cryptenroll" key
 	fi
 	# ... and to --method=tpm2[+pin] via a private keyring, so that
 	# the key enrolled here is the recovery PIN that seals the
@@ -6618,18 +6708,20 @@ enroll_recovery_key()
 		warn "There is already a recovery PIN for the TPM2, and it is not reachable here"
 		warn "The recovery key and the recovery PIN are now different"
 	else
-		keyctl_add_with_timeout "sdbootutil-recovery-pin" "$key"
+		keyctl_add_with_timeout "sdbootutil-recovery-pin" key
 	fi
 }
 
+# The PIN or the password, if the method takes one, is in the variable
+# named $2
 enroll_device()
 {
 	local dev="$1"
-	local pin_or_pw="$2"
+	local secret_name="$2"
 
 	case "$arg_method" in
 		"tpm2"|"tpm2+pin")
-			enroll_tpm2 "$dev" "$pin_or_pw"
+			enroll_tpm2 "$dev" "$secret_name"
 			;;
 
 		"fido2")
@@ -6637,7 +6729,7 @@ enroll_device()
 			;;
 
 		"password")
-			enroll_password "$dev" "$pin_or_pw"
+			enroll_password "$dev" "$secret_name"
 			;;
 
 		"recovery-key")
@@ -6654,6 +6746,52 @@ enroll_device()
 			err "$msg\nValid methods: tpm2,tpm2+pin,fido2,password,recovery-key"
 			;;
 	esac
+}
+
+# For the PIN (tpm2+pin) or password (password), we can get it
+# from the %u keyring "sdbootutil-tpm2-pin" / "sdbootutil-pw"
+# entry, the PIN or PW environment variable, or introduced by the
+# user.  Like --ask-key in enroll_recovery_key, an explicit
+# --ask-pin or --ask-pw takes precedence over the other sources.  The
+# secret goes to the variable named $1, untraced
+# shellcheck disable=SC2034  # the namerefs are written for the caller
+enroll_secret()
+{
+	local -; set +x
+	local es_name="$1"
+	local -n es_secret="$1"
+	local keyid keyid_dep
+	if [ "$arg_method" = "tpm2+pin" ]; then
+		keyid="$(keyctl id %user:sdbootutil-tpm2-pin 2> /dev/null)" || true
+		keyid_dep="$(keyctl id %user:sdbootutil 2> /dev/null)" || true
+		if [ -n "$arg_ask_pin" ]; then
+			ask_new_password "TPM2 PIN" "$es_name"
+		elif [ -n "$env_pin" ]; then
+			es_secret="$env_pin"
+		elif [ -n "$keyid" ]; then
+			es_secret="$(keyctl pipe "$keyid")"
+		elif [ -n "$keyid_dep" ]; then
+			deprecated_keyring_secret "TPM2 PIN" "sdbootutil-tpm2-pin"
+			es_secret="$(keyctl pipe "$keyid_dep")"
+		else
+			ask_new_password "TPM2 PIN" "$es_name"
+		fi
+	elif [ "$arg_method" = "password" ]; then
+		keyid="$(keyctl id %user:sdbootutil-pw 2> /dev/null)" || true
+		keyid_dep="$(keyctl id %user:sdbootutil 2> /dev/null)" || true
+		if [ -n "$arg_ask_pw" ]; then
+			ask_new_password "password" "$es_name"
+		elif [ -n "$env_pw" ]; then
+			es_secret="$env_pw"
+		elif [ -n "$keyid" ]; then
+			es_secret="$(keyctl pipe "$keyid")"
+		elif [ -n "$keyid_dep" ]; then
+			deprecated_keyring_secret "password" "sdbootutil-pw"
+			es_secret="$(keyctl pipe "$keyid_dep")"
+		else
+			ask_new_password "password" "$es_name"
+		fi
+	fi
 }
 
 enroll()
@@ -6747,47 +6885,13 @@ enroll()
 		update_predictions=
 	fi
 
-	# For the PIN (tpm2+pin) or password (password), we can get it
-	# from the %u keyring "sdbootutil-tpm2-pin" / "sdbootutil-pw"
-	# entry, the PIN or PW environment variable, or introduced by the
-	# user.  Like --ask-key in enroll_recovery_key, an explicit
-	# --ask-pin or --ask-pw takes precedence over the other sources
-	local pin_or_pw keyid keyid_dep
-	if [ "$arg_method" = "tpm2+pin" ]; then
-		keyid="$(keyctl id %user:sdbootutil-tpm2-pin 2> /dev/null)" || true
-		keyid_dep="$(keyctl id %user:sdbootutil 2> /dev/null)" || true
-		if [ -n "$arg_ask_pin" ]; then
-			ask_new_password "TPM2 PIN" pin_or_pw
-		elif [ -n "$env_pin" ]; then
-			pin_or_pw="$env_pin"
-		elif [ -n "$keyid" ]; then
-			pin_or_pw="$(keyctl pipe "$keyid")"
-		elif [ -n "$keyid_dep" ]; then
-			deprecated_keyring_secret "TPM2 PIN" "sdbootutil-tpm2-pin"
-			pin_or_pw="$(keyctl pipe "$keyid_dep")"
-		else
-			ask_new_password "TPM2 PIN" pin_or_pw
-		fi
-	elif [ "$arg_method" = "password" ]; then
-		keyid="$(keyctl id %user:sdbootutil-pw 2> /dev/null)" || true
-		keyid_dep="$(keyctl id %user:sdbootutil 2> /dev/null)" || true
-		if [ -n "$arg_ask_pw" ]; then
-			ask_new_password "password" pin_or_pw
-		elif [ -n "$env_pw" ]; then
-			pin_or_pw="$env_pw"
-		elif [ -n "$keyid" ]; then
-			pin_or_pw="$(keyctl pipe "$keyid")"
-		elif [ -n "$keyid_dep" ]; then
-			deprecated_keyring_secret "password" "sdbootutil-pw"
-			pin_or_pw="$(keyctl pipe "$keyid_dep")"
-		else
-			ask_new_password "password" pin_or_pw
-		fi
-	fi
+	# shellcheck disable=SC2034  # passed by name, see "Secrets and --start-trace-code"
+	local pin_or_pw=
+	enroll_secret pin_or_pw
 
 	local failed=
 	for dev in "${tracked_devices[@]}"; do
-		enroll_device "$dev" "$pin_or_pw" || { failed="$dev"; break; }
+		enroll_device "$dev" pin_or_pw || { failed="$dev"; break; }
 	done
 
 	# /etc/crypttab is put back by the trap
