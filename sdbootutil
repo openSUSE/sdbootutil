@@ -5819,6 +5819,33 @@ create_measure_pcr_keys()
 	}
 }
 
+# Write the measurements of the volume keys, one sha256 digest per
+# line in stdin, in crypttab order, as the pcrlock components that
+# describe PCR 15.  They are the only copy, as computing them again
+# needs the volume keys.  A measurement that changed is still in the
+# event log of this boot, so the old variation is shifted, like for the
+# rest of the components, and so are the ones of the devices that are
+# gone
+pcrlock_volume_keys()
+{
+	local component
+	for component in /var/lib/pcrlock.d/790-volume-key-*.pcrlock.d; do
+		shift_component "$(basename "$component" .pcrlock.d)"
+		rm -f "$component/generated.pcrlock"
+		rmdir --ignore-fail-on-non-empty "$component"
+	done
+
+	local n=0 hmac
+	while read -r hmac; do
+		n=$((n + 1))
+		component="/var/lib/pcrlock.d/790-volume-key-$(printf '%02d' "$n").pcrlock.d"
+		mkdir -p "$component"
+		jq --null-input --arg digest "$hmac" \
+		   '{"records": [{"pcr": 15, "digests": [{"hashAlg": "sha256", "digest": $digest}]}]}' \
+		   > "$component/generated.pcrlock"
+	done
+}
+
 generate_tpm2_predictions_pcr_15()
 {
 	local devs=()
@@ -5904,6 +5931,7 @@ generate_tpm2_predictions_pcr_15()
 	local dgsts=("sha1" "sha256" "sha384" "sha512")
 	local sizes=(40 64 96 128)
 	local pcr15 hmac
+	local measurements=()
 
 	for i in "${!dgsts[@]}"; do
 		pcr15="$(printf '0%.0s' $(seq 1 "${sizes[i]}"))"
@@ -5915,9 +5943,13 @@ generate_tpm2_predictions_pcr_15()
 			# Drop only the affected hash algorithm
 			pcr15="$(extend_pcr "${dgsts[i]}" "$pcr15" "$hmac")" || continue 2
 			dbg "${msgs[j]} (${dgsts[i]}): $hmac"
+			[ "${dgsts[i]}" != "sha256" ] || measurements+=("$hmac")
 		done
 		echo "$pcr15" >> "/var/lib/sdbootutil/measure-pcr-prediction"
 	done
+
+	# The measurements that the pcrlock policy describes
+	printf '%s\n' "${measurements[@]}" | pcrlock_volume_keys
 
 	# An unsigned prediction is worse than no prediction at all, as
 	# the ESP can still contain the signature of a previous one
@@ -5949,6 +5981,8 @@ updated_crypttab()
 {
 	local crypttab_sha1
 	grep -q "tpm2-measure-pcr=yes" /etc/crypttab || return 0
+	# Not written by older versions
+	[ -e /var/lib/pcrlock.d/790-volume-key-01.pcrlock.d/generated.pcrlock ] || return 1
 	read -r crypttab_sha1 _ < <(sha1sum /etc/crypttab)
 	grep -Fixq "$crypttab_sha1" /var/lib/sdbootutil/crypttab.sha1 2> /dev/null
 }
