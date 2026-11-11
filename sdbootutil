@@ -558,7 +558,8 @@ create_default_config_file()
 	cat <<-EOF > /etc/default/sdbootutil
 	# Default sdbootutil configuration file generated automatically
 
-	# List of PCRs.  For VMs PCRs 0 and 2 are dropped
+	# List of PCRs.  For VMs PCRs 0 and 2 are dropped.  PCR 15 is added
+	# when /etc/crypttab measures it (tpm2-measure-pcr=yes)
 	FDE_SEAL_PCR_LIST="$FDE_SEAL_PCR_LIST"
 
 	# Parameter used in the cmdline to find the root (device, [part]uuid, [part]label)
@@ -5371,6 +5372,28 @@ show_generated_recovery_pin()
 	keyctl_add_with_timeout "sdbootutil-recovery-pin" sgrp_pin
 }
 
+# PCR 15 is extended in the initrd by systemd-cryptsetup, with the
+# volume keys (see `pcrlock_volume_keys`), and by
+# measure-pcr-boundary.service when the initrd ends.  With one component
+# per measurement the policy accepts PCR 15 while it is 0, when the
+# initrd unseals the key, and after each of the expected measurements,
+# but never 0 followed by the end of the initrd, or a different volume
+# key.  Returns 1 if PCR 15 cannot be predicted
+pcrlock_pcr_15()
+{
+	local leave=/var/lib/pcrlock.d/795-leave-initrd.pcrlock
+
+	[ -e /var/lib/pcrlock.d/790-volume-key-01.pcrlock.d/generated.pcrlock ] || {
+		rm -f "$leave"
+		return 1
+	}
+
+	[ ! -e "$leave" ] || return 0
+	echo -n "leave-initrd" > "$tmpdir/leave-initrd"
+	pcrlock lock-raw --pcr=15 --pcrlock="$leave" "$tmpdir/leave-initrd"
+	rm "$tmpdir/leave-initrd"
+}
+
 generate_tpm2_predictions_pcrlock()
 {
 	local pcrs="$FDE_SEAL_PCR_LIST"
@@ -5464,6 +5487,11 @@ generate_tpm2_predictions_pcrlock()
 
 	# Nothing that sdbootutil did not install can reach the policy
 	verify_esp_files
+
+	# Replaces measure-pcr-validator, so it is not optional
+	if pcrlock_pcr_15 && [[ ",$pcrs," != *",15,"* ]]; then
+		pcrs="$pcrs,15"
+	fi
 
 	drop_duplicated_shifts
 
