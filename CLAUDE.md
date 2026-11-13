@@ -53,7 +53,8 @@ Unlike standard systemd-boot which assumes one OS instance per kernel version, s
 
 **Snapper Hooks** (`10-sdbootutil.snapper`):
 - `create-snapshot-post`: Updates bootloader, adds entries (Tumbleweed) or defers to set-default (transactional)
-- `delete-snapshot-pre`: Removes entries for deleted snapshot
+- `delete-snapshot-pre`: Removes the entries of the kernels in the snapshot
+- `delete-snapshot-post`: Cleans up the entries left for the deleted snapshot
 - `set-default-snapshot-post`: Sets bootloader default, adds entries (transactional systems only)
 
 **Kernel package install/remove** (`50-sdbootutil.install`, run by `kernel-install`):
