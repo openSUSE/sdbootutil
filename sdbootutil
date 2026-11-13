@@ -5955,13 +5955,19 @@ updated_crypttab()
 # keeps opening the device when /etc/crypttab does not ask for it.  But
 # nothing updates its policy then: `generate_tpm2_predictions` and the
 # boot service both look for "tpm2-device" in /etc/crypttab.  It works
-# until the next change of a sealed PCR, and then asks for the password
+# until the next change of a sealed PCR, and then asks for the password.
+# Only the pcrlock policy needs the update, a signed policy does not
+has_pcrlock_slot()
+{
+	luks_header "${1:?}" | jq -e 'any(.tokens[]?; .type == "systemd-tpm2" and (.tpm2_pcrlock // false))' > /dev/null
+}
+
 warn_tpm2_slot_without_option()
 {
 	local dev
 	detect_tracked_devices || return 0
 	for dev in "${tracked_devices[@]}"; do
-		have_slot "$dev" "tpm2" || continue
+		has_pcrlock_slot "$dev" || continue
 		warn "$dev has a TPM2 slot, but no \"tpm2-device\" option in /etc/crypttab, so its TPM2 policy is never updated"
 		warn "Add \"tpm2-device=auto\" to /etc/crypttab and call 'sdbootutil update-predictions', or enroll it again"
 	done
@@ -7163,12 +7169,12 @@ status_device()
 
 	# A device that only the TPM2 can open is one firmware update
 	# away from being unopenable, and that is worth saying out loud
-	local tpm2_only="" has_tpm2="" m
+	local tpm2_only="" m
 	if [ "${#unique[@]}" -gt 0 ]; then
 		tpm2_only=1
 		for m in "${unique[@]}"; do
 			[[ "$m" == tpm2* ]] || tpm2_only=
-			[[ "$m" != tpm2* ]] || { status_tpm2_device=1; has_tpm2=1; }
+			[[ "$m" != tpm2* ]] || status_tpm2_device=1
 		done
 	fi
 
@@ -7207,7 +7213,7 @@ status_device()
 		echo "    WARNING: only the TPM2 can open this device.  A firmware update, a bootloader update or a cleared TPM2 leaves it unopenable"
 
 	# See `warn_tpm2_slot_without_option`
-	[ -z "$has_tpm2" ] || [ -z "$tracked" ] || [ -n "$ignored" ] || [[ "$opts" == *"tpm2-device"* ]] || \
+	[[ "$slots" != *", pcrlock NVIndex"* ]] || [ -z "$tracked" ] || [ -n "$ignored" ] || [[ "$opts" == *"tpm2-device"* ]] || \
 		echo "    WARNING: there is a TPM2 slot, but no \"tpm2-device\" option in /etc/crypttab, so the TPM2 policy is never updated"
 
 	[ -z "$arg_full" ] || \
