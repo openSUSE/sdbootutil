@@ -222,6 +222,20 @@ delete_snapshot()
 	[ "$fs" = btrfs ] || return 1
 
 	/usr/bin/sdbootutil remove-all-kernels --disable-predictions "$num"
+}
+
+# The cleanup removes the entries whose kernel is not in the snapshot,
+# so it only finds them once the snapshot is gone.  An entry that
+# remove-all-kernels missed stayed in the ESP until the next snapshot
+delete_snapshot_post()
+{
+	local path="$1"
+	local fs="$2"
+	local num="$3"
+
+	[ "$path" = "/" ] || return 0
+	[ "$fs" = btrfs ] || return 1
+
 	/usr/bin/sdbootutil cleanup --disable-predictions "$num"
 
 	set_update_predictions_timer
@@ -294,6 +308,7 @@ declare -A commands
 
 commands['create-snapshot-post']=create_snapshot
 commands['delete-snapshot-pre']=delete_snapshot
+commands['delete-snapshot-post']=delete_snapshot_post
 commands['set-default-snapshot-post']=set_default_snapshot
 commands['help']=h
 
