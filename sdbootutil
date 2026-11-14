@@ -6117,6 +6117,56 @@ measure_anchor()
 	return 1
 }
 
+# PCR 15 once the anchor "$1" is measured, or also after the end of the
+# initrd ("$2" = leave-initrd), taken from the measurement log of this
+# boot.  The digest is the one that systemd-cryptsetup computed from the
+# volume key, so sdbootutil never reads it.  Fails when the anchor was
+# not measured in the initrd of this boot, or when the log does not
+# explain the current PCR 15
+pcr15_bound_value()
+{
+	local anchor="${1:?}"
+	local phase="$2"
+	local log=/run/log/systemd/tpm2-measure.log
+	local uuid digest
+
+	[ -r "$log" ] || return 1
+	uuid="$(cryptsetup luksUUID "$anchor" 2> /dev/null)" || return 1
+
+	# The log is RFC 7464 JSON-seq, see `pcr15_events`
+	[ "$(tr -d '\036' < "$log" | \
+	     jq -r 'select(.pcr == 15) | .digests[] | select(.hashAlg == "sha256") | .digest' 2> /dev/null | \
+	     pcr15_replay)" = \
+	  "$(systemd-analyze pcrs 15 --json=short 2> /dev/null | jq -r '.[0].sha256')" ] || return 1
+
+	digest="$(tr -d '\036' < "$log" | \
+		  jq -rs --arg uuid "$uuid" \
+		     '[.[] | select(.pcr == 15)] as $r
+		      | ($r | map(.content.eventType == "phase") | index(true)) as $leave
+		      | ($r | map(.content.eventType == "volume-key" and (.content.string | endswith(":" + $uuid))) | index(true)) as $i
+		      | select($i != null and ($leave == null or $i < $leave))
+		      | $r[$i].digests[] | select(.hashAlg == "sha256") | .digest' 2> /dev/null)"
+	[ -n "$digest" ] || return 1
+
+	{
+		echo "$digest"
+		[ -z "$phase" ] || echo -n "$phase" | openssl dgst -sha256 -r | cut -d' ' -f1
+	} | pcr15_replay
+}
+
+# The /etc/crypttab of the initrd of the default entry: dracut copies
+# there the devices that the initrd unlocks, which are not only the
+# ones marked x-initrd.attach (the resume device, for example)
+initrd_crypttab()
+{
+	local id initrd
+	update_entries_for_this_system
+	id="$(get_default_entry)"
+	initrd="$(jq -r --arg id "$id" '.[] | select(.id == $id or .id == $id + ".conf") | .initrd[0] // empty' < "$entryfile" | head -n 1)"
+	[ -n "$initrd" ] && [ -e "$boot_root$initrd" ] || return 1
+	lsinitrd -f etc/crypttab "$boot_root$initrd" 2> /dev/null
+}
+
 detect_tracked_devices()
 {
 	local dev fstype
@@ -6529,8 +6579,24 @@ enroll_tpm2()
 	# PCR 15 is zero until the anchor measures its volume key, and
 	# leave-initrd moves it again before switching root, so this slot
 	# never unseals once the initrd is gone
+	#
+	# The other devices unlock after the anchor, so their slots are
+	# bound to PCR 15 once it is measured: in the initrd, or after the
+	# end of the initrd for the devices that the initrd does not open
 	if [ -n "$anchor" ] && [ "$dev" = "$anchor" ]; then
 		extra_args+=("--tpm2-pcrs=15:sha256=$(printf '%064d' 0)")
+	elif [ -n "$anchor" ]; then
+		local phase=leave-initrd name device _ value
+		while read -r name device _; do
+			[[ "$name" != \#* ]] || continue
+			[ -n "$name" ] || continue
+			! is_same_device "$dev" "$device" || phase=
+		done <<<"$initrd_crypttab"
+		if value="$(pcr15_bound_value "$anchor" "$phase")"; then
+			extra_args+=("--tpm2-pcrs=15:sha256=$value")
+		else
+			info "The TPM2 slot of $dev is not bound to the initrd yet: the anchor $anchor was not measured in this boot"
+		fi
 	fi
 
 	local header
@@ -6808,7 +6874,7 @@ enroll_secret()
 
 enroll()
 {
-	local anchor=
+	local anchor="" initrd_crypttab=""
 	[ -e /etc/crypttab ] || { info "/etc/crypttab not found. No encrypted devices?"; return 0; }
 	[ -e /usr/bin/systemd-cryptenroll ] || { info "systemd-cryptenroll not found"; return 0; }
 	detect_tracked_devices || { info "No LUKS2 devices found"; return 0; }
@@ -6829,6 +6895,7 @@ enroll()
 			# Only the anchor measures its volume key, see
 			# `measure_anchor`
 			[ -n "$arg_no_measure_pcr" ] || anchor="$(measure_anchor)" || anchor=
+			[ -z "$anchor" ] || initrd_crypttab="$(initrd_crypttab)" || initrd_crypttab=
 			for dev in "${tracked_devices[@]}"; do
 				add_crypttab_option "$dev" 'tpm2-device=auto'
 				[ -n "$anchor" ] || continue
