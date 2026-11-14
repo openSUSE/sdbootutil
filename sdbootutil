@@ -6098,6 +6098,25 @@ is_tracked_device()
 	return 1
 }
 
+# The device that measures its volume key into PCR 15: the first
+# tracked device behind the root file system (a btrfs can span
+# several).  It is unlocked first, and its slots are bound to PCR 15
+# still at zero, so they only unseal in the initrd
+measure_anchor()
+{
+	local uuid path dev tracked
+	read -r uuid < <(findmnt / -v -n -o UUID 2> /dev/null)
+	[ -n "$uuid" ] || return 1
+	while read -r path; do
+		while read -r dev; do
+			for tracked in "${tracked_devices[@]}"; do
+				[ "$tracked" != "$dev" ] || { echo "$dev"; return 0; }
+			done
+		done < <(lsblk --noheadings --list --inverse -o PATH "$path" 2> /dev/null)
+	done < <(lsblk --noheadings --list -o PATH -Q "UUID == \"$uuid\"" 2> /dev/null)
+	return 1
+}
+
 detect_tracked_devices()
 {
 	local dev fstype
@@ -6507,6 +6526,13 @@ enroll_tpm2()
 		warn "Ignoring $pcr_oracle_key for the enrollment. Remove it, and the private key, if pcr-oracle is not used anymore"
 	fi
 
+	# PCR 15 is zero until the anchor measures its volume key, and
+	# leave-initrd moves it again before switching root, so this slot
+	# never unseals once the initrd is gone
+	if [ -n "$anchor" ] && [ "$dev" = "$anchor" ]; then
+		extra_args+=("--tpm2-pcrs=15:sha256=$(printf '%064d' 0)")
+	fi
+
 	local header
 	header="$(luks_header "$dev")"
 
@@ -6782,6 +6808,7 @@ enroll_secret()
 
 enroll()
 {
+	local anchor=
 	[ -e /etc/crypttab ] || { info "/etc/crypttab not found. No encrypted devices?"; return 0; }
 	[ -e /usr/bin/systemd-cryptenroll ] || { info "systemd-cryptenroll not found"; return 0; }
 	detect_tracked_devices || { info "No LUKS2 devices found"; return 0; }
@@ -6799,9 +6826,17 @@ enroll()
 			have_tpm2 || err "No TPM2 found"
 			have_pcrlock || err "No systemd-pcrlock found"
 			! in_lockout || err "The TPM2 is in lockout. Use 'tpm2_dictionarylockout -c [ -p passwd ]' to continue"
+			# Only the anchor measures its volume key, see
+			# `measure_anchor`
+			[ -n "$arg_no_measure_pcr" ] || anchor="$(measure_anchor)" || anchor=
 			for dev in "${tracked_devices[@]}"; do
 				add_crypttab_option "$dev" 'tpm2-device=auto'
-				[ -n "$arg_no_measure_pcr" ] || add_crypttab_option "$dev" 'tpm2-measure-pcr=yes'
+				[ -n "$anchor" ] || continue
+				if [ "$dev" = "$anchor" ]; then
+					add_crypttab_option "$dev" 'tpm2-measure-pcr=yes'
+				else
+					remove_crypttab_option "$dev" 'tpm2-measure-pcr=yes'
+				fi
 			done
 			;;
 
