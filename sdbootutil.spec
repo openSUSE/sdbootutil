@@ -61,11 +61,6 @@ Summary:        Bootctl wrapper for BLS boot loaders
 License:        MIT
 URL:            https://github.com/openSUSE/sdbootutil
 Source:         %{name}-%{version}.tar
-Source1:        vendor.tar.zst
-Source2:        config.toml
-BuildRequires:  cargo
-BuildRequires:  cargo-packaging
-BuildRequires:  libopenssl-devel
 BuildRequires:  systemd-rpm-macros
 Requires:       %{name}-dracut-measure-pcr
 # 2.4.0 for --disable-external-tokens, used to validate a password
@@ -86,8 +81,7 @@ Requires:       libtss2-tcti-device0
 Requires:       udev
 Supplements:    ((grub2-x86_64-efi-bls and shim) unless (grub2-x86_64-efi or grub2-arm64-efi or grub2-riscv64-efi))
 Supplements:    ((systemd-boot and shim) unless (grub2-x86_64-efi or grub2-arm64-efi or grub2-riscv64-efi))
-# Because uhmac it is not a noarch package
-# BuildArch:      noarch
+BuildArch:      noarch
 ExclusiveArch:  aarch64 %{arm} riscv64 x86_64
 %{?systemd_requires}
 
@@ -170,27 +164,14 @@ BuildArch:      noarch
 Dracut module from sdbootutil to measure PCR 15 in non-UKIs systems
 
 %prep
-%autosetup -a1 -p1
-mv vendor uhmac
-cd uhmac
-mkdir .cargo
-install -D -m 644 %{SOURCE2} .cargo/config.toml
+%autosetup -p1
 
 %build
-cd uhmac
-%{cargo_build}
 
 %install
 install -D -m 755 %{name} %{buildroot}%{_bindir}/%{name}
 sed -i 's/^version=git$/version="%{version}"/' %{buildroot}%{_bindir}/%{name}
 grep -q '^version="%{version}"$' %{buildroot}%{_bindir}/%{name}
-
-# Install uhmac binary
-pushd uhmac
-%{cargo_install}
-install -D -m 755 %{buildroot}%{_bindir}/uhmac %{buildroot}%{_libexecdir}/%{name}/uhmac
-rm %{buildroot}%{_bindir}/uhmac
-popd
 
 # Update prediction service
 install -D -m 644 %{name}-update-predictions.service \
@@ -302,8 +283,6 @@ install -d -m 755 %{buildroot}%{_prefix}/lib/%{name}/entries.d
 %{_unitdir}/%{name}-update-predictions.service
 %dir %{_sharedstatedir}/%{name}
 %{_tmpfilesdir}/%{name}.conf
-%dir %{_libexecdir}/%{name}
-%{_libexecdir}/%{name}/uhmac
 %dir %{_prefix}/lib/%{name}
 %dir %{_prefix}/lib/%{name}/entries.d
 

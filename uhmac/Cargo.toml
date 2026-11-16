@@ -1,9 +1,0 @@
-[package]
-name = "uhmac"
-version = "0.1.0"
-edition = "2024"
-
-[dependencies]
-clap = { version = "4.6.1", features = ["derive"] }
-hex = "0.4.3"
-openssl = "0.10.81"
