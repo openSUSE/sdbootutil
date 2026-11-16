@@ -112,8 +112,8 @@ or kernel keys and call `sdbootutil` to complete the enrollment.
         │  EVERY SUBSEQUENT BOOT                                           │
         │   systemd-cryptsetup unseals the LUKS2 volume key via TPM2       │
         │   (policy = /var/lib/systemd/pcrlock.json) or FIDO2 token        │
-        │   PCR 15 (volume keys + end of the initrd) is part of the same   │
-        │   policy, for tpm2-measure-pcr=yes devices only                  │
+        │   Each TPM2 slot is also bound to a PCR 15 value, so it only     │
+        │   unseals at boot (see §6.2)                                     │
         └──────────────────────────────────────────────────────────────────┘
                                             │
                                             ▼
@@ -455,15 +455,17 @@ keeps the transient key visible:
   hook.
 
 Either way, `sdbootutil enroll` for `tpm2`/`tpm2+pin`:
-1. Adds `tpm2-device=auto` (+ `tpm2-measure-pcr=yes` unless disabled)
-   to the device's `/etc/crypttab` line.
+1. Adds `tpm2-device=auto` to the device's `/etc/crypttab` line, and
+   `tpm2-measure-pcr=yes` to the anchor's only (unless disabled), see
+   §6.2.
 2. Regenerates the initrd (so the crypttab option lands in it).
 3. Builds the `systemd-pcrlock` policy for the current boot chain
    (`generate_tpm2_predictions_pcrlock` → `systemd-pcrlock
    ... make-policy`, writing `/var/lib/systemd/pcrlock.json`).
 4. Runs `systemd-cryptenroll --wipe-slot=tpm2 --tpm2-device=auto
    --tpm2-public-key= --tpm2-pcrlock=/var/lib/systemd/pcrlock.json
-   [--tpm2-with-pin=1] "$dev"`.
+   --tpm2-pcrs=15:sha256=<value> [--tpm2-with-pin=1] "$dev"`, the PCR 15
+   value as in §6.2.
 5. Enables `sdbootutil-update-predictions.service` for future changes.
 
 For `fido2`, it is simply `systemd-cryptenroll --wipe-slot=fido2
@@ -472,10 +474,10 @@ For `fido2`, it is simply `systemd-cryptenroll --wipe-slot=fido2
 **Stage 3 - every subsequent boot.** `systemd-cryptsetup` (generated
 per `/etc/crypttab` line) unseals the LUKS2 volume key using the TPM2
 device and the `pcrlock.json` policy (or the FIDO2 token, or a
-password/recovery-key prompt).  For any device with
-`tpm2-measure-pcr=yes` the policy also covers PCR15, and
-`measure-pcr-boundary.service` extends it when the initrd ends - see
-§6.
+password/recovery-key prompt).  The anchor measures its volume key
+into PCR 15, and `measure-pcr-boundary.service` extends it when the
+initrd ends, so the slots bound to PCR 15 do not unseal afterwards -
+see §6.
 
 **Stage 4 - ongoing lifecycle.** Kernel installs
 (`50-sdbootutil.install` via `kernel-install`), snapshot
@@ -742,50 +744,50 @@ bootloader update, Secure Boot authority change), this policy must be
 regenerated - that's what `sdbootutil
 update-predictions`/`sdbootutil-update-predictions.service` does.
 
-### 6.2 `measure-pcr-*` - PCR15 device/volume-key binding check
+### 6.2 PCR15: TPM2 slots that only unseal at boot
 
-This is an **sdbootutil-specific, additional** integrity check, part
-of the pcrlock policy from (2), that protects against the LUKS
-device/keyslot mapping being swapped underneath an otherwise-valid
-policy (e.g. an attacker presenting a different volume as `root`).  It
-only applies to crypttab entries with `tpm2-measure-pcr=yes` (set
-automatically by `sdbootutil enroll --method=tpm2[+pin]` unless
-`--no-measure-pcr` is passed):
+The pcrlock policy from (2) has to accept the PCR values of the running
+system, or `update-predictions` could not rewrite it without the recovery
+PIN.  So a slot with the policy alone also unseals once the system is up.
+PCR 15 restricts it: every slot is the policy AND a static PCR 15 value
+(`systemd-cryptenroll --tpm2-pcrlock= --tpm2-pcrs=15:sha256=...`).
 
-- `measure-pcr-generator.sh` is a **dracut generator**, run
-  automatically during initrd assembly (not a runtime service).  For
-  every `systemd-cryptsetup@<name>.service` matching a
-  `tpm2-measure-pcr=yes` crypttab line, it drops
-  `Environment=SYSTEMD_FORCE_MEASURE=yes` plus ordering between
-  successive cryptsetup units, so PCR15 gets extended, at unlock time,
-  with an HMAC of each device's real LUKS volume key, in a
-  deterministic order.  Since systemd 262 the extension is done by
-  `systemd-pcrextend`, whose socket the module starts on non-UKI
-  boots too.
-- `measure-pcr-boundary.service` extends PCR15 with `leave-initrd`
-  just before switching root, in every boot.
-- After enrollment (or any crypttab change), `sdbootutil`
-  (`generate_tpm2_predictions_pcr_15`) computes the sha256 HMACs
-  offline with the Rust `uhmac` helper and writes them as the pcrlock
-  components `790-volume-key-NN.pcrlock.d` (`pcrlock_volume_keys`).
-  They are not secret, unlike the volume keys, and they are the only
-  copy: a changed measurement shifts the old variation, as for the
-  rest of the components.
-- Every policy update adds `795-leave-initrd.pcrlock` and PCR15 to the
-  sealed PCRs when those components exist (`pcrlock_pcr_15`).  The policy
-  then accepts PCR15 while it is 0, when the initrd unseals the key,
-  and after each expected measurement, but never 0 followed by the
-  end of the initrd (a volume that was not measured) or a different
-  volume key.  The init of a rogue root file system cannot unseal the
-  key, and the legitimate system can still update the policy.
-  - The end of the initrd can be described before a boot measured
-    it: pcrlock accepts components after the last event in the log.
-    A volume key that changed is only described once the measurements
-    are computed again (crypttab changed, or `--measure-pcr`).
+- The **anchor** is the first tracked device behind the root file system
+  (`measure_anchor`).  Only it gets `tpm2-measure-pcr=yes` (set by
+  `sdbootutil enroll --method=tpm2[+pin]` unless `--no-measure-pcr`), so
+  `systemd-cryptsetup` extends PCR15 with an HMAC of its volume key when
+  it is unlocked.
+- `measure-pcr-generator.sh` is a **dracut generator**, run in the initrd:
+  it drops `Environment=SYSTEMD_FORCE_MEASURE=yes` for the anchor, and
+  orders every other TPM2 device after it.  Since systemd 262 the
+  extension is done by `systemd-pcrextend`, whose socket the module starts
+  on non-UKI boots too.
+- `measure-pcr-boundary.service` extends PCR15 with `leave-initrd` just
+  before switching root, in every boot.
+- The values (`pcr15_slot_value`): the anchor is bound to **0**, PCR15
+  before its own measurement; the other devices that the initrd unlocks
+  (the crypttab inside the initrd, which also has the resume device) to
+  **B**, PCR15 after the anchor; the rest to **B'**, B after
+  `leave-initrd`.  B is read from the measurement log of the boot
+  (`pcr15_bound_value`): only when the log replays to the current PCR15,
+  and the record of the anchor, matched by its LUKS UUID, comes before
+  the end of the initrd.  The volume key is never read.
+- Once `leave-initrd` is measured PCR15 never returns to 0 nor B, so the
+  slots of the anchor and of the initrd devices cannot be unsealed from
+  the running system, nor by the init of a rogue root file system (a
+  swapped anchor gives another B).  The devices unlocked after switch
+  root unseal at B' by necessity, also on the running system.
+- Slots enrolled before the binding: after a successful update of the
+  predictions, `rebind_tpm2_slots` adds a bound slot next to each one,
+  unlocking with the old slot (no password), and removes the old one
+  once every boot entry has an initrd that measures the anchor alone,
+  orders the rest after it and measures the end of the initrd.  At the
+  first enrollment the anchor was not measured yet, so the other devices
+  are bound after the next boot the same way.
 
-In short: **pcrlock answers both "did the correct, expected boot
-chain run?" and, through PCR15, "is the volume I just unlocked the
-one the policy was made for?"**.
+In short: **pcrlock answers "did the correct, expected boot chain run?",
+and the PCR15 binding "is this still the initrd, after the volume I
+expect?"**.
 
 ---
 
@@ -833,8 +835,6 @@ initrd-created keyring survives `switch_root`).
 | `/run/credstore/*` | Combustion's `--prepare`-phase script, in the initrd | Transient (this-boot-only) credentials - mainly `disk-encryption-tool-dracut.encrypt` |
 | `/var/lib/systemd/pcrlock.json` | `systemd-pcrlock make-policy` (via `sdbootutil`) | The TPM2 boot-chain policy handed to `systemd-cryptenroll --tpm2-pcrlock=` |
 | `/var/lib/pcrlock.d/*.pcrlock.d/*.pcrlock` | `sdbootutil` `pcrlock_*` functions | Individual pcrlock components (per bootloader entry / kernel / cmdline variation) fed into `make-policy` |
-| `/var/lib/pcrlock.d/790-volume-key-NN.pcrlock.d` | `sdbootutil pcrlock_volume_keys` | sha256 HMAC of each volume key, in crypttab order, the PCR15 components; the only copy |
-| `/var/lib/sdbootutil/crypttab.sha1` | `sdbootutil` | Tracks whether `/etc/crypttab` changed since the last prediction run |
 | `/var/lib/misc/transactional-update.state` | `sdbootutil` | State carried across reboots on transactional (read-only root) systems |
 
 ---
