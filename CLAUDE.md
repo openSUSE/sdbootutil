@@ -203,20 +203,27 @@ Function `install_kernel()` uses SHA-256 checksums to:
 ### PCR Prediction System
 
 Full disk encryption relies on PCR (Platform Configuration Register)
-predictions made with `systemd-pcrlock`.  PCR 15 (volume keys) is part of
-the same policy:
+predictions made with `systemd-pcrlock`.  The policy lives in an NV index
+that `update-predictions` rewrites without a PIN, so it accepts the PCR
+values of the running system too.  PCR 15 is not part of it: it is bound
+in each TPM2 slot instead, which is what keeps the slots from unsealing
+once the initrd is gone.
 
-1. **Measurement** (initrd): `systemd-cryptsetup` extends PCR 15 with an
-   HMAC of each volume key (`measure-pcr-generator.sh` enables and orders
-   it), and `measure-pcr-boundary.service` extends it with `leave-initrd`
-   just before switching root.
+1. **Measurement** (initrd): only the anchor (the first tracked device
+   behind the root file system, `measure_anchor`) has
+   `tpm2-measure-pcr=yes`.  `systemd-cryptsetup` extends PCR 15 with an
+   HMAC of its volume key, `measure-pcr-generator.sh` orders every other
+   TPM2 device after it, and `measure-pcr-boundary.service` extends PCR 15
+   with `leave-initrd` just before switching root.
 
-2. **Prediction**: sdbootutil writes the HMACs as the pcrlock components
-   `790-volume-key-NN` (`pcrlock_volume_keys`, when crypttab changed or
-   with `--measure-pcr`, as it needs the volume keys), and adds the end
-   of the initrd (`pcrlock_pcr_15`).  The policy accepts PCR 15 while it is 0 (the
-   initrd unseals the key) and after the expected measurements, so the
-   init of a rogue volume cannot unseal it.
+2. **Binding** (`pcr15_slot_value`): each slot is the pcrlock policy AND
+   a static PCR 15 value.  The anchor is bound to 0, the other devices
+   that the initrd unlocks (its crypttab) to PCR 15 after the anchor, and
+   the rest to that value after `leave-initrd`.  The value comes from the
+   measurement log of the boot (`pcr15_bound_value`), never from the
+   volume key.  Slots enrolled before the binding get a bound one next to
+   them after an update (`rebind_tpm2_slots`), and lose the old one once
+   every boot entry has an initrd that supports it.
 
 ### State File for Transactional Systems
 
