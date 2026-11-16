@@ -87,7 +87,6 @@ arg_ask_pw=
 arg_ask_current_pw=
 arg_method=
 arg_no_measure_pcr=
-arg_measure_pcr=
 arg_pcr=
 arg_rootfs=
 arg_rootfs_data=
@@ -146,7 +145,6 @@ esp_files="/var/lib/sdbootutil/esp-files"
 update_predictions=
 # Set only when "update-predictions" is the command, to tell it apart
 # from the predictions that are a side effect of another command
-explicit_predictions=
 
 tracked_devices=()
 
@@ -256,7 +254,6 @@ helpandquit()
 		  --ask-current-pw	Ask the password that already opens the devices
 		  --method		"tpm2", "tpm2+pin", "fido2", "password", "recovery-key"
 		  --no-measure-pcr	During enrollment, do not include PCR 15 protection
-		  --measure-pcr		Recompute the PCR 15 measurements (asks the password)
 		                        (the LUKS2 password will be asked)
 		  --pcr			Comma seperated list of PCRs to enroll
 		                        (the ones that cannot be predicted are dropped,
@@ -558,8 +555,7 @@ create_default_config_file()
 	cat <<-EOF > /etc/default/sdbootutil
 	# Default sdbootutil configuration file generated automatically
 
-	# List of PCRs.  For VMs PCRs 0 and 2 are dropped.  PCR 15 is added
-	# when /etc/crypttab measures it (tpm2-measure-pcr=yes)
+	# List of PCRs.  For VMs PCRs 0 and 2 are dropped
 	FDE_SEAL_PCR_LIST="$FDE_SEAL_PCR_LIST"
 
 	# Parameter used in the cmdline to find the root (device, [part]uuid, [part]label)
@@ -5377,28 +5373,6 @@ show_generated_recovery_pin()
 	keyctl_add_with_timeout "sdbootutil-recovery-pin" sgrp_pin
 }
 
-# PCR 15 is extended in the initrd by systemd-cryptsetup, with the
-# volume keys (see `pcrlock_volume_keys`), and by
-# measure-pcr-boundary.service when the initrd ends.  With one component
-# per measurement the policy accepts PCR 15 while it is 0, when the
-# initrd unseals the key, and after each of the expected measurements,
-# but never 0 followed by the end of the initrd, or a different volume
-# key.  Returns 1 if PCR 15 cannot be predicted
-pcrlock_pcr_15()
-{
-	local leave=/var/lib/pcrlock.d/795-leave-initrd.pcrlock
-
-	[ -e /var/lib/pcrlock.d/790-volume-key-01.pcrlock.d/generated.pcrlock ] || {
-		rm -f "$leave"
-		return 1
-	}
-
-	[ ! -e "$leave" ] || return 0
-	echo -n "leave-initrd" > "$tmpdir/leave-initrd"
-	pcrlock lock-raw --pcr=15 --pcrlock="$leave" "$tmpdir/leave-initrd"
-	rm "$tmpdir/leave-initrd"
-}
-
 generate_tpm2_predictions_pcrlock()
 {
 	local pcrs="$FDE_SEAL_PCR_LIST"
@@ -5492,11 +5466,6 @@ generate_tpm2_predictions_pcrlock()
 
 	# Nothing that sdbootutil did not install can reach the policy
 	verify_esp_files
-
-	# Replaces measure-pcr-validator, so it is not optional
-	if pcrlock_pcr_15 && [[ ",$pcrs," != *",15,"* ]]; then
-		pcrs="$pcrs,15"
-	fi
 
 	drop_duplicated_shifts
 
@@ -5753,10 +5722,9 @@ get_device_password()
 	fi
 
 	# Ask the password only as a last resort, and only if
-	# --measure-pcr or --ask-current-pw are set.  Any other --ask-*
-	# also means that there is someone in front of a terminal
-	# willing to type it
-	if [ -z "$pw" ] && { [ -n "$arg_measure_pcr" ] || [ -n "$arg_ask_key$arg_ask_pin$arg_ask_recovery_pin$arg_ask_pw$arg_ask_current_pw" ]; }; then
+	# --ask-current-pw is set.  Any other --ask-* also means that
+	# there is someone in front of a terminal willing to type it
+	if [ -z "$pw" ] && [ -n "$arg_ask_key$arg_ask_pin$arg_ask_recovery_pin$arg_ask_pw$arg_ask_current_pw" ]; then
 		ask_password "Password for $dev" pw
 		valid_password "$dev" pw || {
 			warn "The password does not unlock $dev"
@@ -5769,186 +5737,6 @@ get_device_password()
 	fi
 
 	device_pw="$pw"
-}
-
-# Append the volume key of the device to the array named $2
-get_volume_key()
-{
-	local -; set +x
-	local gvk_dev="$1"
-	local -n gvk_keys="$2"
-	local gvk_out gvk_key
-	get_device_password "$gvk_dev"
-	# There is no retry: the password was already validated against
-	# the device, so a second call returns the same one.  Revoking
-	# %user:cryptenroll to force a different answer is not an
-	# option either, as it can hold the password of another device
-	[ -n "$device_pw" ] || return 1
-	gvk_out="$(cryptsetup luksDump --batch-mode --dump-master-key "$gvk_dev" 2> /dev/null<<<"$device_pw")" || return 1
-	gvk_key="$(echo "$gvk_out" | sed -n '/MK dump:/,$p' | sed -E 's/MK dump:|[[:blank:]]+//g' | sed -z 's/\n//g')"
-	[ -n "$gvk_key" ] || return 1
-	gvk_keys+=("$gvk_key")
-}
-
-# The HMAC of the message $2 with the volume key number $3 of the "vks"
-# array of the caller, with the algorithm $1.  The HMAC is what PCR 15
-# is extended with, so only the key is kept out of the trace
-volume_key_hmac()
-{
-	local -; set +x
-	echo -ne "$2" | /usr/libexec/sdbootutil/uhmac "$1" <(echo "${vks[$3]}")
-}
-
-# Write the measurements of the volume keys, one sha256 digest per
-# line in stdin, in crypttab order, as the pcrlock components that
-# describe PCR 15.  They are the only copy, as computing them again
-# needs the volume keys.  A measurement that changed is still in the
-# event log of this boot, so the old variation is shifted, like for the
-# rest of the components, and so are the ones of the devices that are
-# gone
-pcrlock_volume_keys()
-{
-	local component
-	for component in /var/lib/pcrlock.d/790-volume-key-*.pcrlock.d; do
-		shift_component "$(basename "$component" .pcrlock.d)"
-		rm -f "$component/generated.pcrlock"
-		rmdir --ignore-fail-on-non-empty "$component"
-	done
-
-	local n=0 hmac
-	while read -r hmac; do
-		n=$((n + 1))
-		component="/var/lib/pcrlock.d/790-volume-key-$(printf '%02d' "$n").pcrlock.d"
-		mkdir -p "$component"
-		jq --null-input --arg digest "$hmac" \
-		   '{"records": [{"pcr": 15, "digests": [{"hashAlg": "sha256", "digest": $digest}]}]}' \
-		   > "$component/generated.pcrlock"
-	done
-}
-
-generate_tpm2_predictions_pcr_15()
-{
-	local devs=()
-	local msgs=()
-	local vks=()
-	local name dev opts extra uuid pw
-
-	info "Generating the measurements of PCR 15"
-
-	# Read /etc/crypttab lines that contains tpm2-device and
-	# tpm2-measure-pcr.  This code is the similar from
-	# measure-pcr-generator.sh, so we guarantee the same ordering
-	# for PCR 15 extension
-	while read -r name dev _ opts; do
-		# Only the entries in /etc/crypttab in the initrd
-		# (marked with x-initrd.attach) should participate
-		# from the extension for now.  The reason is that
-		# extensions after the switch root cannot participate
-		# in abort the boot process from initrd itself
-		#
-		# Note that dracut will add the swap partition even if
-		# it is not marked as x-initrd.attach
-		[[ "$name" = \#* ]] && continue
-		[[ "$opts" != *"tpm2-device="* ]] && continue
-		[[ "$opts" != *"tpm2-measure-pcr="* ]] && continue
-
-		# If the device name is UUID= convert as a real device
-		# name, and if not, retrieve the UUID
-		if [[ "$dev" = "UUID="* ]]; then
-			uuid="${dev#"UUID="}"
-			dev="$(blkid --uuid "$uuid")"
-		else
-			uuid="$(blkid "$dev" -o value -s UUID)"
-		fi
-
-		# Get the FSTYPE of the real device (crypto_LUKS) and
-		# the slave / holder one (btrfs, swap, etc).  Also get
-		# the mount point so we can identify /etc or /var.
-		#
-		# According to https://systemd.io/MOUNT_REQUIREMENTS/
-		# /etc and swap are mounted in initrd, and /var is
-		# mounted after initrd, but in MicroOS (via
-		# microos-tools) is adding /var to be mounted in the
-		# initrd stage too because of selinux
-		# (98selinux-microos).
-		extra="$(lsblk --noheadings -o FSTYPE,MOUNTPOINT "$dev")"
-		if [[ "$extra" != *"swap"* ]] && [[ "$extra" != *"/etc"* ]] && { [[ "$extra" != *"/var"* ]] || ! is_transactional; }; then
-			[[ "$opts" != *"x-initrd.attach"* ]] && continue
-		fi
-
-		dbg "Adding $dev (cryptsetup:$name:$uuid) for PCR15"
-
-		devs+=("$dev")
-		msgs+=("cryptsetup:$name:$uuid")
-	done < /etc/crypttab
-	# We need to separate this into a different loop because we
-	# cannot nest two reads (one for crypttab and another for the
-	# password)
-	for dev in "${devs[@]}"; do
-		get_volume_key "$dev" vks || { warn "Volume key cannot be extracted. Dropping PCR 15"; return 0; }
-	done
-
-	# The measurements that the pcrlock policy describes.  The
-	# prediction signed by older versions is left in the ESP, as the
-	# initrd of an old snapshot still checks it
-	local j hmac
-	for j in "${!msgs[@]}"; do
-		hmac="$(volume_key_hmac sha256 "${msgs[j]}" "$j")"
-		dbg "${msgs[j]}: $hmac"
-		echo "$hmac"
-	done | pcrlock_volume_keys
-
-	# Register the hash of the parsed crypttab
-	local crypttab_sha1
-	read -r crypttab_sha1 _ < <(sha1sum /etc/crypttab)
-	echo "$crypttab_sha1" > /var/lib/sdbootutil/crypttab.sha1
-}
-
-# Older versions stored the measurements only as a signed prediction
-# of the final PCR 15 value, made for the current crypttab.  If the
-# volume keys measured in this boot replay to it, they are the expected
-# ones, and are stored without asking for the password.  Otherwise the
-# measurements stay missing, and `--measure-pcr` computes them from the
-# volume keys
-migrate_pcr_15_measurements()
-{
-	local dir=/var/lib/sdbootutil
-	local log=/run/log/systemd/tpm2-measure.log
-
-	[ ! -e /var/lib/pcrlock.d/790-volume-key-01.pcrlock.d/generated.pcrlock ] || return 0
-	[ -r "$log" ] || return 0
-	[ -e "$dir/measure-pcr-prediction" ] || return 0
-	[ -e "$dir/measure-pcr-prediction.sha256" ] || return 0
-	[ -e "$dir/measure-pcr-public.pem" ] || return 0
-
-	# The order of the entries is the order of the extensions
-	local crypttab_sha1
-	read -r crypttab_sha1 _ < <(sha1sum /etc/crypttab)
-	grep -Fixq "$crypttab_sha1" "$dir/crypttab.sha1" 2> /dev/null || return 0
-
-	openssl dgst -sha256 \
-		-verify "$dir/measure-pcr-public.pem" \
-		-signature "$dir/measure-pcr-prediction.sha256" \
-		"$dir/measure-pcr-prediction" &> /dev/null || return 0
-
-	# One line per digest, and the second one is sha256
-	local predicted measured
-	predicted="$(sed -n 2p "$dir/measure-pcr-prediction")"
-	measured="$(pcr15_events "$log" volume-key | pcr15_replay)"
-	[ -n "$measured" ] && [ "${predicted,,}" = "$measured" ] || return 0
-
-	info "Migrating the measurements of PCR 15 from the signed prediction"
-	pcr15_events "$log" volume-key | pcrlock_volume_keys
-}
-
-updated_crypttab()
-{
-	local crypttab_sha1
-	grep -q "tpm2-measure-pcr=yes" /etc/crypttab || return 0
-	# Not written by older versions
-	[ -e /var/lib/pcrlock.d/790-volume-key-01.pcrlock.d/generated.pcrlock ] || return 1
-	read -r crypttab_sha1 _ < <(sha1sum /etc/crypttab)
-	grep -Fixq "$crypttab_sha1" /var/lib/sdbootutil/crypttab.sha1 2> /dev/null
 }
 
 # systemd-cryptsetup tries the LUKS2 tokens on its own, so a TPM2 slot
@@ -6008,27 +5796,12 @@ generate_tpm2_predictions()
 		done
 	fi
 
-	migrate_pcr_15_measurements
-
-	# Compute the measurements of PCR 15 only in certain cases, as
-	# they need the volume keys, so the password.  For initial
-	# enrollments the LUKS2 key will be in the keyring, so no
-	# password will be asked.  Internally the function that asks for
-	# the volume key password will check arg_measure_pcr
-	# (--measure-pcr), that also recomputes them when the crypttab
-	# did not change but a volume key did (`cryptsetup reencrypt`).
-	#
-	# Before the policy, so a volume key that changed is already
-	# described by it
-	local missing_pcr_15=
-	if [ -n "$arg_measure_pcr" ] || ! updated_crypttab; then
-		generate_tpm2_predictions_pcr_15
-		if ! updated_crypttab; then
-			warn "The measurements of PCR 15 should be updated"
-			warn "Call sdbootutil update-predictions --measure-pcr"
-			missing_pcr_15=1
-		fi
-	fi
+	# PCR 15 is bound in the TPM2 slots, not in the policy (see
+	# `pcr15_slot_value`).  Older versions described it with these
+	# components, and the files that tracked them
+	rm -fr /var/lib/pcrlock.d/790-volume-key-*.pcrlock.d \
+	       /var/lib/pcrlock.d/795-leave-initrd.pcrlock \
+	       /var/lib/sdbootutil/crypttab.sha1
 
 	generate_tpm2_predictions_pcrlock
 
@@ -6044,17 +5817,6 @@ generate_tpm2_predictions()
 	# spends one of the few slots (two under grub2-bls) on a snapshot
 	# that nothing is going to boot
 	warn_default_snapshot_diverged
-
-	# /etc/crypttab measures PCR 15 but the measurements do not
-	# match it anymore, so PCR 15 leaves the policy at the next
-	# update.  Report it to the caller of "update-predictions",
-	# that can be a script that is about to do something
-	# irreversible, like removing the key that is needed to
-	# recompute the measurements.  When the predictions are a side
-	# effect of another command (a kernel or a bootloader update)
-	# the warning is enough, as failing there would also abort the
-	# RPM transaction that triggered it
-	[ -z "$missing_pcr_15" ] || [ -z "$explicit_predictions" ] || return 1
 }
 
 have_tracked_devices()
@@ -7230,8 +6992,6 @@ status_policy_stale=
 status_tpm2_device=
 status_pin_reachable=
 status_dangling=
-status_pcr15_missing=
-status_pcr15_mismatch=
 
 # Whether "$status_dangling" holds this entry.  The names in it carry
 # the ".conf" that the boot loader interface variables leave out, so
@@ -7482,10 +7242,6 @@ status_policy()
 		[ -n "$i" ] || continue
 		[ -n "$requested" ] && requested="$requested,$i" || requested="$i"
 	done
-	# Added by `generate_tpm2_predictions_pcrlock`, not by the config
-	if [[ ",$requested," != *",15,"* ]] && grep -qs "tpm2-measure-pcr=yes" /etc/crypttab; then
-		requested="${requested:-none} (+15, /etc/crypttab measures it)"
-	fi
 	status_row "Requested PCRs" "${requested:-none}"
 
 	echo "  Bound PCRs:"
@@ -7565,24 +7321,8 @@ status_policy()
 	done
 }
 
-# The measurements of the volume keys, in crypttab order, as written in
-# their pcrlock components by `pcrlock_volume_keys`
-pcr15_volume_keys()
-{
-	local component
-	for component in /var/lib/pcrlock.d/790-volume-key-*.pcrlock.d/generated.pcrlock; do
-		jq -r '.records[0].digests[0].digest' "$component"
-	done
-}
-
 # Replay sha256 digests, one per line in stdin, as PCR 15 extensions
 # from 0, and return the final value.  Empty when there is none
-#
-# The measurements of interest are the volume keys, one per encrypted
-# device that carries `tpm2-measure-pcr=yes`, extended in the order in
-# which the devices were unlocked.  That order is what
-# measure-pcr-generator fixes, and it is why the measurements are tied
-# to the crypttab
 pcr15_replay()
 {
 	local value="0000000000000000000000000000000000000000000000000000000000000000"
@@ -7628,76 +7368,31 @@ status_pcr15()
 	fi
 	status_row "Enabled" "yes"
 
-	# Without them `pcrlock_pcr_15` cannot describe PCR 15, and the
-	# policy is created without it, so a rogue volume is not noticed
-	if [ -z "$(pcr15_volume_keys)" ]; then
-		status_pcr15_missing=1
-		if [ -e /var/lib/sdbootutil/measure-pcr-prediction ]; then
-			status_row "Measurements" "MISSING, a signed prediction of an older version is present"
-		else
-			status_row "Measurements" "MISSING"
-		fi
-	else
-		status_row "Measurements" "present"
-	fi
-
-	if grep -qs '"pcr":15' /var/lib/systemd/pcrlock.json; then
-		status_row "In the policy" "yes"
-	else
-		status_row "In the policy" "no"
-	fi
-
 	if [ -n "$arg_full" ]; then
 		if [ -d /usr/lib/dracut/modules.d/50measure-pcr ]; then
 			status_row "Dracut module" "yes"
 		else
 			status_row "Dracut module" "no"
 		fi
-
-		# The measurements are tied to the crypttab they were
-		# made from: the order of the entries decides the order of
-		# the extensions, so a crypttab that changed invalidates
-		# them
-		local crypttab_sha1
-		if [ ! -e /etc/crypttab ] || [ ! -e /var/lib/sdbootutil/crypttab.sha1 ]; then
-			status_row "Crypttab" "unknown"
-		else
-			read -r crypttab_sha1 _ < <(sha1sum /etc/crypttab)
-			if grep -Fixq "$crypttab_sha1" /var/lib/sdbootutil/crypttab.sha1; then
-				status_row "Crypttab" "unchanged since the measurements"
-			else
-				status_row "Crypttab" "CHANGED after the measurements, the order of the extensions may differ"
-			fi
-		fi
 	fi
 
-	# Do *not* compare against the register in /sys: after the volume
-	# keys PCR 15 is extended at the end of the initrd, and on some
-	# systems by systemd-pcrfs and systemd-pcrmachine too.  Replay
-	# instead systemd's own record of what it measured in this boot.
-	# Its absence is not an error either: it lives in /run and only
-	# exists once something has been measured
-	local expected="" measured="" log=/run/log/systemd/tpm2-measure.log
-	expected="$(pcr15_volume_keys | pcr15_replay)"
-	[ ! -r "$log" ] || measured="$(pcr15_events "$log" volume-key | pcr15_replay)"
-
-	# Nothing measured at all is a different failure from a wrong
-	# measurement: it is what happens when the initrd carries no
-	# generator, or when the generator produced no drop-in for the
-	# device, and it leaves PCR 15 untouched instead of wrong
-	if [ -r "$log" ] && [ -z "$measured" ]; then
+	# systemd's own record of what it measured in this boot.  Its
+	# absence is not an error: it lives in /run and only exists once
+	# something has been measured.  Nothing measured at all is what
+	# happens when the initrd carries no generator, or when the
+	# generator produced no drop-in for the anchor, and then the slots
+	# bound after the anchor do not unseal
+	local log=/run/log/systemd/tpm2-measure.log
+	if [ -r "$log" ] && [ -n "$(pcr15_events "$log" volume-key)" ]; then
+		status_row "This boot" "the volume key of the anchor was measured"
+	elif [ -r "$log" ]; then
 		status_row "This boot" "NOTHING was measured into PCR 15"
-	elif [ -z "$expected" ] || [ -z "$measured" ]; then
-		status_row "This boot" "cannot be told, systemd recorded no measurement"
-	elif [ "${expected,,}" = "$measured" ]; then
-		status_row "This boot" "measured as expected"
 	else
-		status_pcr15_mismatch=1
-		status_row "This boot" "the measurement DOES NOT MATCH the volume keys"
+		status_row "This boot" "cannot be told, systemd recorded no measurement"
 	fi
 
-	# Without it the policy does not include PCR 15 (see
-	# measure-pcr-boundary.service)
+	# Without it the slots bound to the initrd unseal also on the
+	# running system (see measure-pcr-boundary.service)
 	if [ -r "$log" ] && [ -n "$(pcr15_events "$log" phase)" ]; then
 		status_row "End of initrd" "measured"
 	elif [ -r "$log" ]; then
@@ -8088,24 +7783,6 @@ fde_status()
 		warn "Run 'sdbootutil cleanup --repair' to write them again from the kernels that are still installed"
 	}
 
-	# A policy without PCR 15 does not notice a rogue volume, and
-	# nothing else in the report says why it is missing
-	[ -z "$status_pcr15_missing" ] || {
-		echo
-		warn "/etc/crypttab asks to measure PCR 15, but the measurements of the volume keys are missing, so the policy does not include PCR 15"
-		warn "'sdbootutil update-predictions' migrates them from the signed prediction of an older version, if the volume keys of this boot match it, and 'sdbootutil update-predictions --measure-pcr' computes them from the volume keys"
-	}
-
-	# The disk was unlocked, as the initrd unseals the key before
-	# PCR 15 is measured, but nothing after this boot's measurements
-	# satisfies the policy, so it cannot be updated without the
-	# recovery PIN, and the devices unlocked later do not unseal
-	[ -z "$status_pcr15_mismatch" ] || {
-		echo
-		warn "The volume keys measured in this boot do not match the measurements in the policy: a volume was changed (re-encrypted, a new LUKS2 header, a renamed crypttab entry), or it is not the expected one"
-		warn "If the change is expected, run 'sdbootutil update-predictions --measure-pcr', with the recovery PIN, to describe it"
-	}
-
 	# A policy with no device behind it is not an error, but it is
 	# never what the reader assumes when they see "Backend: pcrlock".
 	# It is what a partial unenroll leaves, and it makes the whole
@@ -8244,7 +7921,6 @@ define_options() {
 		[ask-current-pw]=""
 		[method]="_method"
 		[no-measure-pcr]=""
-		[measure-pcr]=""
 		[pcr]="_none"
 		[devices]="_devices"
 		[rootfs]="_rootfs"
@@ -8328,7 +8004,6 @@ while true ; do
 		--ask-current-pw) arg_ask_current_pw=1; shift ;;
 		--method) arg_method="$2"; shift 2 ;;
 		--no-measure-pcr) arg_no_measure_pcr=1; shift ;;
-		--measure-pcr) arg_measure_pcr=1; shift ;;
 		--pcr) arg_pcr="$2"; shift 2 ;;
 		--devices) IFS=',' read -r -a tracked_devices <<<"$2"; shift 2 ;;
 		--rootfs) arg_rootfs="$2"; shift 2 ;;
@@ -8360,7 +8035,7 @@ fi
 # indistinguishable from an optional [SNAPSHOT] and silently ignored,
 # so a command like
 #
-#   sdbootutil update-predictions PW=secret --measure-pcr
+#   sdbootutil enroll PW=secret --method=password
 #
 # drops the password instead of using it
 for variable_arg in "$@"; do
@@ -8606,8 +8281,7 @@ case "$1" in
 	unenroll)
 		unenroll ;;
 	update-predictions)
-		update_predictions=1
-		explicit_predictions=1 ;;
+		update_predictions=1 ;;
 	*)
 		helpandquit ;;
 esac
