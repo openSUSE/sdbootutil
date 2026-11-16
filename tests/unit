@@ -996,6 +996,46 @@ t_shift()
 	is "no match" "generated.pcrlock" "$(ls "$d")"
 }
 
+# entries_bind_pcr15 needs every initrd to measure the anchor alone,
+# order the rest after it, measure the end of the initrd, and unlock
+# the same devices as the initrd of the default entry
+t_entries_bind()
+{
+	load
+	# shellcheck disable=SC2034  # read by the sourced library
+	local tmpdir="$workdir/tmp" boot_root="$workdir/boot" entryfile="$workdir/entries.json"
+	mkdir -p "$tmpdir" "$boot_root"
+	touch "$boot_root/a" "$boot_root/b"
+	local ct_default="root UUID=1 none x-initrd.attach,tpm2-device=auto,tpm2-measure-pcr=yes
+swap UUID=2 none tpm2-device=auto"
+	local ct_a="$ct_default" ct_b="$ct_default" generator='After=systemd-cryptsetup@$anchor.service' boundary=1
+
+	initrd_crypttab() { echo "$ct_default"; }
+	update_entries_for_this_system() { echo '[{"type":"type1","initrd":["/a"]},{"type":"type1","initrd":["/b"]}]' > "$entryfile"; }
+	# shellcheck disable=SC2329  # called by the sourced library
+	lsinitrd()
+	{
+		local ct="$ct_a"
+		[ "${2##*/}" = a ] || ct="$ct_b"
+		mkdir -p etc usr/lib/systemd/system-generators usr/lib/systemd/system
+		echo "$ct" > etc/crypttab
+		echo "$generator" > usr/lib/systemd/system-generators/measure-pcr-generator
+		[ -z "$boundary" ] || touch usr/lib/systemd/system/measure-pcr-boundary.service
+	}
+
+	entries_bind_pcr15 root || fail "every initrd binds PCR 15, but it was refused"
+	ct_b="${ct_default%%$'\n'*}"
+	entries_bind_pcr15 root && fail "an initrd that does not unlock the swap was accepted"
+	ct_b="$ct_default"
+	ct_a="${ct_default/tpm2-device=auto$/tpm2-device=auto,tpm2-measure-pcr=yes}"
+	ct_a="${ct_a%swap*}swap UUID=2 none tpm2-device=auto,tpm2-measure-pcr=yes"
+	entries_bind_pcr15 root && fail "an initrd that measures another device was accepted"
+	ct_a="$ct_default"
+	boundary=
+	entries_bind_pcr15 root && fail "an initrd without the boundary was accepted"
+	return 0
+}
+
 t_p15_status()
 {
 	pcr15_setup
@@ -1103,6 +1143,7 @@ done <<-'EOF'
 	t_p15_slot_value            pcr15_slot_value binds the anchor to zero, the rest in or after the initrd
 	t_p15_binding               tpm2_slot_binding and unbound_tpm2_keyslots classify the TPM2 slots
 	t_shift                     shift_component and restore_shifts keep the current boot only when it differs
+	t_entries_bind              entries_bind_pcr15 checks the measurement layout and the devices of every initrd
 	t_p15_status                status_pcr15 reports the measurements of this boot
 EOF
 
