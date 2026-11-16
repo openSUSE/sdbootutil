@@ -6276,33 +6276,42 @@ in_lockout()
 	TPM2TOOLS_TCTI="device:/dev/tpmrm0" tpm2_getcap properties-variable | grep -q 'inLockout: *1'
 }
 
+# The device number of "$1" into the variable named "$2", empty when
+# it is not a block device.  The specifications are the four that
+# systemd-cryptsetup-generator resolves (crypttab(5) documents only
+# "UUID="), and like it UUID and PARTUUID go through /dev/disk/by-*.
+# Remembered for the run, as /etc/crypttab is matched against every
+# tracked device
+declare -gA device_numbers
+device_number()
+{
+	local name="$1"
+	local -n dn_number="${2:?}"
+	local dev="$name"
+
+	if [ -z "${device_numbers["$name"]+set}" ]; then
+		case "$dev" in
+			UUID=*) dev="/dev/disk/by-uuid/${dev#UUID=}" ;;
+			PARTUUID=*) dev="/dev/disk/by-partuuid/${dev#PARTUUID=}" ;;
+			LABEL=*|PARTLABEL=*) dev="$(blkid --list-one --output device --match-token "$dev")" ;;
+		esac
+		# A name that does not resolve into a block device is not
+		# the same device as anything else.  Without this any two
+		# of them would match, with an empty device number, or
+		# 0:0 for the image file that crypttab also accepts
+		device_numbers["$name"]=""
+		[ ! -b "$dev" ] || device_numbers["$name"]="$(stat -L -c "%t:%T" "$dev")"
+	fi
+	# shellcheck disable=SC2034  # nameref
+	dn_number="${device_numbers["$name"]}"
+}
+
 is_same_device()
 {
-	local dev1="$1"
-	local dev2="$2"
-
-	# If the device name is a specification, convert it as a real
-	# device name.  crypttab(5) documents only "UUID=", but
-	# systemd-cryptsetup-generator resolves these four (and only
-	# these four) into /dev/disk/by-*
-	local spec="^(UUID|PARTUUID|LABEL|PARTLABEL)="
-	[[ "$dev1" =~ $spec ]] && dev1="$(blkid --list-one --output device --match-token "$dev1")"
-	[[ "$dev2" =~ $spec ]] && dev2="$(blkid --list-one --output device --match-token "$dev2")"
-
-	dev1="$(readlink -f "$dev1")"
-	dev2="$(readlink -f "$dev2")"
-
-	# A name that does not resolve into a block device is not the
-	# same device as anything else.  Without this any two of them
-	# match, as the device number is empty when `stat` fails, and
-	# 0:0 for the image file that crypttab also accepts
-	[ -b "$dev1" ] && [ -b "$dev2" ] || return 1
-
 	local id1 id2
-	id1="$(stat -c "%t:%T" "$dev1")"
-	id2="$(stat -c "%t:%T" "$dev2")"
-
-	[ "$id1" = "$id2" ]
+	device_number "$1" id1
+	device_number "$2" id2
+	[ -n "$id1" ] && [ "$id1" = "$id2" ]
 }
 
 # /etc/crypttab belongs to whoever wrote it, so only the line of the
