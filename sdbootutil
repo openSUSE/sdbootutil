@@ -6028,13 +6028,16 @@ rebind_tpm2_slots()
 	anchor="$(measure_anchor)" || return 0
 	# Enrolled with --no-measure-pcr
 	[[ "$(status_crypttab_field "$anchor" options)" == *"tpm2-measure-pcr=yes"* ]] || return 0
-	initrd_crypttab="$(initrd_crypttab)" || initrd_crypttab=
 
 	for dev in "${tracked_devices[@]}"; do
 		# Older enrollments measure every device, and the values
 		# below expect the anchor alone.  The next initrd uses it
 		[ "$dev" = "$anchor" ] || remove_crypttab_option "$dev" 'tpm2-measure-pcr=yes'
 		[ "$(tpm2_slot_binding "$dev")" = "plain" ] || continue
+		# Read from the initrd only when a slot needs it, as this
+		# runs after every update of the predictions
+		[ -n "${initrd_crypttab+set}" ] || [ "$dev" = "$anchor" ] || \
+			initrd_crypttab="$(initrd_crypttab)" || initrd_crypttab=
 		value="$(pcr15_slot_value "$dev")" || continue
 		info "Binding a new TPM2 slot of $dev to the initrd"
 		systemd-cryptenroll \
