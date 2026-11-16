@@ -5774,6 +5774,14 @@ get_device_password()
 	device_pw="$pw"
 }
 
+# jq definitions for the tokens of a LUKS2 header: a pcrlock TPM2 slot,
+# bound to PCR 15, and with a PIN
+jq_tpm2_token_defs='
+	def pcrlock: .type == "systemd-tpm2" and (.tpm2_pcrlock // false);
+	def bound: (.["tpm2-pcrs"] // []) | index(15) != null;
+	def pin: .["tpm2-pin"] // false;
+'
+
 # systemd-cryptsetup tries the LUKS2 tokens on its own, so a TPM2 slot
 # keeps opening the device when /etc/crypttab does not ask for it.  But
 # nothing updates its policy then: `generate_tpm2_predictions` and the
@@ -5782,7 +5790,7 @@ get_device_password()
 # Only the pcrlock policy needs the update, a signed policy does not
 has_pcrlock_slot()
 {
-	luks_header "${1:?}" | jq -e 'any(.tokens[]?; .type == "systemd-tpm2" and (.tpm2_pcrlock // false))' > /dev/null
+	luks_header "${1:?}" | jq -e "$jq_tpm2_token_defs"'any(.tokens[]?; pcrlock)' > /dev/null
 }
 
 warn_tpm2_slot_without_option()
@@ -5930,12 +5938,10 @@ pcr15_bound_value()
 	[ -r "$log" ] || return 1
 	uuid="$(cryptsetup luksUUID "$anchor" 2> /dev/null)" || return 1
 
-	# The log is RFC 7464 JSON-seq, see `pcr15_events`
-	[ "$(tr -d '\036' < "$log" | \
-	     jq -r 'select(.pcr == 15) | .digests[] | select(.hashAlg == "sha256") | .digest' 2> /dev/null | \
-	     pcr15_replay)" = \
+	[ "$(pcr15_events "$log" "" | pcr15_replay)" = \
 	  "$(systemd-analyze pcrs 15 --json=short 2> /dev/null | jq -r '.[0].sha256')" ] || return 1
 
+	# The log is RFC 7464 JSON-seq, see `pcr15_events`
 	digest="$(tr -d '\036' < "$log" | \
 		  jq -rs --arg uuid "$uuid" \
 		     '[.[] | select(.pcr == 15)] as $r
@@ -6019,13 +6025,13 @@ tpm2_slot_binding()
 {
 	local header="${2:-}"
 	[ -n "$header" ] || header="$(luks_header "${1:?}")"
-	jq -r '
-		[.tokens[] | select(.type == "systemd-tpm2" and (.tpm2_pcrlock // false))] as $t
-		| ($t | map(select((.["tpm2-pcrs"] // []) | index(15))) | length) as $bound
+	jq -r "$jq_tpm2_token_defs"'
+		[.tokens[] | select(pcrlock)] as $t
+		| ($t | map(select(bound)) | length) as $bound
 		| ($t | length) as $all
 		| if $bound > 0 and $all > $bound then "bound+plain"
 		  elif $bound > 0 then "bound"
-		  elif ($t | map(select((.["tpm2-pin"] // false) | not)) | length) > 0 then "plain"
+		  elif ($t | map(select(pin | not)) | length) > 0 then "plain"
 		  elif $all > 0 then "pin"
 		  else "none" end' <<<"$header"
 }
@@ -6081,10 +6087,8 @@ entries_bind_pcr15()
 # PCR 15 and have no PIN
 unbound_tpm2_keyslots()
 {
-	luks_header "${1:?}" | jq -r '
-		.tokens[] | select(.type == "systemd-tpm2" and (.tpm2_pcrlock // false))
-		| select(((.["tpm2-pcrs"] // []) | index(15) | not) and ((.["tpm2-pin"] // false) | not))
-		| .keyslots[]'
+	luks_header "${1:?}" | jq -r "$jq_tpm2_token_defs"'
+		.tokens[] | select(pcrlock and (bound | not) and (pin | not)) | .keyslots[]'
 }
 
 # The TPM2 slots enrolled before the anchor existed carry the pcrlock
@@ -7205,7 +7209,7 @@ status_device()
 	# policy instead.  They are two different backends and the
 	# difference decides where to look next
 	local slots=""
-	[ -z "$header" ] || slots="$(jq -r '
+	[ -z "$header" ] || slots="$(jq -r "$jq_tpm2_token_defs"'
 		(.tokens // {}) as $tokens |
 		(.keyslots // {}) | keys[] | . as $slot |
 		($tokens | to_entries
@@ -7221,8 +7225,8 @@ status_device()
 		  ($token.value.type // ""),
 		  (if $token == null then ""
 		   elif ($token.value | has("tpm2_pubkey")) then ", signed policy"
-		   elif ($token.value.tpm2_pcrlock // false) then
-			", pcrlock NVIndex" + (if (($token.value["tpm2-pcrs"] // []) | index(15)) then ", bound to PCR 15" else "" end)
+		   elif ($token.value | pcrlock) then
+			", pcrlock NVIndex" + (if ($token.value | bound) then ", bound to PCR 15" else "" end)
 		   else "" end)
 		] | @tsv' <<<"$header")"
 
@@ -7515,14 +7519,14 @@ pcr15_replay()
 }
 
 # The sha256 digests that systemd recorded in PCR 15 for this boot with
-# the event type "$2", from the log "$1"
+# the event type "$2" (all of them if empty), from the log "$1"
 pcr15_events()
 {
 	# The log is RFC 7464 JSON-seq, so every record is introduced by a
 	# 0x1e separator that jq refuses to read as JSON
 	tr -d '\036' < "$1" | \
 		jq -r --arg type "$2" \
-		   'select(.pcr == 15 and .content.eventType == $type)
+		   'select(.pcr == 15 and ($type == "" or .content.eventType == $type))
 		    | .digests[] | select(.hashAlg == "sha256") | .digest' \
 		   2> /dev/null
 }
