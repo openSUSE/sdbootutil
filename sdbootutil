@@ -5956,17 +5956,24 @@ pcr15_slot_value()
 	pcr15_bound_value "$anchor" "$phase"
 }
 
-# How the pcrlock TPM2 slots of "$1" are bound: "bound" when one is
-# bound to PCR 15, "plain" when one is not and has no PIN, "pin" when
-# the only ones need a PIN, and "none" without pcrlock slots
+# How the pcrlock TPM2 slots of "$1" (with the LUKS2 header "$2", if
+# the caller has it) are bound: "bound" when one is bound to PCR 15,
+# "bound+plain" when an unbound one is still there too, "plain" when
+# one is not bound and has no PIN, "pin" when the only ones need a PIN,
+# and "none" without pcrlock slots
 tpm2_slot_binding()
 {
-	luks_header "${1:?}" | jq -r '
+	local header="${2:-}"
+	[ -n "$header" ] || header="$(luks_header "${1:?}")"
+	jq -r '
 		[.tokens[] | select(.type == "systemd-tpm2" and (.tpm2_pcrlock // false))] as $t
-		| if ($t | map(select((.["tpm2-pcrs"] // []) | index(15))) | length) > 0 then "bound"
+		| ($t | map(select((.["tpm2-pcrs"] // []) | index(15))) | length) as $bound
+		| ($t | length) as $all
+		| if $bound > 0 and $all > $bound then "bound+plain"
+		  elif $bound > 0 then "bound"
 		  elif ($t | map(select((.["tpm2-pin"] // false) | not)) | length) > 0 then "plain"
-		  elif ($t | length) > 0 then "pin"
-		  else "none" end'
+		  elif $all > 0 then "pin"
+		  else "none" end' <<<"$header"
 }
 
 # The TPM2 slots enrolled before the anchor existed carry the pcrlock
@@ -7073,7 +7080,8 @@ status_device()
 		  ($token.value.type // ""),
 		  (if $token == null then ""
 		   elif ($token.value | has("tpm2_pubkey")) then ", signed policy"
-		   elif ($token.value.tpm2_pcrlock // false) then ", pcrlock NVIndex"
+		   elif ($token.value.tpm2_pcrlock // false) then
+			", pcrlock NVIndex" + (if (($token.value["tpm2-pcrs"] // []) | index(15)) then ", bound to PCR 15" else "" end)
 		   else "" end)
 		] | @tsv' <<<"$header")"
 
@@ -7125,11 +7133,36 @@ status_device()
 
 	if [ -n "$arg_full" ]; then
 		if [[ "$opts" == *"tpm2-measure-pcr=yes"* ]]; then
-			status_subrow "PCR 15" "measured"
+			status_subrow "PCR 15" "measured (the anchor)"
 		else
 			status_subrow "PCR 15" "not measured"
 		fi
 	fi
+
+	# A slot bound to PCR 15 only unseals in the initrd, or after it
+	# for the devices that the initrd does not unlock, which then also
+	# unseal on the running system (see `pcr15_slot_value`)
+	local binding=none bound="unseals only in the initrd" name device _
+	[ -z "$header" ] || binding="$(tpm2_slot_binding "$dev" "$header")"
+	if [[ "$binding" == bound* ]]; then
+		[ -n "${status_initrd_crypttab+set}" ] || status_initrd_crypttab="$(initrd_crypttab)" || :
+		bound="unseals after the initrd, also on the running system"
+		while read -r name device _; do
+			[[ "$name" != \#* ]] || continue
+			[ -n "$name" ] || continue
+			! is_same_device "$dev" "$device" || bound="unseals only in the initrd"
+		done <<<"$status_initrd_crypttab"
+	fi
+	case "$binding" in
+		bound) status_subrow "TPM2 slot" "$bound" ;;
+		bound+plain) status_subrow "TPM2 slot" "$bound, but an older slot still unseals on the running system" ;;
+		plain|pin) status_subrow "TPM2 slot" "ALSO unseals on the running system" ;;
+	esac
+
+	case "$binding" in
+		plain) echo "    WARNING: the next 'sdbootutil update-predictions' adds a slot bound to the boot, once the anchor was measured" ;;
+		pin) echo "    WARNING: enroll the TPM2 again ('sdbootutil enroll --method=tpm2+pin') to bind it to the boot" ;;
+	esac
 
 	[ -z "$tpm2_only" ] || \
 		echo "    WARNING: only the TPM2 can open this device.  A firmware update, a bootloader update or a cleared TPM2 leaves it unopenable"
