@@ -952,6 +952,50 @@ t_p15_binding()
 	is "unbound keyslots" "1" "$(unbound_tpm2_keyslots x)"
 }
 
+# A pcrlock component with one sha256 digest
+pcrlock_variation()
+{
+	printf '{"records":[{"pcr":5,"digests":[{"hashAlg":"sha256","digest":"%s"}]}]}\n' "$1"
+}
+
+# shift_component sets aside the variation of the current boot, and
+# restore_shifts puts it back only when the new prediction differs
+t_shift()
+{
+	pcr15_setup
+	# shellcheck disable=SC2034  # read by the sourced library
+	local tmpdir="$workdir/tmp" d=/var/lib/pcrlock.d/641-test.pcrlock.d
+	mkdir -p "$tmpdir" "$d"
+	# shellcheck disable=SC2034  # read by the sourced library
+	declare -gA eventlog=(["$VK"]=1)
+
+	pcrlock_variation "$VK" > "$d/generated.pcrlock"
+	pcrlock_variation "$LEAVE" > "$d/old.pcrlock"
+	shift_component 641-test
+	is "variations removed" "" "$(ls "$d")"
+	pcrlock_variation "$VK" > "$d/generated.pcrlock"
+	restore_shifts
+	is "unchanged: nothing kept" "generated.pcrlock" "$(ls "$d")"
+
+	shift_component 641-test
+	pcrlock_variation "$PCR15_VK" > "$d/generated.pcrlock"
+	restore_shifts
+	is "changed: the boot is kept" "generated.pcrlock shift-generated.pcrlock" "$(ls "$d" | tr '\n' ' ' | sed 's/ $//')"
+
+	# The kept one still matches the next run, under its own name
+	pcrlock_variation "$PCR15_VK" > "$d/generated.pcrlock"
+	shift_component 641-test
+	pcrlock_variation "$PCR15_VK" > "$d/generated.pcrlock"
+	restore_shifts
+	is "still changed" "generated.pcrlock shift-generated.pcrlock" "$(ls "$d" | tr '\n' ' ' | sed 's/ $//')"
+
+	# Nothing matches the event log: the variations are kept
+	rm -f "$d"/*
+	pcrlock_variation "$LEAVE" > "$d/generated.pcrlock"
+	shift_component 641-test
+	is "no match" "generated.pcrlock" "$(ls "$d")"
+}
+
 t_p15_status()
 {
 	pcr15_setup
@@ -1058,6 +1102,7 @@ done <<-'EOF'
 	t_p15_bound                 pcr15_bound_value takes the anchor from the log, only when it explains PCR 15
 	t_p15_slot_value            pcr15_slot_value binds the anchor to zero, the rest in or after the initrd
 	t_p15_binding               tpm2_slot_binding and unbound_tpm2_keyslots classify the TPM2 slots
+	t_shift                     shift_component and restore_shifts keep the current boot only when it differs
 	t_p15_status                status_pcr15 reports the measurements of this boot
 EOF
 
