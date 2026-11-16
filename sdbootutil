@@ -6011,14 +6011,27 @@ tpm2_slot_binding()
 		  else "none" end' <<<"$header"
 }
 
+# The names in a crypttab read from stdin, sorted
+crypttab_names()
+{
+	local name _
+	while read -r name _; do
+		[[ "$name" != \#* ]] || continue
+		[ -z "$name" ] || echo "$name"
+	done | sort
+}
+
 # Whether every boot entry of this system boots an initrd that unlocks
 # the devices as the bound slots expect: the anchor "$1" (its crypttab
-# name) measured alone, the other devices after it, and the end of the
-# initrd measured.  Until then a rollback needs the unbound slots
+# name) measured alone, the other devices after it, the end of the
+# initrd measured, and the same devices as the initrd of the default
+# entry, that decided which slots are bound in or after the initrd.
+# Until then a rollback needs the unbound slots
 entries_bind_pcr15()
 {
-	local anchor="${1:?}" initrd dir name _ opts
+	local anchor="${1:?}" initrd dir name _ opts expected names
 
+	expected="$(initrd_crypttab | crypttab_names)"
 	update_entries_for_this_system
 	while read -r initrd; do
 		[ -e "$boot_root$initrd" ] || return 1
@@ -6031,6 +6044,9 @@ entries_bind_pcr15()
 			usr/lib/systemd/system/measure-pcr-boundary.service) &> /dev/null || :
 		[ -e "$dir/usr/lib/systemd/system/measure-pcr-boundary.service" ] || return 1
 		grep -qs "anchor" "$dir/usr/lib/systemd/system-generators/measure-pcr-generator" || return 1
+		names=""
+		[ ! -e "$dir/etc/crypttab" ] || names="$(crypttab_names < "$dir/etc/crypttab")"
+		[ "$names" = "$expected" ] || return 1
 		[ ! -e "$dir/etc/crypttab" ] || while read -r name _ _ opts; do
 			[[ "$name" != \#* ]] || continue
 			[[ "$opts" != *"tpm2-measure-pcr=yes"* ]] || [ "$name" = "$anchor" ] || return 1
