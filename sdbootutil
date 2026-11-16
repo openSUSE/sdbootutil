@@ -6043,7 +6043,10 @@ entries_bind_pcr15()
 			usr/lib/systemd/system-generators/measure-pcr-generator \
 			usr/lib/systemd/system/measure-pcr-boundary.service) &> /dev/null || :
 		[ -e "$dir/usr/lib/systemd/system/measure-pcr-boundary.service" ] || return 1
-		grep -qs "anchor" "$dir/usr/lib/systemd/system-generators/measure-pcr-generator" || return 1
+		# The line that orders the other devices after the anchor
+		# shellcheck disable=SC2016  # literal
+		grep -qsF 'After=systemd-cryptsetup@$anchor.service' \
+			"$dir/usr/lib/systemd/system-generators/measure-pcr-generator" || return 1
 		names=""
 		[ ! -e "$dir/etc/crypttab" ] || names="$(crypttab_names < "$dir/etc/crypttab")"
 		[ "$names" = "$expected" ] || return 1
