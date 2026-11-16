@@ -23,16 +23,12 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
    - Handles kernel/entry management, snapshot integration, FDE enrollment
    - Entry point for snapper hooks and RPM triggers
 
-2. **`uhmac/` (Rust utility)** - HMAC calculation utility
-   - Used for cryptographic operations in FDE scenarios
-   - Built with cargo, linked as `%{_libexecdir}/sdbootutil/uhmac`
-
-3. **Integration Scripts:**
+2. **Integration Scripts:**
    - `10-sdbootutil.snapper` - Snapper plugin for snapshot lifecycle hooks
    - `10-sdbootutil.tukit` - Tukit plugin for transactional systems
    - `50-sdbootutil.install` - kernel-install plugin script
 
-4. **FDE/TPM Components:**
+3. **FDE/TPM Components:**
    - `measure-pcr-generator.sh` - Enables and orders the PCR 15 volume key measurements
    - `measure-pcr-boundary.service` - Measures the end of the initrd into PCR 15
    - `sdbootutil-enroll` - Enrollment service wrapper
@@ -78,13 +74,8 @@ references it. Kept for future work; it is not part of any current code path.
 
 ### Build
 
-```bash
-# Build uhmac utility (Rust)
-cd uhmac
-cargo build --release
-
-# For RPM build, see sdbootutil.spec (%build and %install sections)
-```
+Nothing to compile: everything is shell.  For the RPM build, see
+sdbootutil.spec (%install section).
 
 ### Testing sdbootutil
 
@@ -275,8 +266,6 @@ Functions can use `install_with_rollback()` to backup files before modification.
 - jq, sed, openssl, qrencode (utilities)
 
 **Build:**
-- cargo, cargo-packaging (for uhmac)
-- libopenssl-devel (for uhmac)
 - systemd-rpm-macros (for packaging)
 
 ## Testing Considerations
