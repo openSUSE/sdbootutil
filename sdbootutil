@@ -5912,7 +5912,7 @@ pcr15_bound_value()
 
 	{
 		echo "$digest"
-		[ -z "$phase" ] || echo -n "$phase" | openssl dgst -sha256 -r | cut -d' ' -f1
+		[ -z "$phase" ] || echo -n "$phase" | sha256sum | cut -d' ' -f1
 	} | pcr15_replay
 }
 
@@ -7422,7 +7422,7 @@ pcr15_replay()
 		# has globs there, without repetition or back-reference
 		# shellcheck disable=SC2001
 		value="$(printf '%b' "$(sed 's/../\\x&/g' <<<"$value$digest")" | \
-				openssl dgst -sha256 -r | cut -d' ' -f1)"
+				sha256sum | cut -d' ' -f1)"
 		measured=1
 	done
 

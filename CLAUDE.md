@@ -263,7 +263,7 @@ Functions can use `install_with_rollback()` to backup files before modification.
 - btrfs-progs (for btrfs operations)
 - tpm2-tools, keyutils (for FDE)
 - efibootmgr (for NVRAM management)
-- jq, sed, openssl, qrencode (utilities)
+- jq, sed, qrencode (utilities)
 
 **Build:**
 - systemd-rpm-macros (for packaging)
