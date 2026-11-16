@@ -6167,6 +6167,80 @@ initrd_crypttab()
 	lsinitrd -f etc/crypttab "$boot_root$initrd" 2> /dev/null
 }
 
+# The value of PCR 15 that the TPM2 slot of "$1" is bound to, with
+# "$anchor" and "$initrd_crypttab" set by the caller
+#
+# PCR 15 is zero until the anchor measures its volume key, and
+# leave-initrd moves it again before switching root, so the slot of the
+# anchor never unseals once the initrd is gone.  The other devices
+# unlock after the anchor, so their slots are bound to PCR 15 once it
+# is measured: in the initrd, or after the end of the initrd for the
+# devices that the initrd does not open
+pcr15_slot_value()
+{
+	local dev="${1:?}"
+	local phase=leave-initrd name device _
+
+	if [ "$dev" = "$anchor" ]; then
+		printf '%064d\n' 0
+		return 0
+	fi
+
+	while read -r name device _; do
+		[[ "$name" != \#* ]] || continue
+		[ -n "$name" ] || continue
+		! is_same_device "$dev" "$device" || phase=
+	done <<<"$initrd_crypttab"
+	pcr15_bound_value "$anchor" "$phase"
+}
+
+# How the pcrlock TPM2 slots of "$1" are bound: "bound" when one is
+# bound to PCR 15, "plain" when one is not and has no PIN, "pin" when
+# the only ones need a PIN, and "none" without pcrlock slots
+tpm2_slot_binding()
+{
+	luks_header "${1:?}" | jq -r '
+		[.tokens[] | select(.type == "systemd-tpm2" and (.tpm2_pcrlock // false))] as $t
+		| if ($t | map(select((.["tpm2-pcrs"] // []) | index(15))) | length) > 0 then "bound"
+		  elif ($t | map(select((.["tpm2-pin"] // false) | not)) | length) > 0 then "plain"
+		  elif ($t | length) > 0 then "pin"
+		  else "none" end'
+}
+
+# The TPM2 slots enrolled before the anchor existed carry the pcrlock
+# policy alone, so they also unseal once the system is up.  Add next to
+# each one a slot bound to PCR 15, as `enroll_tpm2` does.  The old slot
+# still unseals here, so it unlocks the device and no password is
+# needed, and it stays as the fallback.  A slot with a PIN is left
+# alone, as the new one would need the PIN too
+rebind_tpm2_slots()
+{
+	[ -e /var/lib/systemd/pcrlock.json ] || return 0
+	detect_tracked_devices || return 0
+
+	local anchor initrd_crypttab dev value
+	anchor="$(measure_anchor)" || return 0
+	# Enrolled with --no-measure-pcr
+	[[ "$(status_crypttab_field "$anchor" options)" == *"tpm2-measure-pcr=yes"* ]] || return 0
+	initrd_crypttab="$(initrd_crypttab)" || initrd_crypttab=
+
+	for dev in "${tracked_devices[@]}"; do
+		# Older enrollments measure every device, and the values
+		# below expect the anchor alone.  The next initrd uses it
+		[ "$dev" = "$anchor" ] || remove_crypttab_option "$dev" 'tpm2-measure-pcr=yes'
+		[ "$(tpm2_slot_binding "$dev")" = "plain" ] || continue
+		value="$(pcr15_slot_value "$dev")" || continue
+		info "Binding a new TPM2 slot of $dev to the initrd"
+		systemd-cryptenroll \
+			--tpm2-device=auto \
+			--tpm2-public-key= \
+			--tpm2-pcrlock=/var/lib/systemd/pcrlock.json \
+			--tpm2-pcrs="15:sha256=$value" \
+			--unlock-tpm2-device=auto \
+			"$dev" < /dev/null || warn "Failed to bind a new TPM2 slot of $dev to the initrd"
+	done
+}
+
 detect_tracked_devices()
 {
 	local dev fstype
@@ -6576,23 +6650,9 @@ enroll_tpm2()
 		warn "Ignoring $pcr_oracle_key for the enrollment. Remove it, and the private key, if pcr-oracle is not used anymore"
 	fi
 
-	# PCR 15 is zero until the anchor measures its volume key, and
-	# leave-initrd moves it again before switching root, so this slot
-	# never unseals once the initrd is gone
-	#
-	# The other devices unlock after the anchor, so their slots are
-	# bound to PCR 15 once it is measured: in the initrd, or after the
-	# end of the initrd for the devices that the initrd does not open
-	if [ -n "$anchor" ] && [ "$dev" = "$anchor" ]; then
-		extra_args+=("--tpm2-pcrs=15:sha256=$(printf '%064d' 0)")
-	elif [ -n "$anchor" ]; then
-		local phase=leave-initrd name device _ value
-		while read -r name device _; do
-			[[ "$name" != \#* ]] || continue
-			[ -n "$name" ] || continue
-			! is_same_device "$dev" "$device" || phase=
-		done <<<"$initrd_crypttab"
-		if value="$(pcr15_bound_value "$anchor" "$phase")"; then
+	local value
+	if [ -n "$anchor" ]; then
+		if value="$(pcr15_slot_value "$dev")"; then
 			extra_args+=("--tpm2-pcrs=15:sha256=$value")
 		else
 			info "The TPM2 slot of $dev is not bound to the initrd yet: the anchor $anchor was not measured in this boot"
@@ -8552,4 +8612,6 @@ case "$1" in
 		helpandquit ;;
 esac
 
-[ -z "$update_predictions" ] || [ -n "$arg_disable_predictions" ] || generate_tpm2_predictions
+[ -z "$update_predictions" ] || [ -n "$arg_disable_predictions" ] || {
+	generate_tpm2_predictions && rebind_tpm2_slots
+}
