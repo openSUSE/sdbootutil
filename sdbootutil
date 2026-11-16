@@ -4143,7 +4143,7 @@ shift_component()
 	local variation vname
 	variation="$(find_matching_variation "$component")"
 	if [ -n "$variation" ]; then
-		vname="$(basename "$variation")"
+		vname="${variation##*/}"
 		dbg "$variation found in the eventlog"
 		[[ "$vname" == shift-* ]] || {
 			# Drop any previous shifted variation, as
@@ -4172,7 +4172,7 @@ drop_duplicated_shifts()
 
 	for shifted in /var/lib/pcrlock.d/*.pcrlock.d/shift-*.pcrlock; do
 		for variation in "${shifted%/*}"/*.pcrlock; do
-			[[ "$(basename "$variation")" != shift-* ]] || continue
+			[[ "${variation##*/}" != shift-* ]] || continue
 			cmp -s "$shifted" "$variation" || continue
 			dbg "Dropping $shifted, identical to $variation"
 			rm "$shifted"
@@ -6070,6 +6070,7 @@ rebind_tpm2_slots()
 	detect_tracked_devices || return 0
 
 	local anchor initrd_crypttab dev value slot replaced=()
+	local -A bindings
 	anchor="$(measure_anchor)" || return 0
 	# Enrolled with --no-measure-pcr
 	[[ "$(status_crypttab_field "$anchor" options)" == *"tpm2-measure-pcr=yes"* ]] || return 0
@@ -6078,7 +6079,8 @@ rebind_tpm2_slots()
 		# Older enrollments measure every device, and the values
 		# below expect the anchor alone.  The next initrd uses it
 		[ "$dev" = "$anchor" ] || remove_crypttab_option "$dev" 'tpm2-measure-pcr=yes'
-		[ "$(tpm2_slot_binding "$dev")" = "plain" ] || continue
+		bindings["$dev"]="$(tpm2_slot_binding "$dev")"
+		[ "${bindings["$dev"]}" = "plain" ] || continue
 		# Read from the initrd only when a slot needs it, as this
 		# runs after every update of the predictions
 		[ -n "${initrd_crypttab+set}" ] || [ "$dev" = "$anchor" ] || \
@@ -6091,12 +6093,13 @@ rebind_tpm2_slots()
 			--tpm2-pcrlock=/var/lib/systemd/pcrlock.json \
 			--tpm2-pcrs="15:sha256=$value" \
 			--unlock-tpm2-device=auto \
-			"$dev" < /dev/null || warn "Failed to bind a new TPM2 slot of $dev to the initrd"
+			"$dev" < /dev/null || { warn "Failed to bind a new TPM2 slot of $dev to the initrd"; continue; }
+		bindings["$dev"]="bound+plain"
 	done
 
 	# The old slots go once nothing that boots needs them
 	for dev in "${tracked_devices[@]}"; do
-		[ "$(tpm2_slot_binding "$dev")" != "bound+plain" ] || replaced+=("$dev")
+		[ "${bindings["$dev"]}" != "bound+plain" ] || replaced+=("$dev")
 	done
 	[ "${#replaced[@]}" -gt 0 ] || return 0
 	entries_bind_pcr15 "$(status_crypttab_field "$anchor" name)" || return 0
