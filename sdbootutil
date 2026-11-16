@@ -5953,7 +5953,30 @@ pcr15_bound_value()
 
 # The /etc/crypttab of the initrd of the default entry: dracut copies
 # there the devices that the initrd unlocks, which are not only the
-# ones marked x-initrd.attach (the resume device, for example)
+# ones marked x-initrd.attach (the resume device, for example).  Read
+# into "initrd_crypttab_cache" by `read_initrd_crypttab`, once per run,
+# as it means decompressing the initrd
+initrd_crypttab_cache=
+initrd_crypttab_read=
+read_initrd_crypttab()
+{
+	[ -z "$initrd_crypttab_read" ] || return 0
+	initrd_crypttab_cache="$(initrd_crypttab)" || initrd_crypttab_cache=
+	initrd_crypttab_read=1
+}
+
+# Whether the initrd unlocks "$1", after `read_initrd_crypttab`
+in_initrd_crypttab()
+{
+	local dev="${1:?}" name device _
+	while read -r name device _; do
+		[[ "$name" != \#* ]] || continue
+		[ -n "$name" ] || continue
+		! is_same_device "$dev" "$device" || return 0
+	done <<<"$initrd_crypttab_cache"
+	return 1
+}
+
 initrd_crypttab()
 {
 	local id initrd
@@ -5964,8 +5987,9 @@ initrd_crypttab()
 	lsinitrd -f etc/crypttab "$boot_root$initrd" 2> /dev/null
 }
 
-# The value of PCR 15 that the TPM2 slot of "$1" is bound to, with
-# "$anchor" and "$initrd_crypttab" set by the caller
+# The value of PCR 15 that the TPM2 slot of "$1" is bound to, with the
+# anchor "$2".  The caller runs `read_initrd_crypttab` first, in its own
+# shell, as this one usually runs in a subshell
 #
 # PCR 15 is zero until the anchor measures its volume key, and
 # leave-initrd moves it again before switching root, so the slot of the
@@ -5975,20 +5999,15 @@ initrd_crypttab()
 # devices that the initrd does not open
 pcr15_slot_value()
 {
-	local dev="${1:?}"
-	local phase=leave-initrd name device _
+	local dev="${1:?}" anchor="${2:?}"
 
 	if [ "$dev" = "$anchor" ]; then
 		printf '%064d\n' 0
-		return 0
+	elif in_initrd_crypttab "$dev"; then
+		pcr15_bound_value "$anchor" ""
+	else
+		pcr15_bound_value "$anchor" leave-initrd
 	fi
-
-	while read -r name device _; do
-		[[ "$name" != \#* ]] || continue
-		[ -n "$name" ] || continue
-		! is_same_device "$dev" "$device" || phase=
-	done <<<"$initrd_crypttab"
-	pcr15_bound_value "$anchor" "$phase"
 }
 
 # How the pcrlock TPM2 slots of "$1" (with the LUKS2 header "$2", if
@@ -6031,7 +6050,8 @@ entries_bind_pcr15()
 {
 	local anchor="${1:?}" initrd dir name _ opts expected names
 
-	expected="$(initrd_crypttab | crypttab_names)"
+	read_initrd_crypttab
+	expected="$(crypttab_names <<<"$initrd_crypttab_cache")"
 	update_entries_for_this_system
 	while read -r initrd; do
 		[ -e "$boot_root$initrd" ] || return 1
@@ -6078,7 +6098,7 @@ rebind_tpm2_slots()
 	[ -e /var/lib/systemd/pcrlock.json ] || return 0
 	detect_tracked_devices || return 0
 
-	local anchor initrd_crypttab dev value slot replaced=()
+	local anchor dev value slot replaced=()
 	local -A bindings
 	anchor="$(measure_anchor)" || return 0
 	# Enrolled with --no-measure-pcr
@@ -6092,9 +6112,8 @@ rebind_tpm2_slots()
 		[ "${bindings["$dev"]}" = "plain" ] || continue
 		# Read from the initrd only when a slot needs it, as this
 		# runs after every update of the predictions
-		[ -n "${initrd_crypttab+set}" ] || [ "$dev" = "$anchor" ] || \
-			initrd_crypttab="$(initrd_crypttab)" || initrd_crypttab=
-		value="$(pcr15_slot_value "$dev")" || continue
+		[ "$dev" = "$anchor" ] || read_initrd_crypttab
+		value="$(pcr15_slot_value "$dev" "$anchor")" || continue
 		info "Binding a new TPM2 slot of $dev to the initrd"
 		systemd-cryptenroll \
 			--tpm2-device=auto \
@@ -6540,11 +6559,11 @@ enroll_tpm2()
 	fi
 
 	local value
-	if [ -n "$anchor" ]; then
-		if value="$(pcr15_slot_value "$dev")"; then
+	if [ -n "$enroll_anchor" ]; then
+		if value="$(pcr15_slot_value "$dev" "$enroll_anchor")"; then
 			extra_args+=("--tpm2-pcrs=15:sha256=$value")
 		else
-			info "The TPM2 slot of $dev is not bound to the initrd yet: the anchor $anchor was not measured in this boot"
+			info "The TPM2 slot of $dev is not bound to the initrd yet: the anchor $enroll_anchor was not measured in this boot"
 		fi
 	fi
 
@@ -6821,9 +6840,11 @@ enroll_secret()
 	fi
 }
 
+# The device that measures its volume key, for `enroll_tpm2`.  Set by
+# `enroll`, empty with --no-measure-pcr or without an encrypted root
+enroll_anchor=
 enroll()
 {
-	local anchor="" initrd_crypttab=""
 	[ -e /etc/crypttab ] || { info "/etc/crypttab not found. No encrypted devices?"; return 0; }
 	[ -e /usr/bin/systemd-cryptenroll ] || { info "systemd-cryptenroll not found"; return 0; }
 	detect_tracked_devices || { info "No LUKS2 devices found"; return 0; }
@@ -6843,12 +6864,12 @@ enroll()
 			! in_lockout || err "The TPM2 is in lockout. Use 'tpm2_dictionarylockout -c [ -p passwd ]' to continue"
 			# Only the anchor measures its volume key, see
 			# `measure_anchor`
-			[ -n "$arg_no_measure_pcr" ] || anchor="$(measure_anchor)" || anchor=
-			[ -z "$anchor" ] || initrd_crypttab="$(initrd_crypttab)" || initrd_crypttab=
+			[ -n "$arg_no_measure_pcr" ] || enroll_anchor="$(measure_anchor)" || enroll_anchor=
+			[ -z "$enroll_anchor" ] || read_initrd_crypttab
 			for dev in "${tracked_devices[@]}"; do
 				add_crypttab_option "$dev" 'tpm2-device=auto'
-				[ -n "$anchor" ] || continue
-				if [ "$dev" = "$anchor" ]; then
+				[ -n "$enroll_anchor" ] || continue
+				if [ "$dev" = "$enroll_anchor" ]; then
 					add_crypttab_option "$dev" 'tpm2-measure-pcr=yes'
 				else
 					remove_crypttab_option "$dev" 'tpm2-measure-pcr=yes'
@@ -7262,16 +7283,11 @@ status_device()
 	# A slot bound to PCR 15 only unseals in the initrd, or after it
 	# for the devices that the initrd does not unlock, which then also
 	# unseal on the running system (see `pcr15_slot_value`)
-	local binding=none bound="unseals only in the initrd" name device _
+	local binding=none bound="unseals only in the initrd"
 	[ -z "$header" ] || binding="$(tpm2_slot_binding "$dev" "$header")"
 	if [[ "$binding" == bound* ]]; then
-		[ -n "${status_initrd_crypttab+set}" ] || status_initrd_crypttab="$(initrd_crypttab)" || :
-		bound="unseals after the initrd, also on the running system"
-		while read -r name device _; do
-			[[ "$name" != \#* ]] || continue
-			[ -n "$name" ] || continue
-			! is_same_device "$dev" "$device" || bound="unseals only in the initrd"
-		done <<<"$status_initrd_crypttab"
+		read_initrd_crypttab
+		in_initrd_crypttab "$dev" || bound="unseals after the initrd, also on the running system"
 	fi
 	case "$binding" in
 		bound) status_subrow "TPM2 slot" "$bound" ;;
