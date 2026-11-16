@@ -4135,50 +4135,46 @@ shift_component()
 		return 0
 	}
 
-	# Instead of moving all the variations of a component (as this
+	# Instead of keeping all the variations of a component (as this
 	# will increase the amount of combinations, reaching early the
-	# PolicyOR limitation), we keep the one that matches the
-	# current eventlog.  If the variation is also duplicated, it
-	# will be dropped by `systemd-pcrlock`
-	local variation vname
+	# PolicyOR limitation), only the one that matches the current
+	# event log is set aside.  The component is generated again,
+	# and `restore_shifts` puts it back if it is not one of the new
+	# variations
+	local variation name
 	variation="$(find_matching_variation "$component")"
-	if [ -n "$variation" ]; then
-		vname="${variation##*/}"
-		dbg "$variation found in the eventlog"
-		[[ "$vname" == shift-* ]] || {
-			# Drop any previous shifted variation, as
-			# there is no guarantee that the new one will
-			# share the name
-			find /var/lib/pcrlock.d/"$component".pcrlock.d -name 'shift-*.pcrlock' -delete
-			mv "$variation" "/var/lib/pcrlock.d/$component.pcrlock.d/shift-$vname"
-		}
-	else
+	[ -n "$variation" ] || {
 		dbg "No matching variation found for $component"
 		return 0
-	fi
-
-	# Remove the rest of the variations
-	find /var/lib/pcrlock.d/"$component".pcrlock.d -name '*.pcrlock' ! -name 'shift-*.pcrlock' -delete
+	}
+	dbg "$variation found in the eventlog"
+	name="${variation##*/}"
+	mkdir -p "$tmpdir/shift/$component.pcrlock.d"
+	# Copied, not moved: the file is written again in
+	# /var/lib/pcrlock.d, with the label of the directory
+	cp "$variation" "$tmpdir/shift/$component.pcrlock.d/shift-${name#shift-}"
+	rm -f /var/lib/pcrlock.d/"$component".pcrlock.d/*.pcrlock
 }
 
-# The shifted variation matches the current event log, and when the
-# component did not change it is identical to the one that was just
-# generated.  `systemd-pcrlock` drops the duplicated values from the
-# prediction, but only after walking every combination of variations,
-# so each copy doubles the cost of `predict` and `make-policy`.
-drop_duplicated_shifts()
+# The variation of the current boot, set aside by `shift_component`,
+# goes back as "shift-*" only when none of the new variations is the
+# same one.  Then the next boot measures something else, and the policy
+# has to accept this boot too, so a shifted variation means "changed
+# since the boot"
+restore_shifts()
 {
-	local shifted variation
-
-	for shifted in /var/lib/pcrlock.d/*.pcrlock.d/shift-*.pcrlock; do
-		for variation in "${shifted%/*}"/*.pcrlock; do
-			[[ "${variation##*/}" != shift-* ]] || continue
-			cmp -s "$shifted" "$variation" || continue
-			dbg "Dropping $shifted, identical to $variation"
-			rm "$shifted"
-			break
+	local shifted dir variation
+	for shifted in "$tmpdir"/shift/*.pcrlock.d/*.pcrlock; do
+		dir="/var/lib/pcrlock.d/${shifted#"$tmpdir/shift/"}"
+		dir="${dir%/*}"
+		for variation in "$dir"/*.pcrlock; do
+			! cmp -s "$shifted" "$variation" || continue 2
 		done
+		dbg "Keeping ${shifted##*/} for $dir, the current boot differs from the prediction"
+		mkdir -p "$dir"
+		cp "$shifted" "$dir/"
 	done
+	rm -rf "$tmpdir/shift"
 }
 
 uint64_le()
@@ -5187,20 +5183,14 @@ explain_pcrlock_policy_error()
 shim_changed()
 {
 	# The shim in the ESP is not the one that produced the current
-	# event log.  `shift_component` keeps the variation that the
-	# event log matches, and `lock-pe` regenerates the one for the
-	# binary that is installed now, so comparing both answers the
-	# question without tracking any state of our own
+	# event log: `restore_shifts` only keeps the variation of the
+	# current boot when the one generated for the installed binary
+	# is different
 	local dir=/var/lib/pcrlock.d/630-shim-efi-application.pcrlock.d
+	# nullglob: an empty list when there is no shifted variation
+	local shifted=("$dir"/shift-*.pcrlock)
 
-	[ -e "$dir/generated.pcrlock" ] || return 1
-
-	local shifted
-	for shifted in "$dir"/shift-*.pcrlock; do
-		cmp -s "$shifted" "$dir/generated.pcrlock" || return 0
-	done
-
-	return 1
+	[ -e "$dir/generated.pcrlock" ] && [ "${#shifted[@]}" -gt 0 ]
 }
 
 get_final_pcrs()
@@ -5512,7 +5502,7 @@ generate_tpm2_predictions_pcrlock()
 	# Nothing that sdbootutil did not install can reach the policy
 	verify_esp_files
 
-	drop_duplicated_shifts
+	restore_shifts
 
 	# The copy in the ESP is imported by `dracut-pcr-signature`,
 	# and can be missing after a new ESP installation.  Both copies
