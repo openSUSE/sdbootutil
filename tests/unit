@@ -858,14 +858,14 @@ pcr15_setup()
 }
 
 # A systemd measurement log (RFC 7464 JSON-seq) with one record per
-# argument, "PCR:TYPE:DIGEST"
+# argument, "PCR:TYPE:DIGEST[:STRING]"
 pcr15_log()
 {
-	local r pcr type digest
+	local r pcr type digest string
 	for r in "$@"; do
-		IFS=: read -r pcr type digest <<<"$r"
-		printf '\036{"pcr":%s,"digests":[{"hashAlg":"sha256","digest":"%s"}],"content_type":"systemd","content":{"eventType":"%s"}}\n' \
-		       "$pcr" "$digest" "$type"
+		IFS=: read -r pcr type digest string <<<"$r"
+		printf '\036{"pcr":%s,"digests":[{"hashAlg":"sha256","digest":"%s"}],"content_type":"systemd","content":{"eventType":"%s","string":"%s"}}\n' \
+		       "$pcr" "$digest" "$type" "$string"
 	done > /run/log/systemd/tpm2-measure.log
 }
 
@@ -886,6 +886,70 @@ t_p15_events()
 
 	is "volume keys" "$VK" "$(pcr15_events /run/log/systemd/tpm2-measure.log volume-key)"
 	is "end of initrd" "$LEAVE" "$(pcr15_events /run/log/systemd/tpm2-measure.log phase)"
+}
+
+# The value of PCR 15 once the anchor is measured, from the log: only
+# when the log explains the current PCR 15 (systemd-analyze, replaced
+# here), and the record of the anchor comes before the end of the
+# initrd
+t_p15_bound()
+{
+	pcr15_setup
+	local uuid pcr15_now
+	uuid="$(cryptsetup luksUUID "$dev")"
+	systemd-analyze() { echo "[{\"nr\":15,\"sha256\":\"$pcr15_now\"}]"; }
+
+	pcr15_log "15:volume-key:$VK:cryptsetup:root:$uuid" "15:phase:$LEAVE:leave-initrd"
+	pcr15_now="$PCR15_VK_LEAVE"
+	is "in the initrd" "$PCR15_VK" "$(pcr15_bound_value "$dev" "")"
+	is "after the initrd" "$PCR15_VK_LEAVE" "$(pcr15_bound_value "$dev" leave-initrd)"
+
+	pcr15_now="$PCR15_VK"
+	is "a log that does not explain PCR 15" "" "$(pcr15_bound_value "$dev" "")"
+
+	pcr15_log "15:phase:$LEAVE:leave-initrd" "15:volume-key:$VK:cryptsetup:root:$uuid"
+	pcr15_now="$(printf '%s\n%s\n' "$LEAVE" "$VK" | pcr15_replay)"
+	is "measured after the initrd" "" "$(pcr15_bound_value "$dev" "")"
+
+	pcr15_log "15:volume-key:$VK:cryptsetup:root:00000000-0000-0000-0000-000000000000"
+	pcr15_now="$PCR15_VK"
+	is "another device" "" "$(pcr15_bound_value "$dev" "")"
+}
+
+# The anchor is bound to zero, the other devices to PCR 15 after the
+# anchor: in the initrd when its crypttab names them, after it if not
+t_p15_slot_value()
+{
+	load
+	# shellcheck disable=SC2034  # read by the sourced library
+	local anchor=/dev/sdbootutil-unit-anchor initrd_crypttab
+	pcr15_bound_value() { echo "phase=$2"; }
+
+	is "anchor" "$(printf '%064d' 0)" "$(pcr15_slot_value "$anchor")"
+	# shellcheck disable=SC2034  # read by the sourced library
+	initrd_crypttab="data $dev none x-initrd.attach,tpm2-device=auto"
+	is "in the initrd" "phase=" "$(pcr15_slot_value "$dev")"
+	# shellcheck disable=SC2034  # read by the sourced library
+	initrd_crypttab="other /dev/null none tpm2-device=auto"
+	is "after the initrd" "phase=leave-initrd" "$(pcr15_slot_value "$dev")"
+}
+
+t_p15_binding()
+{
+	load
+	local bound='"0":{"type":"systemd-tpm2","tpm2_pcrlock":true,"tpm2-pcrs":[15],"keyslots":["0"]}'
+	local plain='"1":{"type":"systemd-tpm2","tpm2_pcrlock":true,"tpm2-pcrs":[],"keyslots":["1"]}'
+	local pin='"2":{"type":"systemd-tpm2","tpm2_pcrlock":true,"tpm2-pin":true,"keyslots":["2"]}'
+	local signed='"3":{"type":"systemd-tpm2","tpm2_pubkey":"x","keyslots":["3"]}'
+
+	is "bound" "bound" "$(tpm2_slot_binding x "{\"tokens\":{$bound}}")"
+	is "bound and plain" "bound+plain" "$(tpm2_slot_binding x "{\"tokens\":{$bound,$plain}}")"
+	is "plain" "plain" "$(tpm2_slot_binding x "{\"tokens\":{$plain,$pin}}")"
+	is "pin" "pin" "$(tpm2_slot_binding x "{\"tokens\":{$pin}}")"
+	is "signed only" "none" "$(tpm2_slot_binding x "{\"tokens\":{$signed}}")"
+
+	luks_header() { echo "{\"tokens\":{$bound,$plain,$pin,$signed}}"; }
+	is "unbound keyslots" "1" "$(unbound_tpm2_keyslots x)"
 }
 
 t_p15_status()
@@ -991,6 +1055,9 @@ done <<-'EOF'
 	t_tr_generated_key          enroll_recovery_key prints the generated key, untraced
 	t_p15_replay                pcr15_replay extends PCR 15 like the TPM2 does
 	t_p15_events                pcr15_events takes the PCR 15 records of one type from the log
+	t_p15_bound                 pcr15_bound_value takes the anchor from the log, only when it explains PCR 15
+	t_p15_slot_value            pcr15_slot_value binds the anchor to zero, the rest in or after the initrd
+	t_p15_binding               tpm2_slot_binding and unbound_tpm2_keyslots classify the TPM2 slots
 	t_p15_status                status_pcr15 reports the measurements of this boot
 EOF
 
