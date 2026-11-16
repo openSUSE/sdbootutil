@@ -921,17 +921,18 @@ t_p15_bound()
 t_p15_slot_value()
 {
 	load
-	# shellcheck disable=SC2034  # read by the sourced library
-	local anchor=/dev/sdbootutil-unit-anchor initrd_crypttab
+	local anchor=/dev/sdbootutil-unit-anchor
 	pcr15_bound_value() { echo "phase=$2"; }
+	# shellcheck disable=SC2034  # read by the sourced library
+	initrd_crypttab_read=1
 
-	is "anchor" "$(printf '%064d' 0)" "$(pcr15_slot_value "$anchor")"
+	is "anchor" "$(printf '%064d' 0)" "$(pcr15_slot_value "$anchor" "$anchor")"
 	# shellcheck disable=SC2034  # read by the sourced library
-	initrd_crypttab="data $dev none x-initrd.attach,tpm2-device=auto"
-	is "in the initrd" "phase=" "$(pcr15_slot_value "$dev")"
+	initrd_crypttab_cache="data $dev none x-initrd.attach,tpm2-device=auto"
+	is "in the initrd" "phase=" "$(pcr15_slot_value "$dev" "$anchor")"
 	# shellcheck disable=SC2034  # read by the sourced library
-	initrd_crypttab="other /dev/null none tpm2-device=auto"
-	is "after the initrd" "phase=leave-initrd" "$(pcr15_slot_value "$dev")"
+	initrd_crypttab_cache="other /dev/null none tpm2-device=auto"
+	is "after the initrd" "phase=leave-initrd" "$(pcr15_slot_value "$dev" "$anchor")"
 }
 
 t_p15_binding()
