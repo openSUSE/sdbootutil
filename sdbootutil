@@ -5976,6 +5976,43 @@ tpm2_slot_binding()
 		  else "none" end' <<<"$header"
 }
 
+# Whether every boot entry of this system boots an initrd that unlocks
+# the devices as the bound slots expect: the anchor "$1" (its crypttab
+# name) measured alone, the other devices after it, and the end of the
+# initrd measured.  Until then a rollback needs the unbound slots
+entries_bind_pcr15()
+{
+	local anchor="${1:?}" initrd dir name _ opts
+
+	update_entries_for_this_system
+	while read -r initrd; do
+		[ -e "$boot_root$initrd" ] || return 1
+		# One decompression per initrd.  Listing it with `lsinitrd`
+		# takes seconds, as every entry is printed
+		dir="$(mktemp -d -p "$tmpdir")"
+		(cd "$dir" && lsinitrd --unpack "$boot_root$initrd" \
+			etc/crypttab \
+			usr/lib/systemd/system-generators/measure-pcr-generator \
+			usr/lib/systemd/system/measure-pcr-boundary.service) &> /dev/null || :
+		[ -e "$dir/usr/lib/systemd/system/measure-pcr-boundary.service" ] || return 1
+		grep -qs "anchor" "$dir/usr/lib/systemd/system-generators/measure-pcr-generator" || return 1
+		[ ! -e "$dir/etc/crypttab" ] || while read -r name _ _ opts; do
+			[[ "$name" != \#* ]] || continue
+			[[ "$opts" != *"tpm2-measure-pcr=yes"* ]] || [ "$name" = "$anchor" ] || return 1
+		done < "$dir/etc/crypttab"
+	done < <(jq -r '.[] | select(.type == "type1") | .initrd[0] // empty' < "$entryfile" | sort -u)
+}
+
+# The keyslots of the pcrlock TPM2 slots of "$1" that are not bound to
+# PCR 15 and have no PIN
+unbound_tpm2_keyslots()
+{
+	luks_header "${1:?}" | jq -r '
+		.tokens[] | select(.type == "systemd-tpm2" and (.tpm2_pcrlock // false))
+		| select(((.["tpm2-pcrs"] // []) | index(15) | not) and ((.["tpm2-pin"] // false) | not))
+		| .keyslots[]'
+}
+
 # The TPM2 slots enrolled before the anchor existed carry the pcrlock
 # policy alone, so they also unseal once the system is up.  Add next to
 # each one a slot bound to PCR 15, as `enroll_tpm2` does.  The old slot
@@ -5987,7 +6024,7 @@ rebind_tpm2_slots()
 	[ -e /var/lib/systemd/pcrlock.json ] || return 0
 	detect_tracked_devices || return 0
 
-	local anchor initrd_crypttab dev value
+	local anchor initrd_crypttab dev value slot replaced=()
 	anchor="$(measure_anchor)" || return 0
 	# Enrolled with --no-measure-pcr
 	[[ "$(status_crypttab_field "$anchor" options)" == *"tpm2-measure-pcr=yes"* ]] || return 0
@@ -6007,6 +6044,20 @@ rebind_tpm2_slots()
 			--tpm2-pcrs="15:sha256=$value" \
 			--unlock-tpm2-device=auto \
 			"$dev" < /dev/null || warn "Failed to bind a new TPM2 slot of $dev to the initrd"
+	done
+
+	# The old slots go once nothing that boots needs them
+	for dev in "${tracked_devices[@]}"; do
+		[ "$(tpm2_slot_binding "$dev")" != "bound+plain" ] || replaced+=("$dev")
+	done
+	[ "${#replaced[@]}" -gt 0 ] || return 0
+	entries_bind_pcr15 "$(status_crypttab_field "$anchor" name)" || return 0
+	for dev in "${replaced[@]}"; do
+		for slot in $(unbound_tpm2_keyslots "$dev"); do
+			info "Removing the TPM2 slot $slot of $dev, that also unseals on the running system"
+			systemd-cryptenroll --wipe-slot="$slot" --unlock-tpm2-device=auto "$dev" < /dev/null || \
+				warn "Failed to remove the TPM2 slot $slot of $dev"
+		done
 	done
 }
 
