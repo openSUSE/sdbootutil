@@ -3833,11 +3833,14 @@ declare -gA file_digests
 file_digest()
 {
 	local -n fd_digest="${2:?}"
-	local key
-	key="$1:$(stat -c "%i:%s:%y" "$1")"
-	[ -n "${file_digests["$key"]+set}" ] || read -r 'file_digests["$key"]' _ < <(sha256sum "$1")
+	local fd_key fd_sum
+	fd_key="$1:$(stat -c "%i:%s:%y" "$1")"
+	if [ -z "${file_digests["$fd_key"]+set}" ]; then
+		read -r fd_sum _ < <(sha256sum "$1")
+		file_digests["$fd_key"]="$fd_sum"
+	fi
 	# shellcheck disable=SC2034  # nameref
-	fd_digest="${file_digests["$key"]}"
+	fd_digest="${file_digests["$fd_key"]}"
 }
 
 # `systemd-pcrlock VERB [ARGS...] --pcrlock=OUT FILE`, taken from a
@@ -6102,16 +6105,18 @@ rebind_tpm2_slots()
 	[ -e /var/lib/systemd/pcrlock.json ] || return 0
 	detect_tracked_devices || return 0
 
-	local anchor dev value slot replaced=()
+	local anchor dev value slot keyslots replaced=()
 	local -A bindings
 	anchor="$(measure_anchor)" || return 0
 	# Enrolled with --no-measure-pcr
-	[[ "$(status_crypttab_field "$anchor" options)" == *"tpm2-measure-pcr=yes"* ]] || return 0
+	[[ "$(crypttab_field "$anchor" options)" == *"tpm2-measure-pcr=yes"* ]] || return 0
 
 	for dev in "${tracked_devices[@]}"; do
 		# Older enrollments measure every device, and the values
 		# below expect the anchor alone.  The next initrd uses it
-		[ "$dev" = "$anchor" ] || remove_crypttab_option "$dev" 'tpm2-measure-pcr=yes'
+		[ "$dev" = "$anchor" ] || \
+			[[ "$(crypttab_field "$dev" options)" != *"tpm2-measure-pcr=yes"* ]] || \
+			remove_crypttab_option "$dev" 'tpm2-measure-pcr=yes'
 		bindings["$dev"]="$(tpm2_slot_binding "$dev")"
 		[ "${bindings["$dev"]}" = "plain" ] || continue
 		# Read from the initrd only when a slot needs it, as this
@@ -6134,9 +6139,10 @@ rebind_tpm2_slots()
 		[ "${bindings["$dev"]}" != "bound+plain" ] || replaced+=("$dev")
 	done
 	[ "${#replaced[@]}" -gt 0 ] || return 0
-	entries_bind_pcr15 "$(status_crypttab_field "$anchor" name)" || return 0
+	entries_bind_pcr15 "$(crypttab_field "$anchor" name)" || return 0
 	for dev in "${replaced[@]}"; do
-		for slot in $(unbound_tpm2_keyslots "$dev"); do
+		mapfile -t keyslots < <(unbound_tpm2_keyslots "$dev")
+		for slot in "${keyslots[@]}"; do
 			info "Removing the TPM2 slot $slot of $dev, that also unseals on the running system"
 			systemd-cryptenroll --wipe-slot="$slot" --unlock-tpm2-device=auto "$dev" < /dev/null || \
 				warn "Failed to remove the TPM2 slot $slot of $dev"
@@ -7157,7 +7163,7 @@ status_is_dangling()
 	cut -d'|' -f1 <<<"$status_dangling" | grep -qxF -e "$id" -e "$id.conf"
 }
 
-status_crypttab_field()
+crypttab_field()
 {
 	# The crypttab line that describes this device, if any.  Which
 	# line that is, is what "is_same_device" answers, the same way
@@ -7189,8 +7195,8 @@ status_device()
 	# rest of the report.  It is the answer to "why does this device
 	# not open", so it is reported as such
 	header="$(luks_header "$dev" 2> /dev/null)" || header=""
-	name="$(status_crypttab_field "$dev" name)"
-	opts="$(status_crypttab_field "$dev" options)"
+	name="$(crypttab_field "$dev" name)"
+	opts="$(crypttab_field "$dev" options)"
 
 	local tracked=1 ignored=
 	is_tracked_device "$dev" 2> /dev/null || tracked=
