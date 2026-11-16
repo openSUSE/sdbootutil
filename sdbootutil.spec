@@ -70,7 +70,6 @@ Requires:       e2fsprogs
 Requires:       efibootmgr
 Requires:       jq
 Requires:       keyutils
-Requires:       openssl
 Requires:       qrencode
 Requires:       sed
 Requires:       (%{name}-snapper if (snapper and btrfsprogs))
