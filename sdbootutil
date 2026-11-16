@@ -1539,7 +1539,7 @@ verify_esp_files()
 	local path digest
 	local foreign=()
 	while read -r path; do
-		read -r digest _ < <(sha256sum "$path")
+		file_digest "$path" digest
 		[ "$(esp_file_digest "$path")" = "$digest" ] || foreign+=("$path")
 	done < <(sort -u "$tmpdir/esp-files")
 
@@ -3824,6 +3824,65 @@ have_pcrlock()
 	[ -e /usr/bin/systemd-pcrlock ] || [ -e /usr/lib/systemd/systemd-pcrlock ]
 }
 
+# The sha256 of the file "$1" into the variable named "$2".  Each file
+# is read once per run: the kernels and initrds are large, and both the
+# prediction and `verify_esp_files` need them.  The inode, size and
+# mtime are part of the key, so a file rewritten during the run is read
+# again
+declare -gA file_digests
+file_digest()
+{
+	local -n fd_digest="${2:?}"
+	local key
+	key="$1:$(stat -c "%i:%s:%y" "$1")"
+	[ -n "${file_digests["$key"]+set}" ] || read -r 'file_digests["$key"]' _ < <(sha256sum "$1")
+	# shellcheck disable=SC2034  # nameref
+	fd_digest="${file_digests["$key"]}"
+}
+
+# `systemd-pcrlock VERB [ARGS...] --pcrlock=OUT FILE`, taken from a
+# cache keyed by the digest of FILE when possible.  Measuring the
+# kernel and the initrd means reading them again, and that is most of
+# the time of a prediction, while they rarely change.  A measurement is
+# a property of what is measured, so the key is the content, the verb
+# and its arguments, and the active PCR banks (one digest per bank)
+pcrlock_cache=/var/lib/sdbootutil/pcrlock-cache
+pcrlock_cache_id=
+declare -gA pcrlock_cache_used
+pcrlock_file()
+{
+	local verb="${1:?}" out="${2:?}" file="${3:?}"
+	shift 3
+	local digest key bank
+
+	if [ -z "$pcrlock_cache_id" ]; then
+		for bank in /sys/class/tpm/tpm0/pcr-*; do
+			pcrlock_cache_id+="${bank##*/pcr-}+"
+		done
+	fi
+
+	file_digest "$file" digest
+	key="$verb${*:+-$*}-$pcrlock_cache_id-$digest"
+	key="${key//[^a-zA-Z0-9.=+-]/_}"
+	pcrlock_cache_used["$key"]=1
+	if [ -s "$pcrlock_cache/$key" ]; then
+		cp "$pcrlock_cache/$key" "$out"
+		return 0
+	fi
+	pcrlock "$verb" "$@" --pcrlock="$out" "$file" || return
+	mkdir -p "$pcrlock_cache"
+	cp "$out" "$pcrlock_cache/$key"
+}
+
+# Only the measurements of the files of this prediction stay cached
+prune_pcrlock_cache()
+{
+	local entry
+	for entry in "$pcrlock_cache"/*; do
+		[ -n "${pcrlock_cache_used["${entry##*/}"]+set}" ] || rm -f "$entry"
+	done
+}
+
 have_pcr_oracle()
 {
 	[ -e /usr/bin/pcr-oracle ]
@@ -4228,10 +4287,7 @@ pcrlock_cmdline_initrd()
 		lock-kernel-cmdline \
 		--pcrlock="$tmpdir/cmdline.pcrlock" \
 		"$tmpdir/cmdline"
-	pcrlock \
-		lock-kernel-initrd \
-		--pcrlock="$tmpdir/initrd.pcrlock" \
-		"$initrd" 2> /dev/null
+	pcrlock_file lock-kernel-initrd "$tmpdir/initrd.pcrlock" "$initrd" 2> /dev/null
 	mkdir -p /var/lib/pcrlock.d/710-kernel-cmdline-initrd-entry.pcrlock.d
 	jq --slurp '{"records": [.[].records[0]]}' \
 	   "$tmpdir/cmdline.pcrlock" \
@@ -4277,11 +4333,7 @@ pcrlock_grub2_bls_kernel_initrd_cmdline_initrd()
 	local n=0
 	for element in "${elements[@]}"; do
 		n=$((n+1))
-		pcrlock \
-			lock-raw \
-			--pcr=9 \
-			--pcrlock "$tmpdir/element-$n.pcrlock" \
-			"$element" 2> /dev/null
+		pcrlock_file lock-raw "$tmpdir/element-$n.pcrlock" "$element" --pcr=9 2> /dev/null
 		locks+=("$tmpdir/element-$n.pcrlock")
 	done
 
@@ -4310,19 +4362,12 @@ pcrlock_grub2_bls_kernel_initrd_cmdline_initrd()
 
 	if [ -n "$initrd_in_place" ]; then
 		n=$((n+1))
-		pcrlock \
-			lock-raw \
-			--pcr=9 \
-			--pcrlock "$tmpdir/element-$n.pcrlock" \
-			"$initrd" 2> /dev/null
+		pcrlock_file lock-raw "$tmpdir/element-$n.pcrlock" "$initrd" --pcr=9 2> /dev/null
 		locks+=("$tmpdir/element-$n.pcrlock")
 	fi
 
 	n=$((n+1))
-	pcrlock \
-		lock-kernel-initrd \
-		--pcrlock="$tmpdir/element-$n.pcrlock" \
-		"$initrd" 2> /dev/null
+	pcrlock_file lock-kernel-initrd "$tmpdir/element-$n.pcrlock" "$initrd" 2> /dev/null
 	locks+=("$tmpdir/element-$n.pcrlock")
 
 	mkdir -p /var/lib/pcrlock.d/710-grub2-bls-kernel-initrd-kernel-cmdline-initrd-entry.pcrlock.d
@@ -4423,9 +4468,8 @@ pcrlock_sdboot()
 			continue
 		}
 		track_esp_file "${boot_root}/$linux"
-		pcrlock \
-			lock-pe \
-			--pcrlock="/var/lib/pcrlock.d/650-kernel-efi-application.pcrlock.d/linux-$n.pcrlock" \
+		pcrlock_file lock-pe \
+			"/var/lib/pcrlock.d/650-kernel-efi-application.pcrlock.d/linux-$n.pcrlock" \
 			"${boot_root}/$linux"
 	done < <(jq --raw-output 'sort_by(.priority, (.kernel | map(-.))) | map(.linux) | .[]' "$entryfile")
 
@@ -4606,9 +4650,8 @@ pcrlock_grub2_bls()
 				continue
 			}
 			track_esp_file "${esp_root}/$linux"
-			pcrlock \
-				lock-pe \
-				--pcrlock="/var/lib/pcrlock.d/650-kernel-efi-application.pcrlock.d/linux-$n.pcrlock" \
+			pcrlock_file lock-pe \
+				"/var/lib/pcrlock.d/650-kernel-efi-application.pcrlock.d/linux-$n.pcrlock" \
 				"${esp_root}/$linux"
 		done < <(jq --raw-output 'sort_by(.priority, (.kernel | map(-.))) | map(.linux) | .[]' "$entryfile")
 	fi
@@ -5463,6 +5506,8 @@ generate_tpm2_predictions_pcrlock()
 	elif is_grub2_bls; then
 		pcrlock_grub2_bls
 	fi
+
+	prune_pcrlock_cache
 
 	# Nothing that sdbootutil did not install can reach the policy
 	verify_esp_files
