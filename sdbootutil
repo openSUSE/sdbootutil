@@ -205,7 +205,7 @@ cleanup()
 	# of being undone by it
 	if [ -n "$restore_crypttab" ] && ! cmp -s "$tmpdir/crypttab" /etc/crypttab; then
 		info "Restoring /etc/crypttab"
-		cp -a "$tmpdir/crypttab" /etc/crypttab
+		cp -p "$tmpdir/crypttab" /etc/crypttab
 		# In a subshell because `err` is an `exit`, and from
 		# inside the trap that would skip the rest of this
 		# function without even removing $tmpdir
@@ -3902,6 +3902,19 @@ have_pcr_oracle()
 # so neither the policy nor the predictions are affected by them
 pcrlock_noise="^(Garbage after device path end|Device path too short|Device path size does not match|Device path element too short), ignoring\.$"
 
+# Run a command without the descriptor of the run lock (`take_lock`).
+# The lock belongs to the open file, so this shell keeps holding it.
+# systemd-pcrlock runs in its own SELinux domain, that cannot write
+# the lock file, and has no use for it
+without_lock()
+{
+	if [ -n "${lock_fd:-}" ]; then
+		"$@" {lock_fd}>&-
+	else
+		"$@"
+	fi
+}
+
 pcrlock()
 {
 	dbg "systemd-pcrlock $*"
@@ -3909,12 +3922,12 @@ pcrlock()
 	[ -e "$pcrlock_cmd" ] || pcrlock_cmd="/usr/lib/systemd/systemd-pcrlock"
 
 	if [ -n "$verbose" ]; then
-		SYSTEMD_LOG_LEVEL="${SYSTEMD_LOG_LEVEL:-warning}" "$pcrlock_cmd" "$@"
+		SYSTEMD_LOG_LEVEL="${SYSTEMD_LOG_LEVEL:-warning}" without_lock "$pcrlock_cmd" "$@"
 		return
 	fi
 
 	local status=0
-	SYSTEMD_LOG_LEVEL="${SYSTEMD_LOG_LEVEL:-warning}" "$pcrlock_cmd" "$@" \
+	SYSTEMD_LOG_LEVEL="${SYSTEMD_LOG_LEVEL:-warning}" without_lock "$pcrlock_cmd" "$@" \
 		2>"$tmpdir/pcrlock.err" || status=$?
 	grep -Ev "$pcrlock_noise" "$tmpdir/pcrlock.err" >&2 || :
 	rm -f "$tmpdir/pcrlock.err"
@@ -6948,7 +6961,7 @@ enroll()
 
 	# From here on /etc/crypttab can ask for a method that no keyslot
 	# backs yet, and the trap puts it back if anything below fails
-	cp -a /etc/crypttab "$tmpdir/crypttab"
+	cp -p /etc/crypttab "$tmpdir/crypttab"
 	restore_crypttab=1
 
 	# Prepare /etc/crypttab and update initrd if required
