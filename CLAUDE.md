@@ -31,6 +31,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 3. **FDE/TPM Components:**
    - `measure-pcr-generator.sh` - Enables and orders the PCR 15 volume key measurements
    - `measure-pcr-boundary.service` - Measures the end of the initrd into PCR 15
+   - `pcrlock-socket-override.conf`, `pcrlock-service-override.conf` - Drop-ins
+     for `systemd-pcrlock.socket` / `systemd-pcrlock@.service`, so fwupd can
+     unlock the firmware measurements before an update (`sync_pcrlock_policy`)
    - `sdbootutil-enroll` - Enrollment service wrapper
    - `jeos-firstboot-enroll` - JEOS integration for first-boot enrollment
 
