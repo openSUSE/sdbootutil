@@ -407,6 +407,10 @@ helpandquit()
 		update-predictions
 		           Update TPM2 predictions
 
+		sync-pcrlock-policy
+		           Publish a policy made by the systemd-pcrlock service
+		           (called by it, for fwupd)
+
 		Secrets:
 		Each one is taken from the --ask-X parameter, the X variable
 		or the %u:sdbootutil-x keyring entry, in that order.
@@ -5409,6 +5413,76 @@ show_generated_recovery_pin()
 	keyctl_add_with_timeout "sdbootutil-recovery-pin" sgrp_pin
 }
 
+# The components that `systemd-pcrlock` removes when asked through
+# varlink (io.systemd.PCRLock.Lock), by category of the method, named
+# after the first file that it removes.  The categories are fixed by
+# systemd, not by fwupd, and tests/unit checks them against the
+# installed systemd-pcrlock
+declare -gA pcrlock_unlockable=(
+	[firmwareCode]=250-firmware-code-early
+	[firmwareConfig]=250-firmware-config-early
+	[secureBootPolicy]=240-secureboot-policy
+	[secureBootAuthority]=620-secureboot-authority
+)
+
+pcrlock_unlocked()
+{
+	grep -qsFx "$1" /run/sdbootutil/pcrlock-unlocked
+}
+
+# fwupd prepares a firmware update asking `systemd-pcrlock` to remove
+# the components that the update will change, and to make a new policy
+# without them.  This runs after every connection to its service (the
+# systemd-pcrlock@.service drop-in), and makes that policy one of ours:
+#
+#  - The service keeps the PCRs of the current policy, but the initrd
+#    imports the policy from the ESP, and the new one is only in
+#    /var/lib/systemd.
+#
+#  - The components are generated from the event log of this boot, so
+#    `update-predictions` would bring back the old measurements before
+#    the update is applied.  They stay out until the next boot (the
+#    list is in /run), when the boot service locks them again from
+#    the new event log
+sync_pcrlock_policy()
+{
+	# Only a policy that sdbootutil published
+	[ -e "${esp_root}${esp_dst}/pcrlock.json" ] || return 0
+	[ -e /var/lib/systemd/pcrlock.json ] || return 0
+
+	# A component can also be missing because sdbootutil could not
+	# create it in this boot.  Skipping it until the next boot is
+	# fine: it would fail again, as the event log stays the same
+	local component unlocked=() previous=()
+	for component in "${pcrlock_unlockable[@]}"; do
+		[ -e "/var/lib/pcrlock.d/$component.pcrlock.d/generated.pcrlock" ] || unlocked+=("$component")
+	done
+
+	# When the update fails, fwupd puts the components back and
+	# makes a policy again.  That policy uses the PCRs of the
+	# current one, so the PCRs dropped before are still missing,
+	# and the next boot would unlock without them.  Our own policy,
+	# with all the PCRs, replaces it
+	[ ! -e /run/sdbootutil/pcrlock-unlocked ] || mapfile -t previous < /run/sdbootutil/pcrlock-unlocked
+	for component in "${previous[@]}"; do
+		[[ " ${unlocked[*]} " == *" $component "* ]] || update_predictions=1
+	done
+
+	if [ "${#unlocked[@]}" -gt 0 ]; then
+		printf '%s\n' "${unlocked[@]}" > /run/sdbootutil/pcrlock-unlocked
+	else
+		rm -f /run/sdbootutil/pcrlock-unlocked
+	fi
+
+	! cmp -s /var/lib/systemd/pcrlock.json "${esp_root}${esp_dst}/pcrlock.json" || return 0
+
+	# See `generate_tpm2_predictions_pcrlock` for the credential
+	rm -f "${boot_root}/loader/credentials/pcrlock.${entry_token}.cred"
+	cp /var/lib/systemd/pcrlock.json "${esp_root}${esp_dst}" || \
+		err "Cannot copy the pcrlock policy into the ESP"
+	info "Published the pcrlock policy made by systemd-pcrlock${unlocked[*]:+, without ${unlocked[*]} until the next boot}"
+}
+
 generate_tpm2_predictions_pcrlock()
 {
 	local pcrs="$FDE_SEAL_PCR_LIST"
@@ -5421,20 +5495,31 @@ generate_tpm2_predictions_pcrlock()
 	clean_pcrlock_d
 	rm -f "$tmpdir/esp-files"
 
-	shift_component 250-firmware-code-early
-	shift_component 550-firmware-code-late
-	pcrlock_lock lock-firmware-code
+	# A component that fwupd unlocked before a firmware update (see
+	# `sync_pcrlock_policy`) stays out until the next boot
+	if ! pcrlock_unlocked 250-firmware-code-early; then
+		shift_component 250-firmware-code-early
+		shift_component 550-firmware-code-late
+		pcrlock_lock lock-firmware-code
+	fi
 
-	shift_component 250-firmware-config-early
-	shift_component 550-firmware-config-late
-	pcrlock_lock lock-firmware-config
+	if ! pcrlock_unlocked 250-firmware-config-early; then
+		shift_component 250-firmware-config-early
+		shift_component 550-firmware-config-late
+		pcrlock_lock lock-firmware-config
+	fi
 
-	shift_component 240-secureboot-policy
-	pcrlock_lock lock-secureboot-policy
-	shift_component 620-secureboot-authority
-	pcrlock_lock lock-secureboot-authority
-	# Generates 620-secureboot-authority when the verb cannot
-	pcrlock_secureboot_sbatlevel
+	if ! pcrlock_unlocked 240-secureboot-policy; then
+		shift_component 240-secureboot-policy
+		pcrlock_lock lock-secureboot-policy
+	fi
+
+	if ! pcrlock_unlocked 620-secureboot-authority; then
+		shift_component 620-secureboot-authority
+		pcrlock_lock lock-secureboot-authority
+		# Generates 620-secureboot-authority when the verb cannot
+		pcrlock_secureboot_sbatlevel
+	fi
 
 	# Uses / by default, but firmware measures GPT of the disk a
 	# boot application was loaded from, which is effectively the
@@ -8067,6 +8152,7 @@ define_commands() {
 		[enroll]=""
 		[unenroll]=""
 		[update-predictions]=""
+		[sync-pcrlock-policy]=""
 		[bootloader]=""
 	)
 }
@@ -8461,6 +8547,8 @@ case "$1" in
 		unenroll ;;
 	update-predictions)
 		update_predictions=1 ;;
+	sync-pcrlock-policy)
+		sync_pcrlock_policy ;;
 	*)
 		helpandquit ;;
 esac

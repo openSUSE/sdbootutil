@@ -176,6 +176,12 @@ grep -q '^version="%{version}"$' %{buildroot}%{_bindir}/%{name}
 install -D -m 644 %{name}-update-predictions.service \
 	%{buildroot}%{_unitdir}/%{name}-update-predictions.service
 
+# fwupd unlocks the firmware measurements through systemd-pcrlock
+install -D -m 644 pcrlock-socket-override.conf \
+	%{buildroot}%{_unitdir}/systemd-pcrlock.socket.d/sdbootutil-override.conf
+install -D -m 644 pcrlock-service-override.conf \
+	%{buildroot}%{_unitdir}/systemd-pcrlock@.service.d/sdbootutil-override.conf
+
 # Enrollment service
 install -m 755 %{name}-enroll %{buildroot}%{_bindir}/%{name}-enroll
 install -D -m 644 %{name}-enroll.service %{buildroot}/%{_unitdir}/%{name}-enroll.service
@@ -280,6 +286,10 @@ install -d -m 755 %{buildroot}%{_prefix}/lib/%{name}/entries.d
 %license LICENSE
 %{_bindir}/%{name}
 %{_unitdir}/%{name}-update-predictions.service
+%dir %{_unitdir}/systemd-pcrlock.socket.d
+%{_unitdir}/systemd-pcrlock.socket.d/sdbootutil-override.conf
+%dir %{_unitdir}/systemd-pcrlock@.service.d
+%{_unitdir}/systemd-pcrlock@.service.d/sdbootutil-override.conf
 %dir %{_sharedstatedir}/%{name}
 %{_tmpfilesdir}/%{name}.conf
 %dir %{_prefix}/lib/%{name}

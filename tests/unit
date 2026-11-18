@@ -1064,6 +1064,32 @@ t_p15_status()
 	says "nothing measured" "$out" "NOTHING was measured"
 }
 
+# pcrlock_unlockable has to name every category that systemd-pcrlock
+# can remove through varlink (fwupd uses them before a firmware update),
+# and the file that each one removes.  A category added upstream would
+# be locked again by `update-predictions` before the update is applied
+t_pcrlock_unlockable()
+{
+	local pcrlock=/usr/lib/systemd/systemd-pcrlock
+	command -v varlinkctl > /dev/null || skip "varlinkctl is not installed"
+	[ -x "$pcrlock" ] || skip "$pcrlock is not installed"
+
+	local categories
+	categories="$(varlinkctl introspect "$pcrlock" io.systemd.PCRLock 2> /dev/null | \
+		sed -n '/^type LockCategory(/,/^)/{/^\t[a-zA-Z]/{s/[\t,]//g;p}}' | sort | tr '\n' ' ')"
+	[ -n "$categories" ] || skip "systemd-pcrlock has no Lock method (systemd < 262)"
+
+	load
+	# shellcheck disable=SC2154  # set by the sourced library
+	is "categories" "$categories" "$(printf '%s\n' "${!pcrlock_unlockable[@]}" | sort | tr '\n' ' ')"
+
+	local category
+	for category in "${!pcrlock_unlockable[@]}"; do
+		grep -qaF "/var/lib/pcrlock.d/${pcrlock_unlockable[$category]}.pcrlock.d/generated.pcrlock" "$pcrlock" || \
+			fail "$category: systemd-pcrlock does not remove ${pcrlock_unlockable[$category]}"
+	done
+}
+
 ####### the runner #######
 
 run_case()
@@ -1078,6 +1104,9 @@ run_case()
 	# The case runs apart: it sources the library, it defines
 	# secrets in its environment and it can replace a function
 	( set +e; case_failed=; "$fn"; [ -z "$case_failed" ] ) || rc=$?
+
+	# `skip` inside a case skips only that case
+	[ "$rc" != 77 ] || { echo "skip $desc"; return 0; }
 
 	total=$((total + 1))
 	if [ "$rc" = 0 ]; then
@@ -1148,6 +1177,7 @@ done <<-'EOF'
 	t_shift                     shift_component and restore_shifts keep the current boot only when it differs
 	t_entries_bind              entries_bind_pcr15 checks the measurement layout and the devices of every initrd
 	t_p15_status                status_pcr15 reports the measurements of this boot
+	t_pcrlock_unlockable        pcrlock_unlockable names every category that systemd-pcrlock removes via varlink
 EOF
 
 echo
