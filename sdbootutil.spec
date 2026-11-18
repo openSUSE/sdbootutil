@@ -291,7 +291,7 @@ install -d -m 755 %{buildroot}%{_prefix}/lib/%{name}/entries.d
 %dir %{_unitdir}/systemd-pcrlock@.service.d
 %{_unitdir}/systemd-pcrlock@.service.d/sdbootutil-override.conf
 %dir %{_sharedstatedir}/%{name}
-%ghost %dir %{_rundir}/%{name}
+%ghost %attr(0700,root,root) %dir %{_rundir}/%{name}
 %{_tmpfilesdir}/%{name}.conf
 %dir %{_prefix}/lib/%{name}
 %dir %{_prefix}/lib/%{name}/entries.d
