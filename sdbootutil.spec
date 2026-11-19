@@ -61,6 +61,7 @@ Summary:        Bootctl wrapper for BLS boot loaders
 License:        MIT
 URL:            https://github.com/openSUSE/sdbootutil
 Source:         %{name}-%{version}.tar
+BuildRequires:  rubygem(asciidoctor)
 BuildRequires:  systemd-rpm-macros
 Requires:       %{name}-dracut-measure-pcr
 # 2.4.0 for --disable-external-tokens, used to validate a password
@@ -166,9 +167,11 @@ Dracut module from sdbootutil to measure PCR 15 in non-UKIs systems
 %autosetup -p1
 
 %build
+asciidoctor -b manpage -a version=%{version} sdbootutil_man.adoc -o sdbootutil.8
 
 %install
 install -D -m 755 %{name} %{buildroot}%{_bindir}/%{name}
+install -D -m 644 %{name}.8 %{buildroot}%{_mandir}/man8/%{name}.8
 sed -i 's/^version=git$/version="%{version}"/' %{buildroot}%{_bindir}/%{name}
 grep -q '^version="%{version}"$' %{buildroot}%{_bindir}/%{name}
 
@@ -284,7 +287,9 @@ install -d -m 755 %{buildroot}%{_prefix}/lib/%{name}/entries.d
 
 %files
 %license LICENSE
+%doc README.md
 %{_bindir}/%{name}
+%{_mandir}/man8/%{name}.8%{?ext_man}
 %{_unitdir}/%{name}-update-predictions.service
 %dir %{_unitdir}/systemd-pcrlock.socket.d
 %{_unitdir}/systemd-pcrlock.socket.d/sdbootutil-override.conf

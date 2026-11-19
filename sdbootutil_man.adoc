@@ -1,0 +1,430 @@
+= sdbootutil(8)
+:doctype: manpage
+:manmanual: System Administration
+:mansource: sdbootutil {version}
+
+== Name
+
+sdbootutil - manage systemd-boot and grub2-bls, boot entries and disk encryption
+
+== Synopsis
+
+*sdbootutil* [_OPTIONS_] _COMMAND_ [_ARGUMENTS_]
+
+== Description
+
+*sdbootutil* manages the boot loader of systems that use the Boot
+Loader Specification (BLS): *systemd-boot* or *grub2-bls*.  It installs
+the boot loader in the EFI System Partition (ESP), adds a boot entry
+for each kernel, and sets up full disk encryption (FDE) with the TPM2,
+FIDO2 keys, passwords and recovery keys.
+
+It is made for btrfs systems managed by snapper.  Each snapshot gets
+its own boot entries, so an older snapshot can be booted from the
+menu.  It also works on systems without snapshots.
+
+Most of the time other tools call it: the kernel packages, the snapper
+plugin, transactional-update, the installer, and the
+*sdbootutil-update-predictions.service*.
+
+Many commands take an optional _SNAPSHOT_ number.  Without it, the
+command uses the snapshot that is running (or the default one with
+*--default-snapshot*).  After *transactional-update apply* the running
+system mixes two snapshots, so the commands that change the ESP need a
+snapshot number or *--default-snapshot*.
+
+== Boot loader commands
+
+*install*::
+Install the boot loader in the ESP.  With *--secure-boot*, install
+shim too.
+
+*needs-update*::
+Exit with 0 if the boot loader or shim in the ESP is older than the one
+of the system.
+
+*update*::
+Update the boot loader and shim in the ESP when the system has a newer
+version.  With *--sync*, also go back to an older version, so the ESP
+always has the version of the system.
+
+*force-update*::
+Update the boot loader in any case.
+
+*bootloader* [_SNAPSHOT_]::
+Print the boot loader in use.
+
+*is-installed*::
+Exit with 0 if sdbootutil installed the boot loader.
+
+*print-loader-path*::
+Print the path of the boot loader that started the system.
+
+*set-timeout* _SECONDS_|*menu-disabled*|*menu-hidden*|*menu-force*::
+Set how long the boot menu waits.
+
+*get-timeout*::
+Print how long the boot menu waits, in seconds.
+
+== Boot entry commands
+
+*add-kernel* _VERSION_ [_SNAPSHOT_]::
+Add the boot entry of one kernel.
+
+*add-all-kernels* [_SNAPSHOT_]::
+Add the boot entries of all the kernels of the snapshot.
+
+*mkinitrd* [_SNAPSHOT_]::
+Like *add-all-kernels*, but always build new initrds.
+
+*remove-kernel* _VERSION_ [_SNAPSHOT_]::
+Remove the boot entry of one kernel.
+
+*remove-all-kernels* [_SNAPSHOT_]::
+Remove all the boot entries of the snapshot.
+
+*cleanup* [_SNAPSHOT_]::
+Remove the entries whose kernel is gone.  With *--repair*, copy back
+the kernels and initrds that an entry needs and the ESP does not have.
+
+*list-kernels* [_SNAPSHOT_]::
+List the kernels of the snapshot.
+
+*list-entries* [_SNAPSHOT_]::
+List the boot entries of the snapshot.  In a terminal, *+* marks the
+default entry, *-* the entry that started the system, and *** both.
+
+*list-snapshots*::
+List the snapshots, with the same marks as *list-entries*.
+
+*show-entry* _VERSION_ [_SNAPSHOT_]::
+Show the fields of the entry of one kernel.
+
+*update-entry* _VERSION_ [_SNAPSHOT_]::
+Write the kernel command line of _/etc/kernel/cmdline_ into one entry.
+
+*update-all-entries* [_SNAPSHOT_]::
+Write the kernel command line of _/etc/kernel/cmdline_ into all the
+entries of the snapshot.
+
+*set-default-snapshot* [_SNAPSHOT_]::
+Boot this snapshot next time, and add its kernels if they are missing.
+
+*is-bootable* [_SNAPSHOT_]::
+Exit with 0 if the snapshot has at least one boot entry.
+
+*set-default* _ID_::
+Make the entry _ID_ the default one.
+
+*get-default*::
+Print the default entry.
+
+== Disk encryption commands
+
+*enroll*::
+Add a way to open the encrypted devices, chosen with *--method*.  By
+default all the LUKS2 devices of _/etc/crypttab_ are used.
+
+*unenroll*::
+Remove a way to open the encrypted devices, chosen with *--method*.
+
+*update-predictions*::
+Predict the TPM2 measurements of the next boot, and update the TPM2
+policy.  The kernel packages and the snapper plugin do this for you.
+
+*list-devices*::
+List the encrypted devices that sdbootutil manages.
+
+*sync-pcrlock-policy*::
+Copy to the ESP a policy that the *systemd-pcrlock* service made for
+fwupd.  The service calls it; you do not need to.
+
+== Other commands
+
+*status*::
+Show what the system boots and whether the TPM2 will open the disks.
+It only reads and never prints a secret, so you can add its output to
+a bug report.  With *--full*, show every detail.
+
+== Options
+
+*--esp-path* _PATH_:: Use this path for the ESP.
+*--arch* _ARCH_:: Use this architecture.
+*--entry-token* _TOKEN_:: Use this entry token (the name of the entry directory in the ESP).
+*--image* _FILE_:: Use this name for the kernel file.
+*--all*:: List the entries of all systems, not only this one.
+*--entry-keys* _KEYS_:: Comma separated list of entry fields to show.
+*--no-variables*:: Do not change the EFI variables.
+*--no-reuse-initrd*:: Always build a new initrd.
+*--no-random-seed*:: Do not update the random seed in the ESP.
+*--sync*:: With *update*, also install an older boot loader.
+*--portable*, *--removable*:: Install the boot loader for a removable disk.
+*--secure-boot*:: With *install*, install shim too.
+*--only-default*:: List only the default entry.
+*--default-snapshot*:: Use the default snapshot, not the running one.
+*--method* _METHOD_:: The way to open the disks: *tpm2*, *tpm2+pin*, *fido2*, *password* or *recovery-key*.
+*--devices* _DEVICES_:: Comma separated list of devices to enroll or unenroll.
+*--pcr* _PCRS_:: Comma separated list of PCRs for the TPM2 policy.  PCRs that cannot be predicted are left out.
+*--strict*:: Use all the PCRs of *--pcr*, or nothing.
+*--no-measure-pcr*:: Do not bind the TPM2 slots to the initrd (PCR 15).  Then the TPM2 can also open the disks after boot.
+*--ask-key*, *--ask-pin*, *--ask-recovery-pin*, *--ask-pw*, *--ask-current-pw*:: Ask for a secret.  See *Secrets*.
+*--rootfs* _KIND_:: With *install*, how the command line names the root: *uuid*, *partuuid*, *label*, *partlabel* or *device*.
+*--rootfs-data* _DATA_:: Extra value for *--rootfs*.
+*--esp-free-space* _PERCENT_:: Free space to keep in the ESP.
+*--devicetree-source* _PATH_:: Device tree file to copy to the ESP and add to the entries.
+*--force*:: Make a new TPM2 policy even if nothing changed, work inside a transaction, and accept ESP files that sdbootutil did not install.
+*--disable-predictions*:: Do not update the TPM2 predictions.
+*--full*:: With *status*, show every detail.
+*--repair*:: With *cleanup*, copy back the missing kernels and initrds.
+*-v*, *--verbose*:: Print more messages.
+*--start-trace-code*, *--stop-trace-code*:: Start or stop writing a trace to _/var/log/sdbootutil.log_.  The trace can contain secrets: read it before you share it.
+*-h*, *--help*:: Show the help.
+*--version*:: Show the version.
+
+== Secrets
+
+Some commands need a secret.  Each secret comes from the *--ask-*
+option, from an environment variable, or from an entry in the user
+keyring (_%u_), in this order.  The keyring is the best place: its
+entries expire.
+
+[cols="1,1,1,1",options="header"]
+|===
+| Secret | Option | Variable | Keyring entry
+| Current password | --ask-current-pw | CURRENT_PW | cryptenroll
+| Recovery PIN | --ask-recovery-pin | RECOVERY_PIN | sdbootutil-recovery-pin
+| Recovery key | --ask-key | KEY | sdbootutil-key
+| Password | --ask-pw | PW | sdbootutil-pw
+| TPM2 PIN | --ask-pin | PIN | sdbootutil-tpm2-pin
+|===
+
+The recovery PIN lets sdbootutil update the TPM2 policy when the
+measurements do not match any more.  It is set by the first
+enrollment and cannot be changed.  If you do not give the recovery key
+or the recovery PIN, sdbootutil makes them and prints them once.  It
+is better to choose the recovery PIN yourself with *--ask-recovery-pin*
+(see *Troubleshooting*).  Keep it in a safe place.
+
+== Configuration
+
+_/etc/sysconfig/bootloader_::
+*LOADER_TYPE*:::: *systemd-boot* or *grub2-bls*.
+*SECURE_BOOT*:::: *yes* installs shim.
+*UPDATE_NVRAM*:::: *no* keeps sdbootutil out of the EFI variables.
+
+_/etc/default/sdbootutil_::
+sdbootutil makes this file the first time it installs the boot loader.
+It also reads _/usr/etc/default/sdbootutil_ and, for old systems,
+_/etc/default/fde-tools_ and _/etc/sysconfig/fde-tools_.
+*FDE_SEAL_PCR_LIST*:::: The PCRs of the TPM2 policy, for example *"0,2,4,7,9"*.  In virtual machines PCR 0 and 2 are left out.
+*ROOTFS*:::: How the command line names the root: *uuid*, *partuuid*, *label*, *partlabel* or *device*.
+*ESP_FREE_SPACE*:::: Free space to keep in the ESP, in percent (default 10).
+*DEVICETREE_SOURCE*:::: Device tree file to add to the entries.
+*LAST_WORKING_SNAPSHOTS*:::: Extra snapshots to keep in the TPM2 predictions.
+
+_/etc/crypttab_::
+The encrypted devices.  A device with the option *x-sdbootutil.ignore*
+is left alone.
+
+_/etc/kernel/cmdline_::
+The kernel command line of the boot entries.  If it is missing,
+_/usr/lib/kernel/cmdline_ is used.  Files in _/usr/lib/kernel/cmdline.d/_
+and _/etc/kernel/cmdline.d/_ add more options.
+
+_/etc/kernel/entry-token_::
+The name of the directory of this system in the ESP (the entry token).
+
+_/etc/kernel/tries_::
+A number.  New entries get this many boot tries (boot counting).
+
+_/usr/lib/sdbootutil/entries.d/_, _/etc/sdbootutil/entries.d/_::
+Extra boot entries from other packages.  A file in _/etc_ replaces the
+one with the same name in _/usr/lib_.
+
+== Environment
+
+*SYSTEMD_COLORS*:: Set to *0* to print without colors.
+*SYSTEMD_ESP_PATH*:: The path of the ESP, like *--esp-path*.
+*CURRENT_PW*, *KEY*, *PW*, *PIN*, *RECOVERY_PIN*:: Secrets, see *Secrets*.
+
+== Who calls sdbootutil
+
+*Kernel packages*:: Add and remove the entries of a kernel.
+*Snapper plugin* (_10-sdbootutil.snapper_):: Add, update and remove entries when a snapshot is made, removed or set as default.
+*sdbootutil-update-predictions.service*:: Updates the TPM2 predictions at every boot and after the changes above.
+*sdbootutil-enroll.service*:: Enrolls the encrypted devices at the first boot, with the secrets that the installer left.
+*systemd-pcrlock@.service*:: Calls *sync-pcrlock-policy* after fwupd changed the policy.
+
+== Examples
+
+Show the boot status:
+
+----
+sdbootutil status
+----
+
+Install systemd-boot with shim, and add the entries of the running
+snapshot:
+
+----
+sdbootutil install --secure-boot
+sdbootutil add-all-kernels
+----
+
+Boot snapshot 42 next time:
+
+----
+sdbootutil set-default-snapshot 42
+----
+
+Change the kernel command line of all entries:
+
+----
+echo "quiet splash" >> /etc/kernel/cmdline
+sdbootutil update-all-entries
+----
+
+Open the disks with the TPM2 and a PIN.  sdbootutil asks for the PIN
+that you will type at every boot, and for the recovery PIN:
+
+----
+sdbootutil enroll --method tpm2+pin --ask-pin
+----
+
+Add a password to one device.  sdbootutil asks for a password that
+already opens the device when it needs one:
+
+----
+PW=secret sdbootutil enroll --method password --devices /dev/vda3
+----
+
+Remove the TPM2 from all devices:
+
+----
+sdbootutil unenroll --method tpm2
+----
+
+== Troubleshooting
+
+=== The system asks for the password
+
+The TPM2 opens the disk only when the measurements of this boot (the
+PCRs) match the TPM2 policy.  When they do not match, the password is
+asked.  Usual reasons:
+
+* A firmware (BIOS/UEFI) update.
+* Secure Boot was turned on or off, or its keys changed (for example a
+  dbx update).
+* The boot loader, shim, kernel or initrd changed, and the predictions
+  were not updated.
+* You booted an old snapshot that is not part of the policy.
+* You edited the kernel command line in the boot menu.
+* The TPM2 was cleared, or is in lockout.
+
+After you type the password, first look at the status.  It shows which
+PCRs are part of the policy, and if each one matches this boot:
+
+----
+sdbootutil status
+sdbootutil status --full
+----
+
+The log of this boot tells why the TPM2 failed.  The message "None of
+the alternative values" means that a PCR did not match the policy:
+
+----
+journalctl -b -o cat | grep -iE "tpm2|pcr"
+----
+
+At every boot, *sdbootutil-update-predictions.service* updates the
+predictions from the measurements of that boot.  If the status still
+shows a PCR that does not match, sdbootutil cannot replace the policy
+by itself: use the recovery PIN, as explained below.
+
+=== Update the policy with the recovery PIN
+
+sdbootutil can update the TPM2 policy alone only while the old policy
+still matches the running system.  When it does not, it needs the
+recovery PIN.  Give it in the keyring, and update:
+
+----
+echo -n "<recovery PIN>" | keyctl padd user sdbootutil-recovery-pin @u
+sdbootutil update-predictions
+----
+
+Or ask for it on the terminal:
+
+----
+sdbootutil --ask-recovery-pin update-predictions
+----
+
+Reboot, and the TPM2 opens the disk again.
+
+=== Choose your recovery PIN when you enroll
+
+Without the recovery PIN, a policy that stops matching can never be
+updated, and the only way back is a new enrollment.  If you do not give
+one, sdbootutil makes a random PIN and prints it only once, and it is
+easy to lose.
+
+So choose the recovery PIN yourself when you enroll.  sdbootutil asks
+for it two times:
+
+----
+sdbootutil enroll --method tpm2 --ask-recovery-pin
+----
+
+Without a terminal, give it in the *RECOVERY_PIN* variable or in the
+*sdbootutil-recovery-pin* keyring entry.  Keep it in a safe place.  It
+cannot be changed later, only with a new enrollment.
+
+=== Enroll again when nothing works
+
+Remove the TPM2 from all the devices, and enroll it again.  This makes
+a new policy, so choose a new recovery PIN too.  sdbootutil asks for a
+password that opens the devices (or takes it from *CURRENT_PW* or the
+keyring):
+
+----
+sdbootutil unenroll --method tpm2
+sdbootutil enroll --method tpm2 --ask-recovery-pin
+----
+
+=== Logs for a bug report
+
+The output of *status* has no secrets, so you can add it to the report:
+
+----
+sdbootutil status --full > status.txt
+----
+
+The log of the boot that asked for the password:
+
+----
+journalctl -b > boot.txt
+----
+
+A trace of the command that fails.  Stop the trace after, and read it
+before you share it, as it can contain secrets:
+
+----
+sdbootutil --start-trace-code update-predictions
+sdbootutil --stop-trace-code
+cp /var/log/sdbootutil.log .
+----
+
+Report the bug at https://bugzilla.opensuse.org (openSUSE Tumbleweed or
+your openSUSE version), or at
+https://github.com/openSUSE/sdbootutil/issues.
+
+== Files
+
+_/var/lib/sdbootutil/_:: State: the files installed in the ESP and the hashes of the last TPM2 policy.
+_/var/lib/pcrlock.d/_:: The TPM2 measurements that *systemd-pcrlock* uses.
+_/var/lib/systemd/pcrlock.json_:: The TPM2 policy.  A copy goes to the ESP.
+_/run/sdbootutil/_:: Lock file and state of the running boot.
+_/var/log/sdbootutil.log_:: The trace, only when *--start-trace-code* was used.
+
+== See also
+
+*bootctl*(1), *systemd-boot*(7), *systemd-pcrlock*(8), *systemd-cryptenroll*(1), *crypttab*(5), *snapper*(8)

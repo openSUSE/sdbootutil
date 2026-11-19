@@ -288,6 +288,8 @@ Functions can use `install_with_rollback()` to backup files before modification.
 
 ## Related Documentation
 
+- **README.md** - Features and examples for users
+- **sdbootutil_man.adoc** - The sdbootutil(8) manual page (asciidoctor, built by the spec); update it with every user-visible change
 - **ARCHITECTURE.md** - Detailed explanation of bootloader spec implementation with snapshots
 - **sdbootutil.spec** - RPM packaging, subpackages, dependencies
 - See upstream: [Boot Loader Specification](https://uapi-group.org/specifications/specs/boot_loader_specification/)
