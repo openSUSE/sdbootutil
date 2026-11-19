@@ -656,6 +656,21 @@ is_grub2_bls()
 	[ "$(bootloader_type "${1-$root_snapshot}")" = "grub2-bls" ]
 }
 
+# UKI, from /etc/sysconfig/bootloader, selects the kind of boot entry:
+# "no", empty or unset for a Type #1 entry (kernel and initrd), "yes"
+# for the UKI of the kernel package, signed by the distribution, and
+# "local" for a UKI built here, signed with the local key when
+# SECURE_BOOT is "yes".  Only systemd-boot boots them
+assert_uki_config()
+{
+	case "${UKI:-}" in
+		""|no) return 0 ;;
+		yes|local) ;;
+		*) err "/etc/sysconfig/bootloader has UKI=\"$UKI\", but only \"yes\", \"no\" or \"local\" are recognized" ;;
+	esac
+	is_sdboot || err "UKI=\"$UKI\" in /etc/sysconfig/bootloader needs systemd-boot (LOADER_TYPE=\"systemd-boot\")"
+}
+
 reset_rollback()
 {
 	for i in "${rollback[@]}"; do
@@ -7926,6 +7941,7 @@ status_config()
 		LOADER_TYPE - the boot loader to manage
 		SECURE_BOOT - "yes" installs the shim, whatever the firmware does
 		UPDATE_NVRAM - "no" keeps sdbootutil out of the EFI variables
+		UKI - "yes" (distribution) or "local" UKIs instead of Type #1 entries
 		LAST_WORKING_SNAPSHOTS - extra snapshots to keep in the prediction
 	EOF
 }
@@ -8549,6 +8565,8 @@ if [ "$1" != "install" ] && [ ! -d "${esp_root}${esp_dst}" ]; then
 fi
 
 dbg_var "esp_dst"
+
+assert_uki_config
 
 if [ "$SECURE_BOOT" = "yes" ] || is_shim_installed; then
 	arg_secure_boot=1

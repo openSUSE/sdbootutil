@@ -1589,6 +1589,33 @@ t_p15_status()
 	says "nothing measured" "$out" "NOTHING was measured"
 }
 
+# UKI from /etc/sysconfig/bootloader: empty, "no", "yes" or "local",
+# and the last two only with systemd-boot
+# shellcheck disable=SC2034  # UKI is read by the sourced library
+t_uki_config()
+{
+	load
+	local loader=systemd-boot
+	# shellcheck disable=SC2329  # called by the sourced library
+	bootloader_type() { echo "$loader"; }
+
+	local UKI value
+	for value in "" no yes local; do
+		UKI="$value"
+		( assert_uki_config ) > /dev/null 2>&1 || fail "UKI=\"$value\" was refused"
+	done
+	UKI=distribution
+	( assert_uki_config ) > /dev/null 2>&1 && fail "UKI=\"distribution\" was accepted"
+	loader=grub2-bls
+	for value in yes local; do
+		UKI="$value"
+		( assert_uki_config ) > /dev/null 2>&1 && fail "UKI=\"$value\" with grub2-bls was accepted"
+	done
+	UKI=no
+	( assert_uki_config ) > /dev/null 2>&1 || fail "UKI=\"no\" with grub2-bls was refused"
+	return 0
+}
+
 # pcrlock_unlockable has to name every category that systemd-pcrlock
 # can remove through varlink (fwupd uses them before a firmware update),
 # and the file that each one removes.  A category added upstream would
@@ -1728,6 +1755,7 @@ done <<-'EOF'
 	t_shift_limit               restore_shifts makes room for the current boot in a full component
 	t_entries_bind              entries_bind_pcr15 checks the measurement layout and the devices of every initrd
 	t_p15_status                status_pcr15 reports the measurements of this boot
+	t_uki_config                assert_uki_config accepts empty, no, yes or local, the last two only with systemd-boot
 	t_pcrlock_unlockable        pcrlock_unlockable names every category that systemd-pcrlock removes via varlink
 EOF
 
