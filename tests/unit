@@ -997,6 +997,32 @@ t_shift()
 	is "no match" "generated.pcrlock" "$(ls "$d")"
 }
 
+# restore_shifts keeps the current boot in a full component by removing
+# its last variation, so the PCR stays inside the PolicyOR limit
+t_shift_limit()
+{
+	pcr15_setup
+	# shellcheck disable=SC2034  # read by the sourced library
+	local tmpdir="$workdir/tmp" c=710-kernel-cmdline-initrd-entry n
+	local d="/var/lib/pcrlock.d/$c.pcrlock.d"
+	mkdir -p "$tmpdir/shift/$c.pcrlock.d" "$d"
+
+	for n in 1 2 3 4; do
+		echo "$n" > "$d/cmdline-initrd-$n.pcrlock"
+	done
+	echo "boot" > "$tmpdir/shift/$c.pcrlock.d/shift-cmdline-initrd-1.pcrlock"
+	restore_shifts
+	is "full: the last goes" "cmdline-initrd-1.pcrlock cmdline-initrd-2.pcrlock cmdline-initrd-3.pcrlock shift-cmdline-initrd-1.pcrlock" "$(cd "$d" && echo *)"
+
+	rm -f "$d"/*
+	echo 1 > "$d/cmdline-initrd-1.pcrlock"
+	mkdir -p "$tmpdir/shift/$c.pcrlock.d"
+	echo "boot" > "$tmpdir/shift/$c.pcrlock.d/shift-cmdline-initrd-1.pcrlock"
+	restore_shifts
+	is "room: nothing goes" "cmdline-initrd-1.pcrlock shift-cmdline-initrd-1.pcrlock" "$(cd "$d" && echo *)"
+	rm -rf "$d"
+}
+
 # entries_bind_pcr15 needs every initrd to measure the anchor alone,
 # order the rest after it, measure the end of the initrd, and unlock
 # the same devices as the initrd of the default entry
@@ -1175,6 +1201,7 @@ done <<-'EOF'
 	t_p15_slot_value            pcr15_slot_value binds the anchor to zero, the rest in or after the initrd
 	t_p15_binding               tpm2_slot_binding and unbound_tpm2_keyslots classify the TPM2 slots
 	t_shift                     shift_component and restore_shifts keep the current boot only when it differs
+	t_shift_limit               restore_shifts makes room for the current boot in a full component
 	t_entries_bind              entries_bind_pcr15 checks the measurement layout and the devices of every initrd
 	t_p15_status                status_pcr15 reports the measurements of this boot
 	t_pcrlock_unlockable        pcrlock_unlockable names every category that systemd-pcrlock removes via varlink

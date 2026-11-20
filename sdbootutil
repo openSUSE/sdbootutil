@@ -4176,6 +4176,16 @@ shift_component()
 	rm -f /var/lib/pcrlock.d/"$component".pcrlock.d/*.pcrlock
 }
 
+# The most variations of the components that sdbootutil limits, so the
+# PCRs that they measure stay inside the PolicyOR limit (see
+# `get_final_pcrs`).  `restore_shifts` keeps the same limit
+declare -gA variation_limit=(
+	[650-kernel-efi-application]=4
+	[710-kernel-cmdline-initrd-entry]=4
+	[650-grub2-bls-entry-cmdline]=8
+	[710-grub2-bls-kernel-initrd-kernel-cmdline-initrd-entry]=2
+)
+
 # The variation of the current boot, set aside by `shift_component`,
 # goes back as "shift-*" only when none of the new variations is the
 # same one.  Then the next boot measures something else, and the policy
@@ -4183,13 +4193,28 @@ shift_component()
 # since the boot"
 restore_shifts()
 {
-	local shifted dir variation
+	local shifted dir variation component limit
 	for shifted in "$tmpdir"/shift/*.pcrlock.d/*.pcrlock; do
 		dir="/var/lib/pcrlock.d/${shifted#"$tmpdir/shift/"}"
 		dir="${dir%/*}"
 		for variation in "$dir"/*.pcrlock; do
 			! cmp -s "$shifted" "$variation" || continue 2
 		done
+
+		# A full component makes room for the current boot: the
+		# last variation goes, as the generators number them by
+		# priority.  Otherwise the PCR is dropped from the policy
+		component="${dir##*/}"
+		limit="${variation_limit["${component%.pcrlock.d}"]:-}"
+		if [ -n "$limit" ]; then
+			local variations=("$dir"/*.pcrlock)
+			if [ "${#variations[@]}" -ge "$limit" ]; then
+				variation="$(printf '%s\n' "${variations[@]}" | sort -V | tail -n 1)"
+				dbg "Removing ${variation##*/} from $dir, to keep the current boot"
+				rm -f "$variation"
+			fi
+		fi
+
 		dbg "Keeping ${shifted##*/} for $dir, the current boot differs from the prediction"
 		mkdir -p "$dir"
 		cp "$shifted" "$dir/"
@@ -4479,8 +4504,8 @@ pcrlock_sdboot()
 		kernels["$linux"]=1
 		n=$((n+1))
 		# Limit to 4 because of the separator
-		[ "$n" -le 4 ] || {
-			info "More than 4 variations for 650-kernel-efi-application"
+		[ "$n" -le "${variation_limit[650-kernel-efi-application]}" ] || {
+			info "Too many variations for 650-kernel-efi-application"
 			continue
 		}
 		track_esp_file "${boot_root}/$linux"
@@ -4510,8 +4535,8 @@ pcrlock_sdboot()
 		# variations predict 8 values, 5 predict 10 and PCR 9 is
 		# dropped, losing the constraint over the kernel command
 		# line.  See bsc#1274948
-		[ "$n" -le 4 ] || {
-			info "More than 4 variations for 710-kernel-cmdline-initrd-entry"
+		[ "$n" -le "${variation_limit[710-kernel-cmdline-initrd-entry]}" ] || {
+			info "Too many variations for 710-kernel-cmdline-initrd-entry"
 			continue
 		}
 		# The command line is the "options" line of the entry
@@ -4537,8 +4562,8 @@ pcrlock_sdboot()
 		while read -r cmdline; do
 			read -r initrd
 			n=$((n+1))
-			[ "$n" -le 4 ] || {
-				info "More than 4 variations for 710-kernel-cmdline-initrd-entry (initial)"
+			[ "$n" -le "${variation_limit[710-kernel-cmdline-initrd-entry]}" ] || {
+				info "Too many variations for 710-kernel-cmdline-initrd-entry (initial)"
 				continue
 			}
 			pcrlock_cmdline_initrd "initrd=$cmdline" "${tmpdir}$initrd" "0-$n"
@@ -4605,8 +4630,8 @@ pcrlock_grub2_bls()
 			continue
 		fi
 		n=$((n+1))
-		[ "$n" -le 8 ] || {
-			info "More than 8 variations for 650-grub2-bls-entry-cmdline"
+		[ "$n" -le "${variation_limit[650-grub2-bls-entry-cmdline]}" ] || {
+			info "Too many variations for 650-grub2-bls-entry-cmdline"
 			continue
 		}
 		pcrlock_grub2_bls_cmdline "linux ${grub2_bls_drive}$linux $options" \
@@ -4632,8 +4657,8 @@ pcrlock_grub2_bls()
 			read -r initrd
 			read -r devicetree
 			n=$((n+1))
-			[ "$n" -le 8 ] || {
-				info "More than 8 variations for 650-grub2-bls-entry-cmdline (initial)"
+			[ "$n" -le "${variation_limit[650-grub2-bls-entry-cmdline]}" ] || {
+				info "Too many variations for 650-grub2-bls-entry-cmdline (initial)"
 				continue
 			}
 			pcrlock_grub2_bls_cmdline "linux ${grub2_bls_drive}$linux $options" \
@@ -4661,8 +4686,8 @@ pcrlock_grub2_bls()
 			kernels["$linux"]=1
 			n=$((n+1))
 			# Limit to 4 because of the separator
-			[ "$n" -le 4 ] || {
-				info "More than 4 variations for 650-kernel-efi-application"
+			[ "$n" -le "${variation_limit[650-kernel-efi-application]}" ] || {
+				info "Too many variations for 650-kernel-efi-application"
 				continue
 			}
 			track_esp_file "${esp_root}/$linux"
@@ -4761,8 +4786,8 @@ pcrlock_grub2_bls()
 		# That leaves 2 * 1 * 2 * n <= 8, so n <= 2.  Measured on
 		# grub2-bls with n=4: 8 values while 643 is stable, 16 as
 		# soon as it shifts.  See bsc#1274948
-		[ "$n" -le 2 ] || {
-			info "More than 2 variations for 710-grub2-bls-kernel-initrd-kernel-cmdline-initrd-entry"
+		[ "$n" -le "${variation_limit[710-grub2-bls-kernel-initrd-kernel-cmdline-initrd-entry]}" ] || {
+			info "Too many variations for 710-grub2-bls-kernel-initrd-kernel-cmdline-initrd-entry"
 			continue
 		}
 		track_esp_file "${esp_root}$linux"
@@ -4788,8 +4813,8 @@ pcrlock_grub2_bls()
 			read -r initrd
 			read -r devicetree
 			n=$((n+1))
-			[ "$n" -le 2 ] || {
-				info "More than 2 variations for 710-grub2-bls-kernel-initrd-kernel-cmdline-initrd-entry (initial)"
+			[ "$n" -le "${variation_limit[710-grub2-bls-kernel-initrd-kernel-cmdline-initrd-entry]}" ] || {
+				info "Too many variations for 710-grub2-bls-kernel-initrd-kernel-cmdline-initrd-entry (initial)"
 				continue
 			}
 			pcrlock_grub2_bls_kernel_initrd_cmdline_initrd \
