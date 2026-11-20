@@ -673,7 +673,7 @@ assert_uki_config()
 	# The tools of UKI="local", checked once here
 	[ "$UKI" = "local" ] || return 0
 	local tool missing=()
-	for tool in openssl systemd-creds objcopy objdump "$systemd_sbsign" $(is_shim_installed && echo mokutil); do
+	for tool in openssl systemd-creds objcopy objdump "$systemd_sbsign" "$systemd_measure" $(is_shim_installed && echo mokutil); do
 		command -v "$tool" > /dev/null || missing+=("${tool##*/}")
 	done
 	[ "${#missing[@]}" -eq 0 ] || err "UKI=\"local\" needs ${missing[*]}"
@@ -781,6 +781,7 @@ uki_keys()
 }
 
 systemd_sbsign=/usr/lib/systemd/systemd-sbsign
+systemd_measure=/usr/lib/systemd/systemd-measure
 
 # Copy the PE file IN to OUT, adding the sections NAME FILE...  Each
 # one starts after the last one, aligned like the others
@@ -821,6 +822,41 @@ build_addon()
 		--certificate="$secureboot_certificate" --output="$out" "$tmpdir/addon.efi" || \
 		err "Cannot sign the addon"
 	rm -f "$tmpdir/addon.cmdline" "$tmpdir/addon.sbat" "$tmpdir/addon.efi"
+}
+
+# A signed UKI in OUT, from the kernel LINUX, the initrd INITRD, the
+# kernel command line CMDLINE, the os-release file OSREL and the kernel
+# version UNAME.  With FDE it also carries the PCR 11 policy of the
+# initrd, signed, that the TPM2 slots of the UKIs need
+build_uki()
+{
+	local linux="$1" initrd="$2" cmdline="$3" osrel="$4" uname="$5" out="$6"
+	local stub="/usr/lib/systemd/boot/efi/linux$firmware_arch.efi.stub"
+	echo -n "$cmdline" > "$tmpdir/uki.cmdline"
+	echo -n "$uname" > "$tmpdir/uki.uname"
+	local sections=(.osrel "$osrel" .cmdline "$tmpdir/uki.cmdline" .uname "$tmpdir/uki.uname")
+
+	# The signature is made from the files that go in the UKI, the
+	# .sbat of the stub too: each byte of them is measured
+	if [ -e "$credstore/tpm2-pcr-initrd-private-key.pem" ]; then
+		objcopy -O binary --only-section=.sbat "$stub" "$tmpdir/uki.sbat"
+		SYSTEMD_LOG_LEVEL=warning "$systemd_measure" sign \
+			--linux="$linux" --initrd="$initrd" --cmdline="$tmpdir/uki.cmdline" \
+			--osrel="$osrel" --uname="$tmpdir/uki.uname" --sbat="$tmpdir/uki.sbat" \
+			--pcrpkey="$pcr_public_key" --bank=sha256 \
+			--phase=enter-initrd --policyref=initrd \
+			--private-key=<(private_key tpm2-pcr-initrd-private-key.pem) \
+			--public-key="$pcr_public_key" --json=short > "$tmpdir/uki.pcrsig" || \
+			err "Cannot sign the PCR 11 policy of the UKI"
+		sections+=(.pcrpkey "$pcr_public_key" .pcrsig "$tmpdir/uki.pcrsig")
+	fi
+
+	sections+=(.initrd "$initrd" .linux "$linux")
+	pe_add_sections "$stub" "$tmpdir/uki.efi" "${sections[@]}"
+	SYSTEMD_LOG_LEVEL=warning "$systemd_sbsign" sign --private-key=<(private_key secureboot-private-key.pem) \
+		--certificate="$secureboot_certificate" --output="$out" "$tmpdir/uki.efi" || \
+		err "Cannot sign the UKI"
+	rm -f "$tmpdir"/uki.{cmdline,uname,sbat,pcrsig,efi}
 }
 
 # The Secure Boot certificate in MOK: "enrolled", "pending" (waits for
