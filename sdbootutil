@@ -1305,22 +1305,18 @@ update_entries()
 	dbg_cat "$entryfile"
 }
 
-update_entries_for_subvol()
-{
-	local subvol="$1"
-	local ext="${2:-}"
-
-	local root
-	root="$(get_all_rootfs)"
-
-	[ -z "$ext" ] || ext="|$ext"
-	update_entries jq "[.[]|select(has(\"options\"))|select(.options|test(\"root=(?:$root) .*rootflags=subvol=$subvol\")$ext)]"
-}
-
+# The entries of this system come in two forms.  The ones that
+# sdbootutil writes name the root and the snapshot in "options".  The
+# ones made by "bootctl link" have no "options": their file name is
+# "<entry token>-commit_<snapshot>.<version>.conf"
 update_entries_for_snapshot()
 {
 	local n="$1"
-	update_entries_for_subvol "${subvol_prefix}/.snapshots/$n/snapshot"
+	local root
+	root="$(get_all_rootfs)"
+
+	update_entries jq "[.[]|select((.options // \"\"|test(\"root=(?:$root) .*rootflags=subvol=${subvol_prefix}/.snapshots/$n/snapshot\"))
+				   or (.id|test(\"^${entry_token}-commit_${n}[.@+]\")))]"
 }
 
 update_entries_for_this_system()
@@ -1328,7 +1324,8 @@ update_entries_for_this_system()
 	local root
 	root="$(get_all_rootfs)"
 
-	update_entries jq "[.[]|select(has(\"options\"))|select(.options|test(\"root=(?:$root)(?: |$)\"))]"
+	update_entries jq "[.[]|select((.options // \"\"|test(\"root=(?:$root)(?: |$)\"))
+				   or (.id|startswith(\"${entry_token}-commit_\")))]"
 }
 
 update_entries_for_extra()
@@ -1450,7 +1447,7 @@ entry_field()
 # entry is text that describes the system, and the two are owned by
 # different people: this script writes the files, the command line can
 # have been edited by hand
-entry_file_keys=" linux initrd devicetree "
+entry_file_keys=" linux initrd devicetree uki extra "
 
 entry_is_file_key()
 {
@@ -1525,6 +1522,24 @@ entry_missing_files()
 # other snapshot is in the same menu and boots with the same key press,
 # and nothing else in this script ever looks at one: "add-all-kernels"
 # and "install_kernel" are given a single snapshot and repair only that
+# jq: the snapshot and the kernel version of an entry, as
+# {snapshot, kernel}.  The entries of sdbootutil say "N_<kernel>" (or
+# "N@" before), the ones of "bootctl link" have the snapshot in the id
+# ("-commit_N.") and the version "<commit>.<snapshot>.<kernel>", or
+# "<commit>.<kernel>" without snapshots, maybe with ".<variant>".  The
+# argument is true when the system has snapshots
+# shellcheck disable=SC2016  # jq variables
+jq_entry_version='def entry_version($snapshots):
+	if (.id // "" | test("-commit_[0-9]+[.@+]")) then
+		(.id | capture("-commit_(?<n>[0-9]+)[.@+]") | .n) as $n
+		| {snapshot: (if $snapshots then $n else null end),
+		   kernel: ((.version // "") | sub("^[0-9]+\\."; "")
+			    | if $snapshots then sub("^[0-9]+\\."; "") else . end
+			    | sub("\\.[^.-]+$"; ""))}
+	else
+		(.version // "") | capture("((?<snapshot>[0-9]*)[@_])?(?<kernel>.*)")
+	end;'
+
 dangling_entries()
 {
 	local id path snapshot kernel_version missing
@@ -1538,12 +1553,10 @@ dangling_entries()
 		[ -n "$missing" ] || continue
 		printf '%s|%s|%s|%s|%s\n' \
 		       "$id" "$path" "$snapshot" "$kernel_version" "${missing% }"
-	done < <(jq -r '.[]
+	done < <(jq -r --argjson snapshots "$([ -n "$have_snapshots" ] && echo true || echo false)" "$jq_entry_version"'.[]
 		       | select(.type? == "type1")
 		       | select(.path != null)
-		       | .id, .path,
-			 ((.version // "") | capture("((?<snapshot>[0-9]*)[@_])?(?<kernel>.*)")) as $v
-		       | $v.snapshot, $v.kernel')
+		       | .id, .path, (entry_version($snapshots) | .snapshot, .kernel)')
 }
 
 # The entry that is on disk, set by "cleanup --repair" to the one it is
@@ -2162,15 +2175,18 @@ removable_entries()
 	#
 	# The columns are never empty, as `read` and `sort` would
 	# collapse consecutive tabs and shift the fields
-	jq -r --arg in_use "${in_use[*]}" --arg last "$root_snapshot" --arg keep "${reused_entry:-}" '
+	jq -r --arg in_use "${in_use[*]}" --arg last "$root_snapshot" --arg keep "${reused_entry:-}" \
+	   --argjson snapshots "$([ -n "$have_snapshots" ] && echo true || echo false)" "$jq_entry_version"'
 		def snapshot_of:
 			((.options // "") | capture("rootflags=subvol=[^ ]*/\\.snapshots/(?<n>[0-9]+)/snapshot") | .n)
+			// ((.id // "") | capture("-commit_(?<n>[0-9]+)[.@+]") | .n)
 			// ((.version // "") | capture("^(?<n>[0-9]+)[@_]") | .n)
 			// ((.id // "") | capture("-(?<n>[0-9]+)(\\+[0-9]+(-[0-9]+)?)?\\.conf$") | .n)
 			// "";
 		def kernel_of:
 			((.linux // "") | capture("^/[^/]+/(?<k>[^/]+)/[^/]+$") | .k)
 			// ((.version // "") | capture("^[0-9]+[@_](?<k>.+)$") | .k)
+			// (select(.id // "" | test("-commit_[0-9]+[.@+]")) | entry_version($snapshots) | .kernel)
 			// "";
 
 		($in_use | split(" ") | map(select(. != ""))) as $in_use
@@ -2821,7 +2837,8 @@ cleanup_entries()
 			info "Cleaning boot entry $id"
 			rm "$path"
 		}
-	done < <(jq -r '.[] | .id, .path, (.version | capture("((?<snapshot>[0-9]*)[@_])?(?<kernel>.*)")) as $v | $v.snapshot, $v.kernel' "$entryfile")
+	done < <(jq -r --argjson snapshots "$([ -n "$have_snapshots" ] && echo true || echo false)" \
+		    "$jq_entry_version"'.[] | .id, .path, (entry_version($snapshots) | .snapshot, .kernel)' "$entryfile")
 
 	# The loop above drops the entry whose kernel is gone.  The
 	# opposite case -- the kernel is still there and what went missing
@@ -3981,6 +3998,7 @@ entry_snapshot()
 	jq -r --arg id "$id" '.[]
 		| select(.id == $id)
 		| ((.options // "") | capture("rootflags=subvol=[^ ]*/\\.snapshots/(?<n>[0-9]+)/snapshot") | .n)
+		  // ((.id // "") | capture("-commit_(?<n>[0-9]+)[.@+]") | .n)
 		  // ((.version // "") | capture("^(?<n>[0-9]+)[@_]") | .n)
 		  // empty'
 }
@@ -8334,10 +8352,11 @@ status_boot()
 	if [ -z "$booted" ]; then
 		local subvol=""
 		[ -z "$have_snapshots" ] || subvol="${subvol_prefix}/.snapshots/${root_snapshot}/snapshot"
-		booted="$(jq -r --arg k "$(uname -r)" --arg s "$subvol" \
+		booted="$(jq -r --arg k "$(uname -r)" --arg s "$subvol" --arg n "$root_snapshot" \
 			     '[.[] | select(.type? == "type1")
 				   | select((.version // "") | endswith($k))
-				   | select($s == "" or ((.options // "") | contains("rootflags=subvol=" + $s)))]
+				   | select($s == "" or ((.options // "") | contains("rootflags=subvol=" + $s))
+					    or ((.id // "") | test("-commit_" + $n + "[.@+]")))]
 			      | if length == 1 then .[0].id else empty end' <<<"$entries")"
 		[ -z "$booted" ] || guess=" (from the running kernel, the boot loader reported nothing)"
 	fi
