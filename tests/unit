@@ -1787,6 +1787,54 @@ t_addon()
 	return 0
 }
 
+# build_uki makes a signed UKI, and with the PCR key its .pcrsig is
+# the signature of the exact sections that it carries
+# shellcheck disable=SC2034  # read by the sourced library
+t_uki()
+{
+	local tool
+	for tool in openssl objcopy objdump /usr/lib/systemd/systemd-sbsign /usr/lib/systemd/systemd-measure; do
+		command -v "$tool" > /dev/null || skip "$tool is not installed"
+	done
+	[ -e /usr/lib/systemd/boot/efi/linuxx64.efi.stub ] || skip "no UKI stub"
+	load
+	local tmpdir="$workdir/tmp" firmware_arch=x64 uki="$workdir/test.efi" x="$workdir/x" sec
+	local secureboot_certificate="$workdir/sb.pem" pcr_public_key="$workdir/pcr.pem" credstore="$workdir/cred"
+	mkdir -p "$tmpdir" "$x" "$credstore"
+	openssl req -new -x509 -nodes -newkey rsa:2048 -keyout "$workdir/sb.key" -subj /CN=test \
+		-out "$secureboot_certificate" 2> /dev/null
+	openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out "$workdir/pcr.key" 2> /dev/null
+	openssl pkey -in "$workdir/pcr.key" -pubout -out "$pcr_public_key"
+	touch "$credstore/tpm2-pcr-initrd-private-key.pem"
+	# shellcheck disable=SC2329  # called by the sourced library
+	private_key()
+	{
+		case "$1" in
+			secureboot-private-key.pem) cat "$workdir/sb.key" ;;
+			*) cat "$workdir/pcr.key" ;;
+		esac
+	}
+	head -c 4096 /dev/urandom > "$workdir/linux"
+	head -c 4096 /dev/urandom > "$workdir/initrd"
+
+	build_uki "$workdir/linux" "$workdir/initrd" "root=UUID=1 quiet" /usr/lib/os-release 7.3.4-1-default "$uki" || \
+		fail "build_uki failed"
+	is "command line" "root=UUID=1 quiet" "$(pe_section_text "$uki" .cmdline)"
+	is "uname" "7.3.4-1-default" "$(pe_section_text "$uki" .uname)"
+	says "signed" "$(objdump -p "$uki")" "Security Directory"
+
+	for sec in linux initrd cmdline osrel uname sbat pcrpkey pcrsig; do
+		objcopy -O binary --only-section=".$sec" "$uki" "$x/$sec"
+	done
+	cmp -s "$x/linux" "$workdir/linux" || fail "the kernel changed"
+	/usr/lib/systemd/systemd-measure sign --linux="$x/linux" --initrd="$x/initrd" --cmdline="$x/cmdline" \
+		--osrel="$x/osrel" --uname="$x/uname" --sbat="$x/sbat" --pcrpkey="$x/pcrpkey" \
+		--bank=sha256 --phase=enter-initrd --policyref=initrd \
+		--private-key="$workdir/pcr.key" --public-key="$pcr_public_key" --json=short > "$x/resign" 2> /dev/null
+	is "signature of the sections" "$(jq -c . "$x/resign")" "$(jq -c . "$x/pcrsig")"
+	return 0
+}
+
 # pcrlock_unlockable has to name every category that systemd-pcrlock
 # can remove through varlink (fwupd uses them before a firmware update),
 # and the file that each one removes.  A category added upstream would
@@ -1931,6 +1979,7 @@ done <<-'EOF'
 	t_uki_keys                  uki_keys makes the keys of UKI=local, stored only encrypted
 	t_mok                       mok_enroll imports the UKI certificate once, and again after a failed boot
 	t_addon                     build_addon makes a signed addon with the exact command line
+	t_uki                       build_uki makes a signed UKI whose PCR 11 signature matches its sections
 	t_pcrlock_unlockable        pcrlock_unlockable names every category that systemd-pcrlock removes via varlink
 EOF
 
