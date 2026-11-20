@@ -2522,6 +2522,49 @@ create_boot_options()
 	echo "${boot_options# }"
 }
 
+# The initrd of the kernel VERSION of SNAPSHOT (in SUBVOL), staged for a
+# boot entry: the one of the package (INITRD), the one of an entry that
+# can be reused (in "dstinitrd", see `reuse_initrd`), or a new one made
+# by dracut.  The first and the last end in "$tmpdir/initrd-0"
+stage_initrd()
+{
+	local snapshot="$1" subvol="$2" kernel_version="$3" initrd="$4"
+
+	if [ -e "$initrd" ]; then
+		ln -s "$initrd" "$tmpdir/initrd-0"
+	elif ! reuse_initrd "$snapshot" "$subvol" "$kernel_version"; then
+		local dracut_args=(
+			'--reproducible'
+			'--force'
+			'--tmpdir' '/var/tmp'
+		)
+		if [ "${verbose:-0}" -le 1 ]; then
+			dracut_args+=('--quiet')
+		fi
+
+		info "Generating new initrd"
+
+		# When the running system is a mix of snapshots the live
+		# /usr is not the one of "$root_subvol", so the initrd
+		# needs to be generated inside the snapshot in any case
+		if [ -n "$have_snapshots" ] && { [ "$subvol" != "$root_subvol" ] || [ -n "$applied_snapshot" ]; }; then
+			mount_chroot "${subvol#"${subvol_prefix}"}"
+			# In MicroOS we need to be sure to have the same /etc
+			# inside the snapshot.  For example, /etc/crypttab can
+			# have modifications in the overlay that will be
+			# visible once the snapshot is active, but the version
+			# in /.snapshots is still the unmodified base
+			is_transactional && mount_etc "${subvol#"${subvol_prefix}"}"
+			chroot "${subvol#"${subvol_prefix}"}" dracut "${dracut_args[@]}" "$tmpdir/initrd-0" "$kernel_version" \
+				|| err "Failed to generate the initrd for $kernel_version"
+			umount_chroot "${subvol#"${subvol_prefix}"}"
+		else
+			dracut "${dracut_args[@]}" "$tmpdir/initrd-0" "$kernel_version" \
+				|| err "Failed to generate the initrd for $kernel_version"
+		fi
+	fi
+}
+
 install_kernel()
 {
 	local snapshot="$1"
@@ -2595,39 +2638,7 @@ install_kernel()
 		devicetree_dst="${dst%/*}/devicetree-$chksum.dtb"
 	fi
 
-	if [ -e "$initrd" ]; then
-		ln -s "$initrd" "$tmpdir/initrd-0"
-	elif ! reuse_initrd "$snapshot" "$subvol" "$kernel_version"; then
-		local dracut_args=(
-			'--reproducible'
-			'--force'
-			'--tmpdir' '/var/tmp'
-		)
-		if [ "${verbose:-0}" -le 1 ]; then
-			dracut_args+=('--quiet')
-		fi
-
-		info "Generating new initrd"
-
-		# When the running system is a mix of snapshots the live
-		# /usr is not the one of "$root_subvol", so the initrd
-		# needs to be generated inside the snapshot in any case
-		if [ -n "$have_snapshots" ] && { [ "$subvol" != "$root_subvol" ] || [ -n "$applied_snapshot" ]; }; then
-			mount_chroot "${subvol#"${subvol_prefix}"}"
-			# In MicroOS we need to be sure to have the same /etc
-			# inside the snapshot.  For example, /etc/crypttab can
-			# have modifications in the overlay that will be
-			# visible once the snapshot is active, but the version
-			# in /.snapshots is still the unmodified base
-			is_transactional && mount_etc "${subvol#"${subvol_prefix}"}"
-			chroot "${subvol#"${subvol_prefix}"}" dracut "${dracut_args[@]}" "$tmpdir/initrd-0" "$kernel_version" \
-				|| err "Failed to generate the initrd for $kernel_version"
-			umount_chroot "${subvol#"${subvol_prefix}"}"
-		else
-			dracut "${dracut_args[@]}" "$tmpdir/initrd-0" "$kernel_version" \
-				|| err "Failed to generate the initrd for $kernel_version"
-		fi
-	fi
+	stage_initrd "$snapshot" "$subvol" "$kernel_version" "$initrd"
 
 	# Files already in the ESP are reused, and need no space
 	local kernel_size_src="$src" devicetree_size_src="$devicetree_src"
