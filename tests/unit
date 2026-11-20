@@ -157,6 +157,15 @@ says()
 	esac
 }
 
+# The content of the section NAME of the PE file FILE.  Not through
+# /dev/stdout: objcopy renames a new file over its output
+pe_section_text()
+{
+	objcopy -O binary --only-section="$2" "$1" "$workdir/section"
+	cat "$workdir/section"
+	rm -f "$workdir/section"
+}
+
 says_not()
 {
 	case "$2" in
@@ -1602,6 +1611,14 @@ t_uki_config()
 	local UKI value
 	# shellcheck disable=SC2329  # called by the sourced library
 	is_shim_installed() { return 1; }
+	# The tools of UKI="local", as empty scripts
+	local tool systemd_sbsign="$workdir/bin/systemd-sbsign"
+	mkdir -p "$workdir/bin"
+	for tool in openssl systemd-creds objcopy objdump systemd-sbsign; do
+		echo '#!/bin/sh' > "$workdir/bin/$tool"
+		chmod +x "$workdir/bin/$tool"
+	done
+	local PATH="$workdir/bin:$PATH"
 	for value in "" no yes local; do
 		UKI="$value"
 		( assert_uki_config ) > /dev/null 2>&1 || fail "UKI=\"$value\" was refused"
@@ -1738,6 +1755,35 @@ t_mok()
 	state=enrolled
 	mok_enroll > /dev/null 2>&1
 	[ ! -e /var/lib/sdbootutil/mok-import ] || fail "the marker stays after the enrollment"
+	return 0
+}
+
+# build_addon makes a signed addon with the exact command line, and
+# pe_add_sections puts each section after the last one
+# shellcheck disable=SC2034  # read by the sourced library
+t_addon()
+{
+	local tool
+	for tool in openssl objcopy objdump /usr/lib/systemd/systemd-sbsign; do
+		command -v "$tool" > /dev/null || skip "$tool is not installed"
+	done
+	[ -e /usr/lib/systemd/boot/efi/addonx64.efi.stub ] || skip "no addon stub"
+	load
+	local tmpdir="$workdir/tmp" firmware_arch=x64 addon="$workdir/test.addon.efi"
+	local secureboot_certificate="$workdir/sb.pem"
+	mkdir -p "$tmpdir"
+	openssl req -new -x509 -nodes -newkey rsa:2048 -keyout "$workdir/sb.key" -subj /CN=test \
+		-out "$secureboot_certificate" 2> /dev/null
+	# shellcheck disable=SC2329  # called by the sourced library
+	private_key() { cat "$workdir/sb.key"; }
+
+	build_addon "rootflags=subvol=@/.snapshots/42/snapshot" "$addon" || fail "build_addon failed"
+	is "command line" "rootflags=subvol=@/.snapshots/42/snapshot" \
+	   "$(pe_section_text "$addon" .cmdline)"
+	says "sbat" "$(pe_section_text "$addon" .sbat)" "uki-addon,1"
+	says "signed" "$(objdump -p "$addon")" "Security Directory"
+	is "size of .cmdline" "00000029" "$(objdump -h "$addon" | awk '$2 == ".cmdline" {print $3}')"
+	is "aligned" "000" "$(objdump -h "$addon" | awk '$2 == ".sbat" {print substr($4, length($4) - 2)}')"
 	return 0
 }
 
@@ -1884,6 +1930,7 @@ done <<-'EOF'
 	t_uki_status                uki_mode_text and uki_missing_kernels report the UKI mode and the kernels without a UKI
 	t_uki_keys                  uki_keys makes the keys of UKI=local, stored only encrypted
 	t_mok                       mok_enroll imports the UKI certificate once, and again after a failed boot
+	t_addon                     build_addon makes a signed addon with the exact command line
 	t_pcrlock_unlockable        pcrlock_unlockable names every category that systemd-pcrlock removes via varlink
 EOF
 
