@@ -704,6 +704,74 @@ warn_missing_uki_packages()
 	done
 }
 
+# The keys of UKI="local".
+# The private keys are only stored encrypted by systemd-creds, with
+# the TPM2 and the host key, and are never written in clear: they live
+# in a variable and pass through pipes.
+#  - The Secure Boot key signs the UKIs and addons, and is enrolled
+#    with mokutil.  RSA 4096, like the keys of OBS
+#  - The PCR key signs the PCR 11 policy of the initrd, only with FDE.
+#    The TPM2 loads it, so RSA 4096 only if the TPM2 can, else 2048
+secureboot_certificate=/etc/kernel/secureboot-certificate.pem
+# The name of ukify for a key that signs only the enter-initrd phase.
+# Not tpm2-pcr-public-key.pem: in /etc it would hide the key of the
+# distribution (UKI="yes") from every systemd tool
+pcr_public_key=/etc/systemd/tpm2-pcr-initrd-public-key.pem
+credstore=/etc/credstore.encrypted
+
+# Print the private key NAME, decrypted, for a pipe or a process
+# substitution: --private-key=<(private_key NAME)
+private_key()
+{
+	systemd-creds decrypt --name="$1" "$credstore/$1" -
+}
+
+# Pass the private key NAME to "openssl CMD..." on stdin, to write the
+# public part.  A missing key is made with BITS and stored encrypted
+public_part()
+{
+	local -; set +x
+	local name="$1" bits="$2" key
+	shift 2
+	if [ -e "$credstore/$name" ]; then
+		key="$(private_key "$name")" || err "Cannot read the key $name"
+	else
+		key="$(openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:"$bits" 2> /dev/null)" || \
+			err "Cannot make the key $name"
+		mkdir -p "$credstore"
+		chmod 700 "$credstore"
+		printf '%s\n' "$key" | systemd-creds encrypt --with-key=tpm2+host --name="$name" - "$credstore/$name" || \
+			err "Cannot encrypt the key $name"
+	fi
+	printf '%s\n' "$key" | openssl "$@" || err "Cannot write the public part of $name"
+}
+
+# Make the keys that are missing, or their public part
+uki_keys()
+{
+	[ "${UKI:-}" = "local" ] || return 0
+
+	if [ ! -e "$credstore/secureboot-private-key.pem" ] || [ ! -e "$secureboot_certificate" ]; then
+		info "Making the Secure Boot key that signs the UKIs"
+		mkdir -p "${secureboot_certificate%/*}"
+		public_part secureboot-private-key.pem 4096 \
+			req -new -x509 -key /dev/stdin -days 3650 \
+			-subj "/CN=SecureBoot signing key on host $(uname -n)" \
+			-addext "extendedKeyUsage=codeSigning" \
+			-out "$secureboot_certificate"
+	fi
+
+	grep -qs "tpm2-device" /etc/crypttab || return 0
+	if [ ! -e "$credstore/tpm2-pcr-initrd-private-key.pem" ] || [ ! -e "$pcr_public_key" ]; then
+		info "Making the key that signs the PCR 11 policy"
+		local bits=2048
+		! tpm2_testparms rsa4096 &> /dev/null || bits=4096
+		mkdir -p "${pcr_public_key%/*}"
+		public_part tpm2-pcr-initrd-private-key.pem "$bits" \
+			pkey -pubout -out "$pcr_public_key"
+	fi
+}
+
 reset_rollback()
 {
 	for i in "${rollback[@]}"; do
@@ -8028,6 +8096,12 @@ status_boot()
 		missing="$(uki_missing_kernels | paste -sd ' ')"
 		status_row "UKI files" "${missing:+missing for }${missing:-present for every kernel}"
 	fi
+	if [ "${UKI:-}" = "local" ]; then
+		status_row "UKI key" "$([ -e "$credstore/secureboot-private-key.pem" ] && echo "$secureboot_certificate" || echo "not made yet")"
+		grep -qs "tpm2-device" /etc/crypttab && \
+			status_row "PCR 11 key" "$([ -e "$credstore/tpm2-pcr-initrd-private-key.pem" ] && echo "$pcr_public_key" || echo "not made yet")"
+	fi
+
 
 	# The version in the ESP against the version that the system
 	# ships.  Both can be missing on their own: no bootloader
