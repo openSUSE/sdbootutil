@@ -1616,6 +1616,32 @@ t_uki_config()
 	return 0
 }
 
+# uki_mode_text and uki_missing_kernels: the UKI row of "status", and
+# the kernels that have no UKI file with UKI="yes"
+# shellcheck disable=SC2034  # UKI is read by the sourced library
+t_uki_status()
+{
+	load
+	local UKI modules="$workdir/modules" version=7.3.4-1-default
+	mkdir -p "$modules/$version"
+	touch "$modules/$version/vmlinuz"
+
+	UKI=""
+	says "no" "$(uki_mode_text)" "no, kernel and initrd"
+	UKI=local
+	says "local" "$(uki_mode_text)" "local"
+	is "local needs no file" "" "$(uki_missing_kernels "$modules")"
+
+	UKI=yes
+	says "yes" "$(uki_mode_text)" "distribution"
+	# vmlinuz.efi (arm64 zboot) is a kernel, not a UKI
+	touch "$modules/$version/vmlinuz.efi"
+	is "missing" "$version" "$(uki_missing_kernels "$modules")"
+	touch "$modules/$version/vmlinuz-generic.efi"
+	is "present" "" "$(uki_missing_kernels "$modules")"
+	return 0
+}
+
 # pcrlock_unlockable has to name every category that systemd-pcrlock
 # can remove through varlink (fwupd uses them before a firmware update),
 # and the file that each one removes.  A category added upstream would
@@ -1756,6 +1782,7 @@ done <<-'EOF'
 	t_entries_bind              entries_bind_pcr15 checks the measurement layout and the devices of every initrd
 	t_p15_status                status_pcr15 reports the measurements of this boot
 	t_uki_config                assert_uki_config accepts empty, no, yes or local, the last two only with systemd-boot
+	t_uki_status                uki_mode_text and uki_missing_kernels report the UKI mode and the kernels without a UKI
 	t_pcrlock_unlockable        pcrlock_unlockable names every category that systemd-pcrlock removes via varlink
 EOF
 
