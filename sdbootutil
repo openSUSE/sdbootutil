@@ -7676,12 +7676,20 @@ status_policy()
 	done
 	status_row "Requested PCRs" "${requested:-none}"
 
-	# The signed PCR 11 of a UKI does not see the Secure Boot state,
-	# PCR 7 does.  Without Secure Boot there is nothing to keep.  It
-	# is the choice of the user, so only a warning
-	if [ -n "${UKI:-}" ] && [ "$UKI" != "no" ] && is_secure_boot && \
-	   [[ ",$requested," != *",7,"* ]]; then
-		warn "UKI is used, but PCR 7 is not in FDE_SEAL_PCR_LIST: the TPM2 does not check that Secure Boot stays enabled"
+	# The signed PCR 11 of a UKI does not see the Secure Boot state
+	# (PCR 7), or a changed command line or addon (PCR 12).  With
+	# Secure Boot on, systemd-stub ignores an edited command line and
+	# refuses unsigned addons, so only PCR 7 matters.  With Secure
+	# Boot off it accepts both, and only PCR 12 sees them.  The PCRs
+	# are the choice of the user, so only a warning
+	if [ -n "${UKI:-}" ] && [ "$UKI" != "no" ]; then
+		if is_secure_boot; then
+			[[ ",$requested," == *",7,"* ]] || \
+				warn "UKI is used, but PCR 7 is not in FDE_SEAL_PCR_LIST: the TPM2 does not check that Secure Boot stays enabled"
+		else
+			[[ ",$requested," == *",12,"* ]] || \
+				warn "UKI is used without Secure Boot, but PCR 12 is not in FDE_SEAL_PCR_LIST: the TPM2 does not check the kernel command line"
+		fi
 	fi
 
 	echo "  Bound PCRs:"
