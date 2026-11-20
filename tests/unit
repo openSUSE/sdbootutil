@@ -1600,10 +1600,16 @@ t_uki_config()
 	bootloader_type() { echo "$loader"; }
 
 	local UKI value
+	# shellcheck disable=SC2329  # called by the sourced library
+	is_shim_installed() { return 1; }
 	for value in "" no yes local; do
 		UKI="$value"
 		( assert_uki_config ) > /dev/null 2>&1 || fail "UKI=\"$value\" was refused"
 	done
+	# A missing tool of UKI="local"
+	UKI=local
+	# shellcheck disable=SC2123  # no tool can be found
+	( PATH=/nonexistent; assert_uki_config ) > /dev/null 2>&1 && fail "UKI=local without its tools was accepted"
 	UKI=distribution
 	( assert_uki_config ) > /dev/null 2>&1 && fail "UKI=\"distribution\" was accepted"
 	loader=grub2-bls
@@ -1678,6 +1684,60 @@ t_uki_keys()
 	uki_keys > /dev/null 2>&1
 	is "certificate of the key" "$(private_key secureboot-private-key.pem 2> /dev/null | openssl pkey -pubout 2> /dev/null)" \
 		"$(openssl x509 -in "$secureboot_certificate" -noout -pubkey 2> /dev/null)"
+	return 0
+}
+
+# mok_enroll imports a missing certificate once, waits while it is
+# pending, and imports it again when a boot did not enroll it
+# shellcheck disable=SC2034,SC2329  # read and called by the sourced library
+t_mok()
+{
+	command -v openssl > /dev/null || skip "openssl is not installed"
+	load
+	local tmpdir="$workdir/tmp" state=missing imports=0
+	local secureboot_certificate="$workdir/sb.pem"
+	mkdir -p "$tmpdir" /var/lib/sdbootutil
+	openssl req -new -x509 -nodes -newkey rsa:2048 -keyout /dev/null -subj /CN=test \
+		-out "$secureboot_certificate" 2> /dev/null
+	local shadow=""
+	is_secure_boot() { return 0; }
+	is_shim_installed() { return 0; }
+	getent() { echo "root:$shadow:20000::::::"; }
+	mokutil()
+	{
+		case "$1" in
+			--test-key)
+				case "$state" in
+					enrolled) echo "x is already enrolled" ;;
+					pending) echo "x is already in the enrollment request" ;;
+					*) echo "x is not enrolled" ;;
+				esac ;;
+			--generate-hash=*) echo "hash" ;;
+			--import) imports=$((imports + 1)); state=pending; echo "$*" > "$workdir/import" ;;
+		esac
+	}
+	rm -f /var/lib/sdbootutil/mok-import
+
+	# root without a password: a one-time password
+	mok_enroll > "$workdir/out" 2>&1
+	says "password" "$(cat "$workdir/out")" "MOK password: "
+	says "hash file" "$(cat "$workdir/import")" "--hash-file"
+	is "pending" "pending" "$(mok_state)"
+	mok_enroll > /dev/null 2>&1
+	is "imported once" "1" "$imports"
+
+	# A boot that did not enroll it, and root has a password now
+	# shellcheck disable=SC2016  # a literal hash
+	state=missing shadow='$6$salt$hash'
+	mok_enroll > "$workdir/out" 2>&1
+	says "retry" "$(cat "$workdir/out")" "not enrolled in MOK at the last boot"
+	says "root password" "$(cat "$workdir/import")" "--root-pw"
+	grep -q "MOK password" "$workdir/out" && fail "a password was printed with --root-pw"
+	is "imported again" "2" "$imports"
+
+	state=enrolled
+	mok_enroll > /dev/null 2>&1
+	[ ! -e /var/lib/sdbootutil/mok-import ] || fail "the marker stays after the enrollment"
 	return 0
 }
 
@@ -1823,6 +1883,7 @@ done <<-'EOF'
 	t_uki_config                assert_uki_config accepts empty, no, yes or local, the last two only with systemd-boot
 	t_uki_status                uki_mode_text and uki_missing_kernels report the UKI mode and the kernels without a UKI
 	t_uki_keys                  uki_keys makes the keys of UKI=local, stored only encrypted
+	t_mok                       mok_enroll imports the UKI certificate once, and again after a failed boot
 	t_pcrlock_unlockable        pcrlock_unlockable names every category that systemd-pcrlock removes via varlink
 EOF
 
