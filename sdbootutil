@@ -748,10 +748,10 @@ public_part()
 			err "Cannot make the key $name"
 		mkdir -p "$credstore"
 		chmod 700 "$credstore"
-		printf '%s\n' "$key" | systemd-creds encrypt --with-key=tpm2+host --name="$name" - "$credstore/$name" || \
+		echo "$key" | systemd-creds encrypt --with-key=tpm2+host --name="$name" - "$credstore/$name" || \
 			err "Cannot encrypt the key $name"
 	fi
-	printf '%s\n' "$key" | openssl "$@" || err "Cannot write the public part of $name"
+	echo "$key" | openssl "$@" || err "Cannot write the public part of $name"
 }
 
 # Make the keys that are missing, or their public part
@@ -1430,7 +1430,7 @@ entry_missing_files()
 	[ -f "$conf" ] || return 0
 
 	while read -r path; do
-		[ -e "${boot_root}${path}" ] || printf '%s\n' "$path"
+		[ -e "${boot_root}${path}" ] || echo "$path"
 	done < <(entry_files "$conf")
 }
 
@@ -4103,7 +4103,7 @@ set_default_snapshot()
 
 have_pcrlock()
 {
-	[ -e /usr/bin/systemd-pcrlock ] || [ -e /usr/lib/systemd/systemd-pcrlock ]
+	command -v systemd-pcrlock > /dev/null || command -v /usr/lib/systemd/systemd-pcrlock > /dev/null
 }
 
 # The sha256 of the file "$1" into the variable named "$2".  Each file
@@ -4170,7 +4170,7 @@ prune_pcrlock_cache()
 
 have_pcr_oracle()
 {
-	[ -e /usr/bin/pcr-oracle ]
+	command -v pcr-oracle > /dev/null
 }
 
 # Warnings that `systemd-pcrlock` emits, once per event log
@@ -4197,7 +4197,7 @@ pcrlock()
 {
 	dbg "systemd-pcrlock $*"
 	local pcrlock_cmd="/usr/bin/systemd-pcrlock"
-	[ -e "$pcrlock_cmd" ] || pcrlock_cmd="/usr/lib/systemd/systemd-pcrlock"
+	command -v "$pcrlock_cmd" > /dev/null || pcrlock_cmd="/usr/lib/systemd/systemd-pcrlock"
 
 	if [ -n "$verbose" ]; then
 		SYSTEMD_LOG_LEVEL="${SYSTEMD_LOG_LEVEL:-warning}" without_lock "$pcrlock_cmd" "$@"
@@ -5721,7 +5721,7 @@ show_generated_recovery_pin()
 	sgrp_pin="${sgrp_pin%% }"
 
 	echo "Recovery PIN: $sgrp_pin"
-	if [ -x /usr/bin/qrencode ]; then
+	if command -v qrencode > /dev/null; then
 		echo "You can also scan it with your mobile phone:"
 		echo -n "$sgrp_pin" | qrencode -t utf8i
 	fi
@@ -6700,7 +6700,7 @@ can_unlock()
 
 in_lockout()
 {
-	command -v tpm2_getcap &> /dev/null || { warn "tpm2_getcap not found"; return 1; }
+	command -v tpm2_getcap > /dev/null || { warn "tpm2_getcap not found"; return 1; }
 
 	# `tpm2-tools` probes a fixed list of TCTIs and `tabrmd` comes
 	# before the device.  A system that has `libtss2-tcti-tabrmd0`
@@ -6833,7 +6833,7 @@ add_crypttab_option()
 		# The key is written even when the entry did not have
 		# one: with an empty third field the options would be
 		# read as the key
-		printf '%s\n' "$name $device ${key:-none} $opts" >> "$crypttab"
+		echo "$name $device ${key:-none} $opts" >> "$crypttab"
 		changed=1
 		# crypttab has changed so initrd needs to be updated
 		arg_no_reuse_initrd=1
@@ -6881,7 +6881,7 @@ remove_crypttab_option()
 		opts="${opts#"$option",}"
 		opts="${opts//,"$option"}"
 		opts="${opts//"$option"}"
-		printf '%s\n' "$name $device ${key:-none}${opts:+ $opts}" >> "$crypttab"
+		echo "$name $device ${key:-none}${opts:+ $opts}" >> "$crypttab"
 		changed=1
 		# crypttab has changed so initrd needs to be updated
 		arg_no_reuse_initrd=1
@@ -7123,7 +7123,7 @@ enroll_recovery_key()
 
 	if [ -n "$generated_key" ]; then
 		echo "Recovery key: $key"
-		if [ -x /usr/bin/qrencode ]; then
+		if command -v qrencode > /dev/null; then
 			echo "You can also scan it with your mobile phone:"
 			echo -n "$key" | qrencode -t utf8i
 		fi
@@ -7257,7 +7257,7 @@ enroll_anchor=
 enroll()
 {
 	[ -e /etc/crypttab ] || { info "/etc/crypttab not found. No encrypted devices?"; return 0; }
-	[ -e /usr/bin/systemd-cryptenroll ] || { info "systemd-cryptenroll not found"; return 0; }
+	command -v systemd-cryptenroll > /dev/null || { info "systemd-cryptenroll not found"; return 0; }
 	detect_tracked_devices || { info "No LUKS2 devices found"; return 0; }
 
 	info "Enrolling devices ($arg_method): ${tracked_devices[*]}"
@@ -7437,7 +7437,7 @@ unenroll_device()
 unenroll()
 {
 	[ -e /etc/crypttab ] || { info "/etc/crypttab not found. No encrypted devices?"; return 0; }
-	[ -e /usr/bin/systemd-cryptenroll ] || { info "systemd-cryptenroll not found"; return 0; }
+	command -v systemd-cryptenroll > /dev/null || { info "systemd-cryptenroll not found"; return 0; }
 	detect_tracked_devices || { info "No LUKS2 devices found"; return 0; }
 
 	info "Unenrolling devices ($arg_method): ${tracked_devices[*]}"

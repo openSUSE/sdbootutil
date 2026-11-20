@@ -519,7 +519,7 @@ t_grubenv_full()
 	esp_root="$workdir" esp_dst=""
 
 	# 25 bytes of header, and a "default=" line that takes the rest
-	printf '%s\n' "# GRUB Environment Block" > "$workdir/grubenv"
+	echo "# GRUB Environment Block" > "$workdir/grubenv"
 	printf 'default=%s\n' "$(printf '%*s' 990 "" | tr ' ' x)" >> "$workdir/grubenv"
 
 	grubenv_set default "$(printf '%*s' 990 "" | tr ' ' y)"
@@ -1275,7 +1275,7 @@ t_tr_run_with_secret()
 	local secret="$SECRET" out
 	# Called through run_with_secret
 	# shellcheck disable=SC2329
-	show_env() { printf '%s' "$NEWPIN"; }
+	show_env() { echo -n "$NEWPIN"; }
 
 	traced run_with_secret NEWPIN secret show_env > "$workdir/out"
 
