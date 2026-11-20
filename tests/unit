@@ -1642,6 +1642,45 @@ t_uki_status()
 	return 0
 }
 
+# uki_keys makes the keys of UKI="local" when they are missing, stores
+# the private parts only encrypted, and uki_key gives them back
+# shellcheck disable=SC2034  # read by the sourced library
+t_uki_keys()
+{
+	command -v openssl > /dev/null || skip "openssl is not installed"
+	systemd-creds has-tpm2 &> /dev/null || skip "no TPM2 for systemd-creds"
+	load
+	local UKI=local credstore="$workdir/credstore"
+	local secureboot_certificate="$workdir/kernel/secureboot-certificate.pem"
+	local pcr_public_key="$workdir/systemd/tpm2-pcr-initrd-public-key.pem"
+	local text
+
+	uki_keys > /dev/null 2>&1 || fail "uki_keys failed"
+	text="$(openssl x509 -in "$secureboot_certificate" -noout -text 2> /dev/null)"
+	says "code signing" "$text" "Code Signing"
+	says "RSA 4096" "$text" "4096 bit"
+	grep -qs "PRIVATE KEY" "$credstore/secureboot-private-key.pem" && fail "the key is stored in clear"
+	private_key secureboot-private-key.pem 2> /dev/null | openssl pkey -noout 2> /dev/null || fail "the key does not decrypt"
+
+	if grep -qs "tpm2-device" /etc/crypttab; then
+		[ -s "$pcr_public_key" ] || fail "no PCR public key"
+		private_key tpm2-pcr-initrd-private-key.pem 2> /dev/null | openssl pkey -noout 2> /dev/null || fail "the PCR key does not decrypt"
+	fi
+
+	# Made once, never replaced
+	local before
+	before="$(cat "$secureboot_certificate")"
+	uki_keys > /dev/null 2>&1
+	is "kept" "$before" "$(cat "$secureboot_certificate")"
+
+	# A missing certificate is made again, for the same key
+	rm "$secureboot_certificate"
+	uki_keys > /dev/null 2>&1
+	is "certificate of the key" "$(private_key secureboot-private-key.pem 2> /dev/null | openssl pkey -pubout 2> /dev/null)" \
+		"$(openssl x509 -in "$secureboot_certificate" -noout -pubkey 2> /dev/null)"
+	return 0
+}
+
 # pcrlock_unlockable has to name every category that systemd-pcrlock
 # can remove through varlink (fwupd uses them before a firmware update),
 # and the file that each one removes.  A category added upstream would
@@ -1783,6 +1822,7 @@ done <<-'EOF'
 	t_p15_status                status_pcr15 reports the measurements of this boot
 	t_uki_config                assert_uki_config accepts empty, no, yes or local, the last two only with systemd-boot
 	t_uki_status                uki_mode_text and uki_missing_kernels report the UKI mode and the kernels without a UKI
+	t_uki_keys                  uki_keys makes the keys of UKI=local, stored only encrypted
 	t_pcrlock_unlockable        pcrlock_unlockable names every category that systemd-pcrlock removes via varlink
 EOF
 

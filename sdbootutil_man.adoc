@@ -425,6 +425,9 @@ https://github.com/openSUSE/sdbootutil/issues.
 _/var/lib/sdbootutil/_:: State: the files installed in the ESP and the hashes of the last TPM2 policy.
 _/var/lib/pcrlock.d/_:: The TPM2 measurements that *systemd-pcrlock* uses.
 _/var/lib/systemd/pcrlock.json_:: The TPM2 policy.  A copy goes to the ESP.
+_/etc/kernel/secureboot-certificate.pem_:: The certificate that signs the UKIs.
+_/etc/systemd/tpm2-pcr-initrd-public-key.pem_:: The public key of the PCR 11 policy.
+_/etc/credstore.encrypted/_:: The private keys, encrypted.
 _/run/sdbootutil/_:: Lock file and state of the running boot.
 _/var/log/sdbootutil.log_:: The trace, only when *--start-trace-code* was used.
 
