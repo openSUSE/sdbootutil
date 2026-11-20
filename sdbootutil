@@ -673,8 +673,8 @@ assert_uki_config()
 	# The tools of UKI="local", checked once here
 	[ "$UKI" = "local" ] || return 0
 	local tool missing=()
-	for tool in openssl systemd-creds $(is_shim_installed && echo mokutil); do
-		command -v "$tool" > /dev/null || missing+=("$tool")
+	for tool in openssl systemd-creds objcopy objdump "$systemd_sbsign" $(is_shim_installed && echo mokutil); do
+		command -v "$tool" > /dev/null || missing+=("${tool##*/}")
 	done
 	[ "${#missing[@]}" -eq 0 ] || err "UKI=\"local\" needs ${missing[*]}"
 }
@@ -778,6 +778,49 @@ uki_keys()
 		public_part tpm2-pcr-initrd-private-key.pem "$bits" \
 			pkey -pubout -out "$pcr_public_key"
 	fi
+}
+
+systemd_sbsign=/usr/lib/systemd/systemd-sbsign
+
+# Copy the PE file IN to OUT, adding the sections NAME FILE...  Each
+# one starts after the last one, aligned like the others
+pe_add_sections()
+{
+	local in="$1" out="$2" idx name size vma align next args=()
+	shift 2
+	# The lines of the sections start with their index
+	while read -r idx name size vma _; do
+		[[ "$idx" =~ ^[0-9]+$ ]] && next=$((0x$vma + 0x$size))
+	done < <(objdump -h "$in")
+	while read -r name align; do
+		[ "$name" = "SectionAlignment" ] && break
+	done < <(objdump -p "$in")
+	while [ $# -gt 0 ]; do
+		next=$(((next + 0x$align - 1) / 0x$align * 0x$align))
+		args+=(--add-section "$1=$2" --change-section-vma "$1=$(printf '0x%x' "$next")")
+		next=$((next + $(stat -c %s "$2")))
+		shift 2
+	done
+	objcopy "${args[@]}" "$in" "$out"
+}
+
+# A signed addon in OUT, that adds CMDLINE to the kernel command line.
+# Without .uname, it works with any kernel
+build_addon()
+{
+	local cmdline="$1" out="$2"
+	echo -n "$cmdline" > "$tmpdir/addon.cmdline"
+	cat > "$tmpdir/addon.sbat" <<-EOF
+	sbat,1,SBAT Version,sbat,1,https://github.com/rhboot/shim/blob/main/SBAT.md
+	uki-addon,1,UKI Addon,addon,1,https://www.freedesktop.org/software/systemd/man/latest/systemd-stub.html
+	EOF
+	pe_add_sections "/usr/lib/systemd/boot/efi/addon$firmware_arch.efi.stub" "$tmpdir/addon.efi" \
+		.cmdline "$tmpdir/addon.cmdline" \
+		.sbat "$tmpdir/addon.sbat"
+	SYSTEMD_LOG_LEVEL=warning "$systemd_sbsign" sign --private-key=<(private_key secureboot-private-key.pem) \
+		--certificate="$secureboot_certificate" --output="$out" "$tmpdir/addon.efi" || \
+		err "Cannot sign the addon"
+	rm -f "$tmpdir/addon.cmdline" "$tmpdir/addon.sbat" "$tmpdir/addon.efi"
 }
 
 # The Secure Boot certificate in MOK: "enrolled", "pending" (waits for
