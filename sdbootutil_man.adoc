@@ -211,6 +211,7 @@ _/etc/sysconfig/bootloader_::
 *LOADER_TYPE*:::: *systemd-boot* or *grub2-bls*.
 *SECURE_BOOT*:::: *yes* installs shim.
 *UPDATE_NVRAM*:::: *no* keeps sdbootutil out of the EFI variables.
+*UKI*:::: *yes* boots the UKIs of the distribution, *local* builds them in this system, and *no* boots a kernel and an initrd.  Only for systemd-boot.
 
 _/etc/default/sdbootutil_::
 sdbootutil makes this file the first time it installs the boot loader.

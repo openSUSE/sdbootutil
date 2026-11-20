@@ -671,6 +671,39 @@ assert_uki_config()
 	is_sdboot || err "UKI=\"$UKI\" in /etc/sysconfig/bootloader needs systemd-boot (LOADER_TYPE=\"systemd-boot\")"
 }
 
+# The value of UKI, in words
+uki_mode_text()
+{
+	case "${UKI:-}" in
+		yes) echo "yes, the UKIs of the distribution" ;;
+		local) echo "local, built and signed in this system" ;;
+		*) echo "no, kernel and initrd" ;;
+	esac
+}
+
+# With UKI="yes" each kernel needs its UKI from the distribution,
+# /usr/lib/modules/<version>/vmlinuz-<variant>.efi.  sdbootutil cannot
+# install the package, so it prints the kernels that have none.  The
+# dash matters: vmlinuz.efi is a kernel (arm64 zboot), not a UKI
+uki_missing_kernels()
+{
+	[ "${UKI:-}" = "yes" ] || return 0
+	local modules="${1:-/usr/lib/modules}" image dir
+	for image in "$modules"/*/vmlinuz; do
+		[ -e "$image" ] || continue
+		dir="${image%/vmlinuz}"
+		compgen -G "$dir/vmlinuz-*.efi" > /dev/null || echo "${dir##*/}"
+	done
+}
+
+warn_missing_uki_packages()
+{
+	local version
+	for version in $(uki_missing_kernels); do
+		warn "Kernel $version has no UKI.  Install a kernel-${version##*-}-uki-<variant> package"
+	done
+}
+
 reset_rollback()
 {
 	for i in "${rollback[@]}"; do
@@ -7643,6 +7676,14 @@ status_policy()
 	done
 	status_row "Requested PCRs" "${requested:-none}"
 
+	# The signed PCR 11 of a UKI does not see the Secure Boot state,
+	# PCR 7 does.  Without Secure Boot there is nothing to keep.  It
+	# is the choice of the user, so only a warning
+	if [ -n "${UKI:-}" ] && [ "$UKI" != "no" ] && is_secure_boot && \
+	   [[ ",$requested," != *",7,"* ]]; then
+		warn "UKI is used, but PCR 7 is not in FDE_SEAL_PCR_LIST: the TPM2 does not check that Secure Boot stays enabled"
+	fi
+
 	echo "  Bound PCRs:"
 
 	[ -n "$have_policy" ] || {
@@ -7973,6 +8014,12 @@ status_boot()
 {
 	echo "Boot loader"
 	status_row "Type" "$(bootloader_name 2> /dev/null || echo unknown)"
+	status_row "UKI" "$(uki_mode_text)"
+	if [ "${UKI:-}" = "yes" ]; then
+		local missing
+		missing="$(uki_missing_kernels | paste -sd ' ')"
+		status_row "UKI files" "${missing:+missing for }${missing:-present for every kernel}"
+	fi
 
 	# The version in the ESP against the version that the system
 	# ships.  Both can be missing on their own: no bootloader
@@ -8621,12 +8668,15 @@ case "$1" in
 		bootloader_name "${2:-$root_snapshot}" ;;
 	add-kernel)
 		assert_snapshot "$3"
+		warn_missing_uki_packages
 		install_kernel "${3:-$root_snapshot}" "$2" ;;
 	add-all-kernels)
 		assert_snapshot "$2"
+		warn_missing_uki_packages
 		install_all_kernels "${2:-$root_snapshot}" ;;
 	mkinitrd)
 		assert_snapshot "$2"
+		warn_missing_uki_packages
 		arg_no_reuse_initrd=1
 		install_all_kernels "${2:-$root_snapshot}" ;;
 	remove-kernel)
@@ -8639,6 +8689,7 @@ case "$1" in
 		cleanup_entries "${2:-}" ;;
 	set-default-snapshot)
 		assert_snapshot "$2"
+		warn_missing_uki_packages
 		set_default_snapshot "${2:-$root_snapshot}" ;;
 	is-installed)
 		if is_installed; then
