@@ -669,6 +669,14 @@ assert_uki_config()
 		*) err "/etc/sysconfig/bootloader has UKI=\"$UKI\", but only \"yes\", \"no\" or \"local\" are recognized" ;;
 	esac
 	is_sdboot || err "UKI=\"$UKI\" in /etc/sysconfig/bootloader needs systemd-boot (LOADER_TYPE=\"systemd-boot\")"
+
+	# The tools of UKI="local", checked once here
+	[ "$UKI" = "local" ] || return 0
+	local tool missing=()
+	for tool in openssl systemd-creds $(is_shim_installed && echo mokutil); do
+		command -v "$tool" > /dev/null || missing+=("$tool")
+	done
+	[ "${#missing[@]}" -eq 0 ] || err "UKI=\"local\" needs ${missing[*]}"
 }
 
 # The value of UKI, in words
@@ -770,6 +778,78 @@ uki_keys()
 		public_part tpm2-pcr-initrd-private-key.pem "$bits" \
 			pkey -pubout -out "$pcr_public_key"
 	fi
+}
+
+# The Secure Boot certificate in MOK: "enrolled", "pending" (waits for
+# MokManager at the next boot) or "missing"
+mok_state()
+{
+	local der="$tmpdir/secureboot-certificate.der"
+	openssl x509 -in "$secureboot_certificate" -outform DER -out "$der" 2> /dev/null || {
+		echo "missing"
+		return 0
+	}
+	case "$(mokutil --test-key "$der" 2> /dev/null)" in
+		*"already enrolled"*) echo "enrolled" ;;
+		*"enrollment request"*) echo "pending" ;;
+		*) echo "missing" ;;
+	esac
+}
+
+# With Secure Boot, systemd-boot starts the UKIs and shim verifies
+# them, with the certificates in MOK.  So a missing certificate is
+# imported, to confirm in MokManager at the next boot.  The password is
+# the one of root, or a one-time password when root has none or one
+# that MokManager cannot check.  If that boot did not enroll it
+# (skipped, wrong password), the next run imports it again
+mok_enroll()
+{
+	local -; set +x
+	is_secure_boot || return 0
+	[ -e "$secureboot_certificate" ] || return 0
+	is_shim_installed || {
+		warn "Secure Boot without shim: the UKIs signed here cannot boot, as only shim reads MOK"
+		return 0
+	}
+
+	# `mok_state` also writes the DER certificate that the import
+	# below reads
+	local marker=/var/lib/sdbootutil/mok-import
+	case "$(mok_state)" in
+		enrolled)
+			rm -f "$marker"
+			return 0
+			;;
+		pending)
+			warn "The UKI certificate waits to be enrolled in MOK at the next boot"
+			return 0
+			;;
+	esac
+
+	[ ! -e "$marker" ] || warn "The UKI certificate was not enrolled in MOK at the last boot, importing it again"
+
+	local password="" which="the root password"
+	case "$(getent shadow root | cut -d: -f2)" in
+		\$1\$*|\$5\$*|\$6\$*|\$2[aby]\$*)
+			mokutil --import "$tmpdir/secureboot-certificate.der" --root-pw || \
+				err "Cannot import the UKI certificate in MOK"
+			;;
+		*)
+			which="the password shown below"
+			password="$(tr -dc 0-9 < /dev/urandom | head -c 8)"
+			mokutil --import "$tmpdir/secureboot-certificate.der" \
+				--hash-file <(mokutil --generate-hash="$password") || \
+				err "Cannot import the UKI certificate in MOK"
+			;;
+	esac
+	touch "$marker"
+
+	warn "The UKIs are signed with a new key.  At the next boot, MokManager asks to enroll it:"
+	warn "  1. Press a key, and select \"Enroll MOK\", \"Continue\" and \"Yes\""
+	warn "  2. Type $which (MokManager uses a US keyboard)"
+	warn "  3. Select \"Reboot\""
+	warn "Until then, the system boots the kernel and initrd entries"
+	[ -z "$password" ] || echo "MOK password: $password"
 }
 
 reset_rollback()
@@ -8100,6 +8180,13 @@ status_boot()
 		status_row "UKI key" "$([ -e "$credstore/secureboot-private-key.pem" ] && echo "$secureboot_certificate" || echo "not made yet")"
 		grep -qs "tpm2-device" /etc/crypttab && \
 			status_row "PCR 11 key" "$([ -e "$credstore/tpm2-pcr-initrd-private-key.pem" ] && echo "$pcr_public_key" || echo "not made yet")"
+		if is_secure_boot && is_shim_installed && [ -e "$secureboot_certificate" ]; then
+			case "$(mok_state)" in
+				enrolled) status_row "MOK" "the UKI certificate is enrolled" ;;
+				pending) status_row "MOK" "enrolled at the next boot, in MokManager" ;;
+				*) status_row "MOK" "the UKI certificate is not enrolled" ;;
+			esac
+		fi
 	fi
 
 

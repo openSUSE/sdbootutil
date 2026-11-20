@@ -393,6 +393,18 @@ sdbootutil unenroll --method tpm2
 sdbootutil enroll --method tpm2 --ask-recovery-pin
 ----
 
+=== Enroll the certificate of the self-signed UKIs
+
+With Secure Boot and *UKI=local*, shim checks the UKIs with the
+certificates in MOK.  sdbootutil imports its certificate, and at the
+next boot MokManager asks for the root password (or for a one-time
+password that sdbootutil prints, if root has none).  To start again,
+cancel the request, and sdbootutil imports it again:
+
+----
+mokutil --revoke-import
+----
+
 === Logs for a bug report
 
 The output of *status* has no secrets, so you can add it to the report:
