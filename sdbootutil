@@ -2093,8 +2093,12 @@ kernel_cmdline_files()
 	# For the running snapshot, and when there are no snapshots, the
 	# subvolume is "/", and its drop-ins would be read twice
 	if ! [ "${subvol:1}/" -ef / ]; then
-		usr_dropins+=(/usr/lib/kernel/cmdline.d/*)
-		etc_dropins+=(/etc/kernel/cmdline.d/*)
+		for i in /usr/lib/kernel/cmdline.d/*; do
+			[ -e "${subvol:1}$i" ] || usr_dropins+=("$i")
+		done
+		for i in /etc/kernel/cmdline.d/*; do
+			[ -e "${subvol:1}$i" ] || etc_dropins+=("$i")
+		done
 	fi
 
 	# A drop-in in "/etc" replaces the one with the same name in

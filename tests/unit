@@ -600,6 +600,27 @@ t_kcf_dropins()
 	   "$(echo "$files" | paste -sd' ')"
 }
 
+# kernel_cmdline_files reads a drop-in only once (github issue 483)
+t_kcf_same_name()
+{
+	load
+	# shellcheck disable=SC2329  # called by the sourced library
+	foreign_system() { return 0; }
+
+	[ -d /usr/lib/kernel ] || skip "/usr/lib/kernel is needed as a mount point"
+	mount -t tmpfs tmpfs /usr/lib/kernel
+	mkdir /usr/lib/kernel/cmdline.d
+	echo "foo=1" > /usr/lib/kernel/cmdline.d/10-foo.conf
+
+	local root="$workdir/root"
+	rm -rf "$root"
+	mkdir -p "$root/usr/lib/kernel/cmdline.d"
+	echo "foo=1" > "$root/usr/lib/kernel/cmdline.d/10-foo.conf"
+
+	is "10-foo.conf" 1 "$(kernel_cmdline_files "@$root" | grep -c 10-foo.conf)"
+	umount /usr/lib/kernel
+}
+
 # verify_esp_files: only the files that sdbootutil installed in the ESP
 # can reach a new TPM2 policy (github issue 465)
 
@@ -1182,6 +1203,7 @@ done <<-'EOF'
 	t_re_reused                 removable_entries keeps the entry whose initrd is being reused
 	t_pks_reused                pending_kernel_size counts nothing for a kernel already in the ESP
 	t_kcf_dropins               kernel_cmdline_files reads /usr/lib/kernel/cmdline.d, masked by /etc
+	t_kcf_same_name             kernel_cmdline_files reads a drop-in only once
 	t_efk_counter               esp_file_key drops the boot counter of an entry, and nothing else
 	t_vef_seed                  verify_esp_files records the ESP on the first prediction
 	t_vef_unchanged             verify_esp_files accepts recorded files, also after a boot counter rename
