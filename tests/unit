@@ -575,50 +575,301 @@ t_pks_reused()
 	is "a 4K kernel" 5 "$(pending_kernel_size "$workdir/linux")"
 }
 
-# kernel_cmdline_files: the drop-ins that packages ship are beside
-# "/usr/lib/kernel/cmdline" (github issue 467)
-t_kcf_dropins()
+# kernel_cmdline_files and create_boot_options: the kernel command line
+# of an entry.  The drop-ins follow the UAPI configuration files
+# specification: one with the same name in "/etc" replaces the one in
+# "/usr/lib", an empty one or a symlink to "/dev/null" masks it, and all
+# of them are sorted by name, wherever they are.  The whole command line
+# comes from one system: the snapshot of the entry, or the running one
+# when the snapshot configures nothing
+
+# Empty scratch copies of the configuration of the running system, a
+# "/proc/cmdline" with the content of "$1", and an empty snapshot in
+# "$root", that is "@$root" as a subvolume
+cmdline_setup()
 {
 	load
-	# shellcheck disable=SC2329  # called by the sourced library
-	foreign_system() { return 0; }
+	local d
+	for d in /etc/kernel /usr/lib/kernel; do
+		[ -d "$d" ] || skip "$d is needed as a mount point"
+		mountpoint -q "$d" || mount -t tmpfs tmpfs "$d"
+		rm -rf "${d:?}"/*
+		mkdir "$d/cmdline.d"
+	done
 
-	local root="$workdir/root"
+	# Rewritten in place, so the bind mount of an earlier case sees it
+	echo "${1:-BOOT_IMAGE=/vmlinuz quiet}" > "$workdir/proc-cmdline"
+	grep -q ' /proc/cmdline ' /proc/self/mountinfo || \
+		mount --bind "$workdir/proc-cmdline" /proc/cmdline
+
+	root="$workdir/root"
 	rm -rf "$root"
 	mkdir -p "$root/etc/kernel/cmdline.d" "$root/usr/lib/kernel/cmdline.d"
+
+	# shellcheck disable=SC2034  # read by the sourced library
+	subvol_prefix="@"
+	# shellcheck disable=SC2034  # read by the sourced library
+	machine_id=1
+	# shellcheck disable=SC2329  # called by the sourced library
+	get_rootfs() { echo "UUID=1"; }
+	# shellcheck disable=SC2329  # called by the sourced library
+	foreign_system() { return 1; }
+}
+
+# Run a function of sdbootutil under `set -e`, like sdbootutil does.  It
+# needs a shell of its own: every case is called in a `||` list, where
+# bash ignores `set -e`, even when it is set again inside
+strict()
+{
+	# shellcheck disable=SC2016  # expanded by the new shell
+	"$BASH" -c '. "$1"; eval "$2"; shift 2; "$@"' _ "$lib" \
+		"$(declare -f get_rootfs foreign_system; declare -p subvol_prefix machine_id)" "$@"
+}
+
+# The files of the command line of "subvol", in one line, with "$root"
+# written as "S"
+cmdline_files()
+{
+	strict kernel_cmdline_files "$1" | sed "s|^$root/|S/|" | paste -sd' '
+}
+
+# The drop-ins that packages ship are beside "/usr/lib/kernel/cmdline"
+# (github issue 467), and an empty one in "/etc" masks them
+t_kcf_dropins()
+{
+	cmdline_setup
 	echo "quiet" > "$root/etc/kernel/cmdline"
 	echo "foo=1" > "$root/usr/lib/kernel/cmdline.d/10-foo.conf"
 	echo "bar=1" > "$root/usr/lib/kernel/cmdline.d/20-bar.conf"
 	: > "$root/etc/kernel/cmdline.d/20-bar.conf"
 	echo "baz=1" > "$root/etc/kernel/cmdline.d/30-baz.conf"
 
-	# The first character of the subvolume is dropped, like the "@"
-	local files
-	files="$(kernel_cmdline_files "@$root" | grep "^$root/")"
 	is "files" \
-	   "$root/etc/kernel/cmdline $root/usr/lib/kernel/cmdline.d/10-foo.conf $root/etc/kernel/cmdline.d/30-baz.conf" \
-	   "$(echo "$files" | paste -sd' ')"
+	   "S/etc/kernel/cmdline S/usr/lib/kernel/cmdline.d/10-foo.conf S/etc/kernel/cmdline.d/30-baz.conf" \
+	   "$(cmdline_files "@$root")"
 }
 
-# kernel_cmdline_files reads a drop-in only once (github issue 483)
+# The drop-ins are sorted by name, wherever they are
+t_kcf_order()
+{
+	cmdline_setup
+	echo "a=1" > "$root/usr/lib/kernel/cmdline.d/10-a.conf"
+	echo "b=1" > "$root/etc/kernel/cmdline.d/20-b.conf"
+	echo "c=1" > "$root/usr/lib/kernel/cmdline.d/30-c.conf"
+	echo "z=1" > "$root/etc/kernel/cmdline.d/05-z.conf"
+
+	is "files" \
+	   "S/etc/kernel/cmdline.d/05-z.conf S/usr/lib/kernel/cmdline.d/10-a.conf S/etc/kernel/cmdline.d/20-b.conf S/usr/lib/kernel/cmdline.d/30-c.conf" \
+	   "$(cmdline_files "@$root")"
+}
+
+# A drop-in in "/etc" takes the place of the one it replaces
+t_kcf_override()
+{
+	cmdline_setup
+	echo "a=1" > "$root/usr/lib/kernel/cmdline.d/10-a.conf"
+	echo "x=1" > "$root/usr/lib/kernel/cmdline.d/20-x.conf"
+	echo "c=1" > "$root/usr/lib/kernel/cmdline.d/30-c.conf"
+	echo "x=2" > "$root/etc/kernel/cmdline.d/20-x.conf"
+
+	is "files" \
+	   "S/usr/lib/kernel/cmdline.d/10-a.conf S/etc/kernel/cmdline.d/20-x.conf S/usr/lib/kernel/cmdline.d/30-c.conf" \
+	   "$(cmdline_files "@$root")"
+}
+
+# A symlink to "/dev/null" masks a drop-in, and the base file
+t_kcf_mask_symlink()
+{
+	cmdline_setup
+	echo "quiet" > "$root/usr/lib/kernel/cmdline"
+	ln -s /dev/null "$root/etc/kernel/cmdline"
+	echo "a=1" > "$root/usr/lib/kernel/cmdline.d/10-a.conf"
+	ln -s /dev/null "$root/etc/kernel/cmdline.d/10-a.conf"
+	echo "b=1" > "$root/usr/lib/kernel/cmdline.d/20-b.conf"
+
+	is "files" "S/usr/lib/kernel/cmdline.d/20-b.conf" "$(cmdline_files "@$root")"
+}
+
+# An empty "/etc/kernel/cmdline" masks the one in "/usr/lib", and
+# "/proc/cmdline" too, but the drop-ins are still read
+t_kcf_mask_base()
+{
+	cmdline_setup
+	: > /etc/kernel/cmdline
+	echo "quiet" > /usr/lib/kernel/cmdline
+	echo "a=1" > /usr/lib/kernel/cmdline.d/10-a.conf
+
+	is "files" "/etc/kernel/cmdline /usr/lib/kernel/cmdline.d/10-a.conf" "$(cmdline_files "")"
+	strict kernel_cmdline_files "" > /dev/null || fail "an empty command line is a configured one"
+
+	rm /etc/kernel/cmdline
+	is "vendor base" "/usr/lib/kernel/cmdline /usr/lib/kernel/cmdline.d/10-a.conf" "$(cmdline_files "")"
+}
+
+# Directories, hidden files, and the files that rpm and the editors
+# leave behind are not drop-ins
+t_kcf_not_dropins()
+{
+	cmdline_setup
+	local d="$root/etc/kernel/cmdline.d"
+	echo "a=1" > "$d/10-a.conf"
+	mkdir "$d/20-dir"
+	echo "x=1" > "$d/20-dir/x"
+	local i
+	for i in 10-a.conf.rpmsave 10-a.conf.rpmnew 10-a.conf.rpmorig 10-a.conf~ .10-a.conf.swp; do
+		echo "a=2" > "$d/$i"
+	done
+
+	is "files" "S/etc/kernel/cmdline.d/10-a.conf" "$(cmdline_files "@$root")"
+
+	# Neither are they a configuration of the snapshot of their own
+	rm "$d/10-a.conf"
+	echo "quiet" > /etc/kernel/cmdline
+	is "running" "/etc/kernel/cmdline" "$(cmdline_files "@$root")"
+}
+
+# A snapshot that has a configuration uses only its own: the files of
+# the running system are neither added nor do they mask the ones of the
+# snapshot (github issue 483)
 t_kcf_same_name()
 {
-	load
+	cmdline_setup
+	echo "quiet" > "$root/etc/kernel/cmdline"
+	echo "foo=1" > "$root/usr/lib/kernel/cmdline.d/10-foo.conf"
+	echo "bar=1" > "$root/usr/lib/kernel/cmdline.d/20-bar.conf"
+
+	echo "splash" > /etc/kernel/cmdline
+	# The same name in both, the issue
+	echo "foo=1" > /usr/lib/kernel/cmdline.d/10-foo.conf
+	# Replaced and masked in the running system only
+	echo "foo=2" > /etc/kernel/cmdline.d/10-foo.conf
+	: > /etc/kernel/cmdline.d/20-bar.conf
+	# Only in the running system
+	echo "new=1" > /usr/lib/kernel/cmdline.d/30-new.conf
+
+	is "files" \
+	   "S/etc/kernel/cmdline S/usr/lib/kernel/cmdline.d/10-foo.conf S/usr/lib/kernel/cmdline.d/20-bar.conf" \
+	   "$(cmdline_files "@$root")"
+}
+
+# A snapshot without any configuration takes the one of the running
+# system as a whole, its masks included
+t_kcf_fallback()
+{
+	cmdline_setup
+	echo "quiet" > /etc/kernel/cmdline
+	echo "a=1" > /usr/lib/kernel/cmdline.d/10-a.conf
+	echo "b=1" > /usr/lib/kernel/cmdline.d/20-b.conf
+	: > /etc/kernel/cmdline.d/20-b.conf
+
+	is "files" "/etc/kernel/cmdline /usr/lib/kernel/cmdline.d/10-a.conf" "$(cmdline_files "@$root")"
+	is "missing snapshot" "/etc/kernel/cmdline /usr/lib/kernel/cmdline.d/10-a.conf" \
+	   "$(cmdline_files "@$workdir/missing")"
+}
+
+# A snapshot with drop-ins and no base file is a configuration: the base
+# file of the running system and "/proc/cmdline" are not its own
+t_kcf_no_base()
+{
+	cmdline_setup
+	echo "a=1" > "$root/etc/kernel/cmdline.d/10-a.conf"
+	echo "quiet" > /etc/kernel/cmdline
+
+	is "files" "S/etc/kernel/cmdline.d/10-a.conf" "$(cmdline_files "@$root")"
+}
+
+# "/proc/cmdline" is the last resort of the running system, never of a
+# foreign one, and without it nothing can be configured
+t_kcf_proc()
+{
+	cmdline_setup
+	echo "a=1" > /usr/lib/kernel/cmdline.d/10-a.conf
+
+	is "running" "/proc/cmdline /usr/lib/kernel/cmdline.d/10-a.conf" "$(cmdline_files "")"
+	is "snapshot" "/proc/cmdline /usr/lib/kernel/cmdline.d/10-a.conf" "$(cmdline_files "@$root")"
+
 	# shellcheck disable=SC2329  # called by the sourced library
 	foreign_system() { return 0; }
+	is "foreign" "/usr/lib/kernel/cmdline.d/10-a.conf" "$(cmdline_files "")"
+	rm /usr/lib/kernel/cmdline.d/10-a.conf
+	strict kernel_cmdline_files "" > /dev/null && fail "nothing is configured"
+}
 
-	[ -d /usr/lib/kernel ] || skip "/usr/lib/kernel is needed as a mount point"
-	mount -t tmpfs tmpfs /usr/lib/kernel
-	mkdir /usr/lib/kernel/cmdline.d
-	echo "foo=1" > /usr/lib/kernel/cmdline.d/10-foo.conf
+# The snapshot that is running is "/", so "/proc/cmdline" is its last
+# resort too, and its files are read once (github issue 411)
+t_kcf_running()
+{
+	cmdline_setup
+	echo "a=1" > /usr/lib/kernel/cmdline.d/10-a.conf
+	echo "b=1" > /etc/kernel/cmdline.d/20-b.conf
 
-	local root="$workdir/root"
-	rm -rf "$root"
-	mkdir -p "$root/usr/lib/kernel/cmdline.d"
-	echo "foo=1" > "$root/usr/lib/kernel/cmdline.d/10-foo.conf"
+	local running="$workdir/running"
+	mkdir -p "$running"
+	mount --rbind / "$running" || skip "cannot bind mount / in $running"
+	is "files" "/proc/cmdline /usr/lib/kernel/cmdline.d/10-a.conf /etc/kernel/cmdline.d/20-b.conf" \
+	   "$(cmdline_files "@$running")"
+	umount -l "$running"
+}
 
-	is "10-foo.conf" 1 "$(kernel_cmdline_files "@$root" | grep -c 10-foo.conf)"
-	umount /usr/lib/kernel
+# The prefix of the subvolume is not always a single character
+t_kcf_prefix()
+{
+	cmdline_setup
+	echo "quiet" > "$root/etc/kernel/cmdline"
+	# shellcheck disable=SC2034  # read by the sourced library
+	subvol_prefix="@root"
+
+	is "files" "S/etc/kernel/cmdline" "$(cmdline_files "@root$root")"
+}
+
+# Every line counts, the last one too when it does not end in a newline
+t_cbo_newline()
+{
+	cmdline_setup
+	printf 'quiet splash' > /etc/kernel/cmdline
+	printf 'a=1\nb=1' > /etc/kernel/cmdline.d/10-a.conf
+
+	is "options" "quiet splash a=1 b=1 root=UUID=1" "$(strict create_boot_options "")"
+}
+
+# Comments, blank lines and the spaces around a line are dropped
+t_cbo_comments()
+{
+	cmdline_setup
+	printf '# base\n  quiet  \n\n\t# indented\nsplash\n' > /etc/kernel/cmdline
+	printf '# nothing but a comment\n' > /etc/kernel/cmdline.d/10-a.conf
+	printf '\n  a=1 b=1\n' > /etc/kernel/cmdline.d/20-b.conf
+
+	is "options" "quiet splash a=1 b=1 root=UUID=1" "$(strict create_boot_options "")"
+}
+
+# The entry of a snapshot boots its subvolume
+t_cbo_snapshot()
+{
+	cmdline_setup
+	echo "quiet rootflags=subvol=@/.snapshots/1/snapshot" > "$root/etc/kernel/cmdline"
+
+	is "options" "quiet rootflags=subvol=@$root root=UUID=1" "$(strict create_boot_options "@$root")"
+}
+
+# "/proc/cmdline" already has the drop-ins of the boot, that are not
+# added twice (and not once more on every boot)
+t_cbo_proc()
+{
+	cmdline_setup 'BOOT_IMAGE=/vmlinuz root=UUID=0 quiet a=1 dyndbg="file a.c +p" old=1'
+	echo "a=1" > /usr/lib/kernel/cmdline.d/10-a.conf
+	echo 'dyndbg="file a.c +p"' > /usr/lib/kernel/cmdline.d/20-dyndbg.conf
+
+	is "options" 'root=UUID=1 quiet old=1 a=1 dyndbg="file a.c +p"' "$(strict create_boot_options "")"
+
+	# Only the drop-ins are taken out, not what looks like them
+	echo "dyndbg=\"file\"" > /usr/lib/kernel/cmdline.d/20-dyndbg.conf
+	is "quoted" 'root=UUID=1 quiet dyndbg="file a.c +p" old=1 a=1 dyndbg="file"' "$(strict create_boot_options "")"
+
+	# A value in quotes is one parameter, that keeps what is inside
+	cmdline_setup 'quiet opt="a b c"'
+	echo "b" > /usr/lib/kernel/cmdline.d/10-b.conf
+	is "inside quotes" 'quiet opt="a b c" b root=UUID=1' "$(strict create_boot_options "")"
 }
 
 # verify_esp_files: only the files that sdbootutil installed in the ESP
@@ -1203,7 +1454,21 @@ done <<-'EOF'
 	t_re_reused                 removable_entries keeps the entry whose initrd is being reused
 	t_pks_reused                pending_kernel_size counts nothing for a kernel already in the ESP
 	t_kcf_dropins               kernel_cmdline_files reads /usr/lib/kernel/cmdline.d, masked by /etc
-	t_kcf_same_name             kernel_cmdline_files reads a drop-in only once
+	t_kcf_order                 kernel_cmdline_files sorts the drop-ins by name, wherever they are
+	t_kcf_override              kernel_cmdline_files puts a drop-in of /etc in the place of the one it replaces
+	t_kcf_mask_symlink          kernel_cmdline_files takes a symlink to /dev/null as a mask
+	t_kcf_mask_base             kernel_cmdline_files masks the base file with an empty one, and keeps the drop-ins
+	t_kcf_not_dropins           kernel_cmdline_files ignores directories, hidden files and rpm or editor leftovers
+	t_kcf_same_name             kernel_cmdline_files reads only the configuration of the snapshot
+	t_kcf_fallback              kernel_cmdline_files takes the whole configuration of the running system
+	t_kcf_no_base               kernel_cmdline_files does not complete a snapshot with the running system
+	t_kcf_proc                  kernel_cmdline_files takes /proc/cmdline as the last resort of the running system
+	t_kcf_running               kernel_cmdline_files reads the running snapshot once
+	t_kcf_prefix                kernel_cmdline_files strips a subvolume prefix of any length
+	t_cbo_newline               create_boot_options reads a last line without a newline
+	t_cbo_comments              create_boot_options drops comments, blank lines and spaces
+	t_cbo_snapshot              create_boot_options boots the subvolume of the snapshot
+	t_cbo_proc                  create_boot_options does not add the drop-ins already in /proc/cmdline
 	t_efk_counter               esp_file_key drops the boot counter of an entry, and nothing else
 	t_vef_seed                  verify_esp_files records the ESP on the first prediction
 	t_vef_unchanged             verify_esp_files accepts recorded files, also after a boot counter rename
