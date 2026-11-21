@@ -241,7 +241,7 @@ A number.  New entries get this many boot tries (boot counting).
 
 _/usr/lib/sdbootutil/entries.d/_, _/etc/sdbootutil/entries.d/_::
 Extra boot entries from other packages.  A file in _/etc_ replaces the
-one with the same name in _/usr/lib_.
+one with the same name in _/usr/lib_, and an empty one disables it.
 
 == Environment
 
