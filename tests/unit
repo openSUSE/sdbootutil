@@ -226,6 +226,20 @@ load()
 	esp_files="$workdir/esp-files"
 }
 
+# An empty tmpfs over "dir", for the cases that use a fixed path of the
+# host.  Only our own tmpfs is emptied: "dir" can be a mount point of the
+# host (/.snapshots is one), and its files are not ours
+scratch_dir()
+{
+	local dir="$1"
+
+	# The last one is on top of the ones of the host
+	scratch_mounted() { [ "$(findmnt -n -o SOURCE --mountpoint "$dir" | tail -1)" = sdbootutil-unit ]; }
+	scratch_mounted || mount -t tmpfs sdbootutil-unit "$dir"
+	scratch_mounted || die "$dir is not a scratch tmpfs"
+	rm -rf "${dir:?}"/*
+}
+
 ####### the cases #######
 #
 # get_device_password: every source of a *current* password, and the
@@ -592,8 +606,7 @@ cmdline_setup()
 	local d
 	for d in /etc/kernel /usr/lib/kernel; do
 		[ -d "$d" ] || skip "$d is needed as a mount point"
-		mountpoint -q "$d" || mount -t tmpfs tmpfs "$d"
-		rm -rf "${d:?}"/*
+		scratch_dir "$d"
 		mkdir "$d/cmdline.d"
 	done
 
@@ -610,6 +623,7 @@ cmdline_setup()
 	subvol_prefix="@"
 	# shellcheck disable=SC2034  # read by the sourced library
 	machine_id=1
+	strict_vars="subvol_prefix machine_id"
 	# shellcheck disable=SC2329  # called by the sourced library
 	get_rootfs() { echo "UUID=1"; }
 	# shellcheck disable=SC2329  # called by the sourced library
@@ -618,12 +632,15 @@ cmdline_setup()
 
 # Run a function of sdbootutil under `set -e`, like sdbootutil does.  It
 # needs a shell of its own: every case is called in a `||` list, where
-# bash ignores `set -e`, even when it is set again inside
+# bash ignores `set -e`, even when it is set again inside.  The new shell
+# gets the functions of the case (the stubs too), and the variables
+# named in "strict_vars"
 strict()
 {
+	# shellcheck disable=SC2086  # a list of names
+	{ declare -f; declare -p $strict_vars; } > "$workdir/strict.sh"
 	# shellcheck disable=SC2016  # expanded by the new shell
-	"$BASH" -c '. "$1"; eval "$2"; shift 2; "$@"' _ "$lib" \
-		"$(declare -f get_rootfs foreign_system; declare -p subvol_prefix machine_id)" "$@"
+	"$BASH" -c '. "$1"; . "$2"; shift 2; "$@"' _ "$lib" "$workdir/strict.sh" "$@"
 }
 
 # The files of the command line of "subvol", in one line, with "$root"
@@ -870,6 +887,217 @@ t_cbo_proc()
 	cmdline_setup 'quiet opt="a b c"'
 	echo "b" > /usr/lib/kernel/cmdline.d/10-b.conf
 	is "inside quotes" 'quiet opt="a b c" b root=UUID=1' "$(strict create_boot_options "")"
+}
+
+# install_extra_entries: the boot entries that other packages add with
+# a file in /usr/lib/sdbootutil/entries.d, that has the EFI binary
+# (EFI=) and its boot entry (ENTRY=).  The files of the directory follow
+# the UAPI configuration files specification, like cmdline.d
+
+# A scratch ESP with a kernel entry, and a scratch snapshot 5 over
+# "/.snapshots", in "$root", with the EFI binary /usr/share/a/a.efi and
+# its boot entry /usr/share/a/a.conf
+extra_setup()
+{
+	load
+	[ -d /.snapshots ] || skip "/.snapshots is needed as a mount point"
+	scratch_dir /.snapshots
+
+	root=/.snapshots/5/snapshot
+	mkdir -p "$root/usr/lib/sdbootutil/entries.d" "$root/etc/sdbootutil/entries.d" "$root/usr/share/a"
+	echo "a" > "$root/usr/share/a/a.efi"
+	printf 'title A\nefi /EFI/extra/a.efi\n' > "$root/usr/share/a/a.conf"
+
+	esp="$workdir/esp"
+	rm -rf "$esp"
+	mkdir -p "$esp/loader/entries"
+	printf 'title Linux\nlinux /a/linux\n' > "$esp/loader/entries/linux.conf"
+
+	# shellcheck disable=SC2034  # read by the sourced library
+	have_snapshots=1
+	# Not "@": the prefix of the subvolume is not part of the path
+	# shellcheck disable=SC2034  # read by the sourced library
+	subvol_prefix="@root"
+	# shellcheck disable=SC2034  # read by the sourced library
+	esp_root="$esp"
+	# shellcheck disable=SC2034  # read by the sourced library
+	boot_root="$esp"
+	# shellcheck disable=SC2034  # read by the sourced library
+	entryfile="$workdir/entries.json"
+	strict_vars="have_snapshots subvol_prefix esp_root boot_root entryfile esp_files"
+
+	# The extra entries in the ESP, like `bootctl list` reports them
+	# shellcheck disable=SC2329  # called by the sourced library
+	update_entries_for_extra()
+	{
+		local f
+		for f in "$boot_root"/loader/entries/*.conf; do
+			awk -v path="$f" '$1 == "linux" || $1 == "efi" { printf "{\"%s\":\"%s\",\"path\":\"%s\"}\n", $1, $2, path }' "$f"
+		done | jq -s '[.[]|select((.linux//.efi//"")|startswith("/EFI/extra"))]' > "$entryfile"
+	}
+}
+
+# The files in the ESP, in one line
+esp_state()
+{
+	(cd "$esp" && find . -type f | sed 's|^\./||' | sort | paste -sd' ')
+}
+
+# install_extra_entries for snapshot 5, with what it says
+extras()
+{
+	strict install_extra_entries 5 2>&1
+}
+
+# An entries.d file installs the EFI binary and the boot entry, from the
+# snapshot
+t_iee_install()
+{
+	extra_setup
+	printf 'EFI=/usr/share/a/a.efi\nENTRY=/usr/share/a/a.conf\n' > "$root/usr/lib/sdbootutil/entries.d/a.conf"
+
+	is "said" "" "$(extras)"
+	is "esp" "EFI/extra/a.efi loader/entries/a.conf loader/entries/linux.conf" "$(esp_state)"
+}
+
+# Comments, blank lines, spaces around "=" and the value, an "=" in the
+# value, and a last line without a newline are all valid
+t_iee_parse()
+{
+	extra_setup
+	echo "a" > "$root/usr/share/a/a=1.efi"
+	printf '# A comment\n\n  EFI = /usr/share/a/a=1.efi  \nENTRY=/usr/share/a/a.conf' > "$root/usr/lib/sdbootutil/entries.d/a.conf"
+
+	is "said" "" "$(extras)"
+	is "esp" "EFI/extra/a=1.efi loader/entries/a.conf loader/entries/linux.conf" "$(esp_state)"
+}
+
+# A line that is not KEY=VALUE is reported and skipped, the rest of the
+# file is still valid
+t_iee_bad_line()
+{
+	extra_setup
+	printf 'not a key\n=value\nEFI=/usr/share/a/a.efi\n' > "$root/usr/lib/sdbootutil/entries.d/a.conf"
+
+	local said
+	said="$(extras)"
+	says "not a key" "$said" 'Ignoring the line "not a key"'
+	says "no key" "$said" 'Ignoring the line "=value"'
+	is "esp" "EFI/extra/a.efi loader/entries/linux.conf" "$(esp_state)"
+}
+
+# A file without EFI=, or with files that are not there, installs
+# nothing and is reported
+t_iee_invalid()
+{
+	extra_setup
+	local d="$root/usr/lib/sdbootutil/entries.d"
+	printf 'ENTRY=/usr/share/a/a.conf\n' > "$d/10-no-efi.conf"
+	printf 'EFI=/usr/share/a/missing.efi\n' > "$d/20-no-binary.conf"
+	printf 'EFI=/usr/share/a/a.efi\nENTRY=/usr/share/a/missing.conf\n' > "$d/30-no-entry.conf"
+
+	local said
+	said="$(extras)"
+	says "no EFI" "$said" "No EFI= in /usr/lib/sdbootutil/entries.d/10-no-efi.conf"
+	says "no binary" "$said" "Missing extra entry file /usr/share/a/missing.efi"
+	says "no entry" "$said" "Missing extra entry file /usr/share/a/missing.conf"
+	is "esp" "loader/entries/linux.conf" "$(esp_state)"
+}
+
+# A file in /etc replaces the one with the same name in /usr/lib
+t_iee_override()
+{
+	extra_setup
+	echo "b" > "$root/usr/share/a/b.efi"
+	printf 'EFI=/usr/share/a/a.efi\nENTRY=/usr/share/a/a.conf\n' > "$root/usr/lib/sdbootutil/entries.d/a.conf"
+	printf 'EFI=/usr/share/a/b.efi\n' > "$root/etc/sdbootutil/entries.d/a.conf"
+
+	extras > /dev/null
+	is "esp" "EFI/extra/b.efi loader/entries/linux.conf" "$(esp_state)"
+}
+
+# An empty file in /etc, or a symlink to /dev/null, masks the one in
+# /usr/lib, and what it installed is removed
+t_iee_mask()
+{
+	extra_setup
+	printf 'EFI=/usr/share/a/a.efi\nENTRY=/usr/share/a/a.conf\n' > "$root/usr/lib/sdbootutil/entries.d/a.conf"
+	extras > /dev/null
+
+	: > "$root/etc/sdbootutil/entries.d/a.conf"
+	is "empty: said" "" "$(extras)"
+	is "empty" "loader/entries/linux.conf" "$(esp_state)"
+
+	rm "$root/etc/sdbootutil/entries.d/a.conf"
+	extras > /dev/null
+	ln -s /dev/null "$root/etc/sdbootutil/entries.d/a.conf"
+	is "symlink: said" "" "$(extras)"
+	is "symlink" "loader/entries/linux.conf" "$(esp_state)"
+}
+
+# What is not in entries.d anymore is removed from the ESP, and only
+# that: the kernel entries stay
+t_iee_remove()
+{
+	extra_setup
+	printf 'EFI=/usr/share/a/a.efi\nENTRY=/usr/share/a/a.conf\n' > "$root/usr/lib/sdbootutil/entries.d/a.conf"
+	extras > /dev/null
+	echo "stray" > "$esp/EFI/extra/stray.efi"
+
+	rm "$root/usr/lib/sdbootutil/entries.d/a.conf"
+	extras > /dev/null
+	is "esp" "loader/entries/linux.conf" "$(esp_state)"
+}
+
+# A boot entry that is renamed or dropped does not stay behind
+t_iee_entry_changed()
+{
+	extra_setup
+	local conf="$root/usr/lib/sdbootutil/entries.d/a.conf"
+	cp "$root/usr/share/a/a.conf" "$root/usr/share/a/a2.conf"
+	printf 'EFI=/usr/share/a/a.efi\nENTRY=/usr/share/a/a.conf\n' > "$conf"
+	extras > /dev/null
+
+	printf 'EFI=/usr/share/a/a.efi\nENTRY=/usr/share/a/a2.conf\n' > "$conf"
+	extras > /dev/null
+	is "renamed" "EFI/extra/a.efi loader/entries/a2.conf loader/entries/linux.conf" "$(esp_state)"
+
+	printf 'EFI=/usr/share/a/a.efi\n' > "$conf"
+	extras > /dev/null
+	is "dropped" "EFI/extra/a.efi loader/entries/linux.conf" "$(esp_state)"
+}
+
+# Two files cannot install the same name: the first one, by name, wins,
+# and stays on the next run
+t_iee_same_name()
+{
+	extra_setup
+	mkdir "$root/usr/share/b"
+	echo "b" > "$root/usr/share/b/a.efi"
+	printf 'EFI=/usr/share/a/a.efi\n' > "$root/usr/lib/sdbootutil/entries.d/10-a.conf"
+	printf 'EFI=/usr/share/b/a.efi\n' > "$root/etc/sdbootutil/entries.d/20-b.conf"
+
+	says "said" "$(extras)" "Skipping extra entry /etc/sdbootutil/entries.d/20-b.conf: /EFI/extra/a.efi is already installed"
+	is "first" "a" "$(cat "$esp/EFI/extra/a.efi")"
+	extras > /dev/null
+	is "second run" "a" "$(cat "$esp/EFI/extra/a.efi")"
+}
+
+# A file that changed is copied again, one that did not is left alone
+t_iee_update()
+{
+	extra_setup
+	printf 'EFI=/usr/share/a/a.efi\nENTRY=/usr/share/a/a.conf\n' > "$root/usr/lib/sdbootutil/entries.d/a.conf"
+	extras > /dev/null
+	touch -d @1 "$esp/EFI/extra/a.efi" "$esp/loader/entries/a.conf"
+
+	extras > /dev/null
+	is "unchanged" "1 1" "$(stat -c %Y "$esp/EFI/extra/a.efi" "$esp/loader/entries/a.conf" | paste -sd' ')"
+
+	echo "a2" > "$root/usr/share/a/a.efi"
+	extras > /dev/null
+	is "changed" "a2" "$(cat "$esp/EFI/extra/a.efi")"
+	is "entry unchanged" "1" "$(stat -c %Y "$esp/loader/entries/a.conf")"
 }
 
 # verify_esp_files: only the files that sdbootutil installed in the ESP
@@ -1121,8 +1349,7 @@ pcr15_setup()
 	local d
 	for d in /var/lib/sdbootutil /var/lib/pcrlock.d /var/lib/systemd /run/log/systemd; do
 		mkdir -p "$d"
-		mountpoint -q "$d" || mount -t tmpfs tmpfs "$d"
-		rm -rf "${d:?}"/*
+		scratch_dir "$d"
 	done
 	[ -e /etc/crypttab ] || skip "/etc/crypttab is needed as a mount point"
 	echo "root UUID=1 none x-initrd.attach,tpm2-device=auto,tpm2-measure-pcr=yes" > "$workdir/crypttab"
@@ -1469,6 +1696,16 @@ done <<-'EOF'
 	t_cbo_comments              create_boot_options drops comments, blank lines and spaces
 	t_cbo_snapshot              create_boot_options boots the subvolume of the snapshot
 	t_cbo_proc                  create_boot_options does not add the drop-ins already in /proc/cmdline
+	t_iee_install               install_extra_entries installs the EFI binary and the entry of the snapshot
+	t_iee_parse                 install_extra_entries reads comments, blank lines, spaces and a last line without newline
+	t_iee_bad_line              install_extra_entries skips a line that is not KEY=VALUE
+	t_iee_invalid               install_extra_entries reports a file without EFI= or with missing files
+	t_iee_override              install_extra_entries takes the file in /etc over the one in /usr/lib
+	t_iee_mask                  install_extra_entries takes an empty file or a symlink to /dev/null as a mask
+	t_iee_remove                install_extra_entries removes what is not in entries.d, and only that
+	t_iee_entry_changed         install_extra_entries removes a boot entry that is renamed or dropped
+	t_iee_same_name             install_extra_entries installs a name only once
+	t_iee_update                install_extra_entries copies only the files that changed
 	t_efk_counter               esp_file_key drops the boot counter of an entry, and nothing else
 	t_vef_seed                  verify_esp_files records the ESP on the first prediction
 	t_vef_unchanged             verify_esp_files accepts recorded files, also after a boot counter rename

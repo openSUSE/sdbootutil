@@ -2056,31 +2056,35 @@ foreign_system()
 	return 1
 }
 
-# The drop-ins of the kernel command line in "root" ("" for "/"), one
-# per line, after the UAPI configuration files specification: one in
-# "/etc" replaces the one with the same name in "/usr/lib", and an empty
-# one or a symlink to "/dev/null" masks it.  They are sorted by name,
-# wherever they are, and the masked ones are listed too.  Directories,
-# hidden files and what rpm or an editor leave behind are not drop-ins
-kernel_cmdline_dropins()
+# The files of the configuration directory "dir" in "root" ("" for
+# "/"), one per line, after the UAPI configuration files specification:
+# the files are in "/usr/lib/dir" and "/etc/dir", and one in "/etc"
+# replaces the one with the same name in "/usr/lib".  They are sorted by
+# name, wherever they are.  An empty file or a symlink to "/dev/null"
+# masks the file, and it is listed too: the caller skips it.  Only the
+# names that match "glob" count, and never directories, hidden files or
+# what rpm or an editor leave behind
+uapi_files()
 {
 	local root="$1"
+	local dir="$2"
+	local glob="${3:-*}"
 
-	local -A dropins=()
+	local -A by_name=()
 	local i
-	for i in "$root"/usr/lib/kernel/cmdline.d/* "$root"/etc/kernel/cmdline.d/*; do
+	for i in "$root/usr/lib/$dir"/$glob "$root/etc/$dir"/$glob; do
 		[ ! -d "$i" ] || continue
 		case "$i" in
 			*.rpmsave|*.rpmnew|*.rpmorig|*~) continue ;;
 		esac
-		dropins["${i##*/}"]="$i"
+		by_name["${i##*/}"]="$i"
 	done
 
-	[ "${#dropins[@]}" -gt 0 ] || return 0
+	[ "${#by_name[@]}" -gt 0 ] || return 0
 	local name
 	while IFS= read -r name; do
-		echo "${dropins[$name]}"
-	done < <(printf '%s\n' "${!dropins[@]}" | sort)
+		echo "${by_name[$name]}"
+	done < <(printf '%s\n' "${!by_name[@]}" | sort)
 }
 
 # The base file of the kernel command line in "root", if any: the one in
@@ -2114,7 +2118,7 @@ kernel_cmdline_files()
 	local root="${subvol#"${subvol_prefix}"}"
 	[ "$root/" -ef / ] && root=
 
-	if [ -n "$root" ] && [ -z "$(kernel_cmdline_base "$root")$(kernel_cmdline_dropins "$root")" ]; then
+	if [ -n "$root" ] && [ -z "$(kernel_cmdline_base "$root")$(uapi_files "$root" kernel/cmdline.d)" ]; then
 		dbg "No kernel command line in $root, using the one of the running system"
 		root=
 	fi
@@ -2122,7 +2126,7 @@ kernel_cmdline_files()
 	local base
 	local dropins=()
 	base="$(kernel_cmdline_base "$root")"
-	mapfile -t dropins < <(kernel_cmdline_dropins "$root")
+	mapfile -t dropins < <(uapi_files "$root" kernel/cmdline.d)
 
 	# "/proc/cmdline" is the command line of the kernel that is
 	# running, so it can replace a missing base file only when the
@@ -3107,7 +3111,7 @@ bootloader_needs_update()
 
 	# The same version can be a different binary: a package rebuilt
 	# with a patch, or re-signed.  It is installed as is, so compare
-	# the files, as `extra_entry_needs_update` does
+	# the files, as `install_extra_entries` does
 	if [ "$status" = "0" ] && ! cmp -s "$(deployed_bootloader)" "$(find_bootloader "$snapshot")"; then
 		info "$bldr_name has the same version, but a different binary"
 		return 0
@@ -3160,107 +3164,98 @@ esp_root_drive_partno_dseq()
 	   ' < "$devicefile"
 }
 
-extra_entry_needs_update()
+# The EFI binary (EFI=) and the boot entry (ENTRY=) of an entries.d file
+# "conf", one per line, the entry only if there is one.  Prints nothing
+# when they are not in "root".  The lines are KEY=VALUE, with or without
+# spaces around "=", and blank lines and comments are skipped
+extra_entry_files()
 {
-	local efi="$1"
-	local entry="$2"
+	local root="$1"
+	local conf="$2"
 
-	# The `version` field of the entry says which release the
-	# provider calls this build, and nothing more: a package can be
-	# rebuilt with a new binary and the same version (a re-signed
-	# EFI is exactly that), and it can be downgraded, which a
-	# "newer than" comparison reads as "nothing to do" while the
-	# ESP keeps a binary that the system no longer has.  What has
-	# to be in the ESP is what is installed now, so the files are
-	# what is asked
-	cmp -s "$efi" "${esp_root}/EFI/extra/$(basename "$efi")" || return 0
-	[ -n "$entry" ] || return 1
-	cmp -s "$entry" "${boot_root}/loader/entries/$(basename "$entry")" || return 0
-	return 1
+	local -A keys=()
+	local line key value
+	while read -r line || [ -n "$line" ]; do
+		[ -n "$line" ] && [[ "$line" != '#'* ]] || continue
+		IFS="=" read -r key value <<< "$line"
+		read -r key <<< "$key"
+		read -r value <<< "$value"
+		if [[ "$line" != *=* ]] || [ -z "$key" ]; then
+			warn "Ignoring the line \"$line\" in ${conf#"$root"}"
+			continue
+		fi
+		keys["$key"]="$value"
+	done < "$conf"
+
+	local efi="${keys[EFI]:-}"
+	local entry="${keys[ENTRY]:-}"
+	[ -n "$efi" ] || { warn "No EFI= in ${conf#"$root"}"; return 0; }
+	[ -f "$root$efi" ] || { warn "Missing extra entry file $efi"; return 0; }
+	[ -z "$entry" ] || [ -f "$root$entry" ] || { warn "Missing extra entry file $entry"; return 0; }
+
+	echo "$efi"
+	[ -z "$entry" ] || echo "$entry"
 }
 
-install_extra_entry()
-{
-	local subvol="$1"
-	local entry="$2"
-
-	local -A e
-	local -a l
-	while read -r line; do
-		[[ "$line" == '#'* ]] && continue
-		IFS="=" read -r -a l <<<"$line"
-		[ "${#l[@]}" -eq 2 ] || err "Cannot parse line $line"
-		e["${l[0]}"]="${l[1]}"
-	done < "$entry"
-
-	[ -n "${e[EFI]}" ] || return 0
-	[ -f "${subvol:1}${e[EFI]}" ] || err "Missing extra entry file ${e[EFI]}"
-	[ -z "${e[ENTRY]}" ] || [ -f "${subvol:1}${e[ENTRY]}" ] || err "Missing extra entry file ${e[ENTRY]}"
-
-	# If the file can be installed, echo the name so it can be
-	# registered as installed (even if does not needs to be
-	# updated)
-	echo "/EFI/extra/$(basename "${e[EFI]}")"
-
-	extra_entry_needs_update "${subvol:1}${e[EFI]}" \
-				 "${e[ENTRY]:+${subvol:1}${e[ENTRY]}}" || return 0
-
-	mkdir -p "${esp_root}/EFI/extra"
-	install -p -D "${subvol:1}${e[EFI]}" "${esp_root}/EFI/extra"
-	[ -z "${e[ENTRY]}" ] || {
-		install -p -D "${subvol:1}${e[ENTRY]}" "${boot_root}/loader/entries"
-		record_esp_file "${boot_root}/loader/entries/$(basename "${e[ENTRY]}")"
-	}
-}
-
+# Install the extra boot entries that other packages ask for in
+# entries.d, and remove the ones that are not asked for anymore.  The EFI
+# binary goes to /EFI/extra, and the boot entry to /loader/entries
 install_extra_entries()
 {
 	local snapshot="$1"
 
-	local subvol=""
-	[ -z "$have_snapshots" ] || subvol="${subvol_prefix}/.snapshots/${snapshot}/snapshot"
+	local root=""
+	[ -z "$have_snapshots" ] || root="/.snapshots/${snapshot}/snapshot"
 
 	update_entries_for_extra
 
-	local efi install_extra_entry_status
-	local -A entries
-	for i in "${subvol:1}"/usr/lib/sdbootutil/entries.d/*.conf; do
-		[ -e "${subvol:1}/etc/sdbootutil/entries.d/$(basename "$i")" ] && continue
-		dbg_cat "$i"
-		# A broken entry is reported and skipped, but `set -e`
-		# would end the script before the status is checked
-		install_extra_entry_status=0
-		efi="$(install_extra_entry "$subvol" "$i")" || install_extra_entry_status=$?
-		[ "$install_extra_entry_status" -eq 0 ] || {
-			warn "Error installing extra entry $(basename "$i")"
+	# The files in the ESP that are asked for
+	local -A installed=()
+
+	local confs=()
+	mapfile -t confs < <(uapi_files "$root" sdbootutil/entries.d "*.conf")
+
+	local conf files efi entry efi_dst entry_dst
+	for conf in "${confs[@]}"; do
+		[ -f "$conf" ] && [ -s "$conf" ] || continue
+		dbg_cat "$conf"
+
+		files=()
+		mapfile -t files < <(extra_entry_files "$root" "$conf")
+		efi="${files[0]:-}"
+		entry="${files[1]:-}"
+		[ -n "$efi" ] || { warn "Skipping extra entry ${conf#"$root"}"; continue; }
+
+		# Two files would replace each other in every run
+		efi_dst="/EFI/extra/${efi##*/}"
+		entry_dst="${entry:+/loader/entries/${entry##*/}}"
+		if [ -n "${installed[$efi_dst]:-}" ] || { [ -n "$entry_dst" ] && [ -n "${installed[$entry_dst]:-}" ]; }; then
+			warn "Skipping extra entry ${conf#"$root"}: $efi_dst${entry_dst:+ or $entry_dst} is already installed"
+			continue
+		fi
+		installed["$efi_dst"]=1
+		[ -z "$entry_dst" ] || installed["$entry_dst"]=1
+
+		# The files are compared, not the version of the entry:
+		# a rebuild (a re-signed binary) has the same version, and
+		# a downgrade has an older one
+		cmp -s "$root$efi" "$esp_root$efi_dst" || install -p -D "$root$efi" "$esp_root$efi_dst"
+		[ -z "$entry" ] || cmp -s "$root$entry" "$boot_root$entry_dst" || {
+			install -p -D "$root$entry" "$boot_root$entry_dst"
+			record_esp_file "$boot_root$entry_dst"
 		}
-		[ -z "$efi" ] || entries["$efi"]=1
 	done
 
-	for i in "${subvol:1}"/etc/sdbootutil/entries.d/*.conf; do
-		dbg_cat "$i"
-		install_extra_entry_status=0
-		efi="$(install_extra_entry "$subvol" "$i")" || install_extra_entry_status=$?
-		[ "$install_extra_entry_status" -eq 0 ] || {
-			warn "Error installing extra entry $(basename "$i")"
-		}
-		[ -z "$efi" ] || entries["$efi"]=1
-	done
-
-	# Remove the entry + efi pairs not installed
-	local entry
+	# Remove the extra entries that are not asked for, also when only
+	# their name changed, and then the EFI binaries
+	local path
 	while read -r efi; do
-		read -r entry
-		[ -n "${entries[$efi]}" ] || {
-			rm -f "${esp_root}/EFI${efi}"
-			rm -f "$entry"
-		}
+		read -r path
+		[ -n "${installed[$efi]:-}" ] && [ -n "${installed[/loader/entries/${path##*/}]:-}" ] || rm -f "$path"
 	done < <(jq -r '.[] | .linux // .efi, .path' < "$entryfile")
 
-	# Finally, remove the single efi files not installed
-	for i in "${esp_root}"/EFI/extra/*; do
-		efi="${i#"${esp_root}"}"
-		[ "${entries[$efi]:-0}" -eq 1 ] || rm -f "${esp_root}${efi}"
+	for efi in "${esp_root}"/EFI/extra/*; do
+		[ -n "${installed[${efi#"${esp_root}"}]:-}" ] || rm -f "$efi"
 	done
 
 	# This action will require to update the PCR predictions
