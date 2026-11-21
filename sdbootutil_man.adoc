@@ -229,7 +229,9 @@ is left alone.
 _/etc/kernel/cmdline_::
 The kernel command line of the boot entries.  If it is missing,
 _/usr/lib/kernel/cmdline_ is used.  Files in _/usr/lib/kernel/cmdline.d/_
-and _/etc/kernel/cmdline.d/_ add more options.
+and _/etc/kernel/cmdline.d/_ add more options, in the order of their
+names.  A file in _/etc_ replaces the one with the same name in
+_/usr/lib_, and an empty one disables it.  A snapshot uses its own files.
 
 _/etc/kernel/entry-token_::
 The name of the directory of this system in the ESP (the entry token).

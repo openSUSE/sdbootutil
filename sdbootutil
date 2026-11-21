@@ -2056,62 +2056,98 @@ foreign_system()
 	return 1
 }
 
+# The drop-ins of the kernel command line in "root" ("" for "/"), one
+# per line, after the UAPI configuration files specification: one in
+# "/etc" replaces the one with the same name in "/usr/lib", and an empty
+# one or a symlink to "/dev/null" masks it.  They are sorted by name,
+# wherever they are, and the masked ones are listed too.  Directories,
+# hidden files and what rpm or an editor leave behind are not drop-ins
+kernel_cmdline_dropins()
+{
+	local root="$1"
+
+	local -A dropins=()
+	local i
+	for i in "$root"/usr/lib/kernel/cmdline.d/* "$root"/etc/kernel/cmdline.d/*; do
+		[ ! -d "$i" ] || continue
+		case "$i" in
+			*.rpmsave|*.rpmnew|*.rpmorig|*~) continue ;;
+		esac
+		dropins["${i##*/}"]="$i"
+	done
+
+	[ "${#dropins[@]}" -gt 0 ] || return 0
+	local name
+	while IFS= read -r name; do
+		echo "${dropins[$name]}"
+	done < <(printf '%s\n' "${!dropins[@]}" | sort)
+}
+
+# The base file of the kernel command line in "root", if any: the one in
+# "/etc", that replaces (or masks, when empty) the one in "/usr/lib"
+kernel_cmdline_base()
+{
+	local root="$1"
+
+	local i
+	for i in "$root/etc/kernel/cmdline" "$root/usr/lib/kernel/cmdline"; do
+		[ -e "$i" ] || [ -L "$i" ] || continue
+		echo "$i"
+		break
+	done
+}
+
 # List every file that contributes to the kernel command line of the
 # entry of "subvol", in the order that they have to be aggregated: the
-# first configuration file that is found, followed by the drop-in
-# snippets that extend it.  Fails when the system does not configure a
-# command line in any of them
+# base file, followed by the drop-ins that extend it.  Fails when the
+# system does not configure a command line in any of them
+#
+# All of them come from one system: the snapshot of the entry, or the
+# one that is running when the snapshot configures nothing.  Mixing
+# both repeats the drop-ins that are in the two, and drops the masks of
+# one of them
 kernel_cmdline_files()
 {
 	local subvol="$1"
 
-	local sources=("${subvol:1}/etc/kernel/cmdline" "${subvol:1}/usr/lib/kernel/cmdline" /etc/kernel/cmdline /usr/lib/kernel/cmdline)
+	# The running snapshot, and a system without snapshots, are "/"
+	local root="${subvol#"${subvol_prefix}"}"
+	[ "$root/" -ef / ] && root=
+
+	if [ -n "$root" ] && [ -z "$(kernel_cmdline_base "$root")$(kernel_cmdline_dropins "$root")" ]; then
+		dbg "No kernel command line in $root, using the one of the running system"
+		root=
+	fi
+
+	local base
+	local dropins=()
+	base="$(kernel_cmdline_base "$root")"
+	mapfile -t dropins < <(kernel_cmdline_dropins "$root")
+
 	# "/proc/cmdline" is the command line of the kernel that is
-	# running, so it is a valid last resort only when the entry
-	# belongs to the system that is running.  Inside the installer it
+	# running, so it can replace a missing base file only when the
+	# entry belongs to the system that is running.  Inside the installer it
 	# describes the installation medium, and parameters like
 	# "Y2DEBUG=1", "linuxrc.debug" or "console=ttyS0" would be
 	# inherited by the installed system, that would also miss the
 	# ones that the installer is expected to provide, like "quiet"
-	if foreign_system; then
+	if [ -n "$base" ] || [ -n "$root" ]; then
+		dbg "Using the kernel command line in ${root:-/}"
+	elif foreign_system; then
 		dbg "Ignoring /proc/cmdline: not the running system"
 	else
-		sources+=(/proc/cmdline)
+		base=/proc/cmdline
 	fi
 
+	# A masked base file is a configured, empty, command line.  Not
+	# "-s": the size of "/proc/cmdline" is not always known
 	local found=
+	[ -z "$base" ] || found=1
+	[ ! -f "$base" ] || echo "$base"
+
 	local i
-	for i in "${sources[@]}"; do
-		[ -f "$i" ] || continue
-		echo "$i"
-		found=1
-		break
-	done
-
-	local usr_dropins=("${subvol:1}"/usr/lib/kernel/cmdline.d/*)
-	local etc_dropins=("${subvol:1}"/etc/kernel/cmdline.d/*)
-	# For the running snapshot, and when there are no snapshots, the
-	# subvolume is "/", and its drop-ins would be read twice
-	if ! [ "${subvol:1}/" -ef / ]; then
-		for i in /usr/lib/kernel/cmdline.d/*; do
-			[ -e "${subvol:1}$i" ] || usr_dropins+=("$i")
-		done
-		for i in /etc/kernel/cmdline.d/*; do
-			[ -e "${subvol:1}$i" ] || etc_dropins+=("$i")
-		done
-	fi
-
-	# A drop-in in "/etc" replaces the one with the same name in
-	# "/usr/lib", and an empty one is a way of masking it
-	for i in "${usr_dropins[@]}"; do
-		[ -e "${subvol:1}/etc/kernel/cmdline.d/$(basename "$i")" ] && continue
-		[ -s "$i" ] || continue
-		echo "$i"
-		found=1
-	done
-
-	for i in "${etc_dropins[@]}"; do
-		[ -s "$i" ] || continue
+	for i in "${dropins[@]}"; do
+		[ -f "$i" ] && [ -s "$i" ] || continue
 		echo "$i"
 		found=1
 	done
@@ -2119,27 +2155,74 @@ kernel_cmdline_files()
 	[ -n "$found" ]
 }
 
-create_boot_options() {
+# The parameters of a command line, one per line.  Like for the kernel,
+# a value in double quotes can have spaces
+cmdline_params()
+{
+	local cmdline="$1"
+
+	local param="" quoted="" c i
+	for ((i = 0; i < ${#cmdline}; i++)); do
+		c="${cmdline:i:1}"
+		if [ "$c" = '"' ]; then
+			if [ -n "$quoted" ]; then quoted=; else quoted=1; fi
+		elif [ -z "$quoted" ] && [[ "$c" == [[:space:]] ]]; then
+			[ -z "$param" ] || echo "$param"
+			param=
+			continue
+		fi
+		param+="$c"
+	done
+	[ -z "$param" ] || echo "$param"
+}
+
+create_boot_options()
+{
 	local subvol="$1"
-	local cmdline
-	local boot_options
 
 	local cmdline_files=()
 	mapfile -t cmdline_files < <(kernel_cmdline_files "$subvol")
 
-	local i
+	# Only kernel_cmdline_files decides when "/proc/cmdline" is the
+	# base, and then it is the first file
+	local base=
+	if [ "${cmdline_files[0]:-}" = /proc/cmdline ]; then
+		base="$(< /proc/cmdline)"
+		cmdline_files=("${cmdline_files[@]:1}")
+	fi
+
+	# Every line of the files, the last one too when it does not end
+	# in a newline, but the comments
+	local options=()
+	local i line
 	for i in "${cmdline_files[@]}"; do
 		dbg_cat "$i"
-		while read -r line; do
-			[[ "$line" == '#'* ]] && continue
-			cmdline="${cmdline:+$cmdline }${line}"
+		while read -r line || [ -n "$line" ]; do
+			[ -n "$line" ] && [[ "$line" != '#'* ]] || continue
+			options+=("$line")
 		done < "$i"
 	done
+	local cmdline="${options[*]}"
 
-	# Now that "/proc/cmdline" is not always a valid fallback there
-	# can be no command line at all.  Generate the options anyway:
-	# "sedrootflags" adds "root=" and "rootflags=", which are the
-	# minimum required to boot the system
+	# "/proc/cmdline" already has the drop-ins of the boot.  Take them
+	# out before adding them again, or they would be one more time in
+	# the entry after every boot
+	if [ -n "$base" ]; then
+		local -A dropin_params=()
+		local param params=()
+		while IFS= read -r param; do
+			dropin_params["$param"]=1
+		done < <(cmdline_params "$cmdline")
+		while IFS= read -r param; do
+			[ -n "${dropin_params["$param"]:-}" ] || params+=("$param")
+		done < <(cmdline_params "$base")
+		cmdline="${params[*]}${cmdline:+ $cmdline}"
+	fi
+
+	# There can be no command line at all.  Generate the options
+	# anyway: "sedrootflags" adds "root=" and "rootflags=", which are
+	# the minimum required to boot the system
+	local boot_options
 	boot_options="$(echo "$cmdline" | sedrootflags "$subvol")"
 	echo "${boot_options# }"
 }
