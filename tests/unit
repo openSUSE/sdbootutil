@@ -1946,6 +1946,25 @@ t_dangling_uki()
 	return 0
 }
 
+# show-entry shows the entry of the UKI of a kernel, with its uki and
+# extra lines
+# shellcheck disable=SC2034,SC2329  # read and called by the sourced library
+t_show_entry_uki()
+{
+	load
+	local boot_root="$workdir/esp" entry_token=t arg_entry_keys=() verbose=
+	mkdir -p "$boot_root/loader/entries"
+	settle_entry_token() { :; }
+	find_conf_file() { return 1; }
+	printf 'title T\nuki /t/a.efi\nextra /t/rootflags-1.addon.efi\n' > "$boot_root/loader/entries/t-commit_5.5.6.2.0-1-default+3.conf"
+
+	is "all keys" "$(printf 'title\tT\nuki\t/t/a.efi\nextra\t/t/rootflags-1.addon.efi')" "$(show_entry_fields 5 6.2.0-1-default)"
+	arg_entry_keys=(uki)
+	is "uki" "$(printf 'uki\t/t/a.efi')" "$(show_entry_fields 5 6.2.0-1-default)"
+	(show_entry_fields 6 6.2.0-1-default > /dev/null 2>&1) && fail "an entry for snapshot 6"
+	return 0
+}
+
 # pcrlock_unlockable has to name every category that systemd-pcrlock
 # can remove through varlink (fwupd uses them before a firmware update),
 # and the file that each one removes.  A category added upstream would
@@ -2095,6 +2114,7 @@ done <<-'EOF'
 	t_entries_linked            the entries of a snapshot include the ones made by bootctl link
 	t_entry_version             the snapshot and the kernel of every kind of entry
 	t_dangling_uki              a UKI entry without its UKI or an addon does not boot
+	t_show_entry_uki            show-entry shows the entry of the UKI of a kernel
 	t_pcrlock_unlockable        pcrlock_unlockable names every category that systemd-pcrlock removes via varlink
 EOF
 
