@@ -1832,6 +1832,50 @@ t_uki()
 		--bank=sha256 --phase=enter-initrd --policyref=initrd \
 		--private-key="$workdir/pcr.key" --public-key="$pcr_public_key" --json=short > "$x/resign" 2> /dev/null
 	is "signature of the sections" "$(jq -c . "$x/resign")" "$(jq -c . "$x/pcrsig")"
+
+	# A new snapshot reuses the UKI of its parent only with the same
+	# command line and the same kernel
+	local boot_root="$workdir/esp" entry_token=t
+	mkdir -p "$boot_root/t" "$boot_root/loader/entries"
+	cp "$uki" "$boot_root/t/uki.efi"
+	echo "uki /t/uki.efi" > "$boot_root/loader/entries/t-commit_5.5.7.3.4-1-default.conf"
+	# shellcheck disable=SC2034,SC2329  # read by the sourced library
+	detect_parent() { parent_snapshot=5; }
+	is "reused" "$boot_root/loader/entries/t-commit_5.5.7.3.4-1-default.conf" \
+		"$(reusable_uki @/.snapshots/6/snapshot 7.3.4-1-default "root=UUID=1 quiet" "$workdir/linux")"
+	reusable_uki @/.snapshots/6/snapshot 7.3.4-1-default "root=UUID=2 quiet" "$workdir/linux" && \
+		fail "reused with another command line"
+	head -c 4096 /dev/urandom > "$workdir/linux2"
+	reusable_uki @/.snapshots/6/snapshot 7.3.4-1-default "root=UUID=1 quiet" "$workdir/linux2" && \
+		fail "reused with another kernel"
+	return 0
+}
+
+# An entry of a UKI built here is kept only while its files are in the
+# ESP and the UKI has the kernel and the command line of now
+# shellcheck disable=SC2034,SC2329  # read and called by the sourced library
+t_install_local_uki_kept()
+{
+	load
+	local boot_root="$workdir/esp" entry_token=t tmpdir="$workdir/tmp" arg_force='' arg_no_reuse_initrd='' matches
+	mkdir -p "$boot_root/t" "$boot_root/loader/entries" "$tmpdir"
+	echo "uki /t/uki.efi" > "$boot_root/loader/entries/t-commit_5.5.7.3.4-1-default.conf"
+	touch "$boot_root/t/uki.efi"
+	common_boot_options() { echo "root=UUID=1"; }
+	uki_matches() { [ -n "$matches" ]; }
+	unlink_replaced_entry() { :; }
+	reusable_uki() { return 1; }
+	stage_initrd() { :; }
+	build_uki() { :; }
+	stage_hashed() { echo "$tmpdir/u.efi"; }
+	link_uki() { echo "link"; }
+	matches=1
+	is "same" "" "$(install_local_uki 5 @/.snapshots/5/snapshot 7.3.4-1-default "$workdir/vmlinuz" 2> /dev/null)"
+	matches=
+	is "another kernel or command line" "link" "$(install_local_uki 5 @/.snapshots/5/snapshot 7.3.4-1-default "$workdir/vmlinuz" 2> /dev/null)"
+	matches=1
+	rm "$boot_root/t/uki.efi"
+	is "no UKI" "link" "$(install_local_uki 5 @/.snapshots/5/snapshot 7.3.4-1-default "$workdir/vmlinuz" 2> /dev/null)"
 	return 0
 }
 
@@ -2047,6 +2091,7 @@ done <<-'EOF'
 	t_mok                       mok_enroll imports the UKI certificate once, and again after a failed boot
 	t_addon                     build_addon makes a signed addon with the exact command line
 	t_uki                       build_uki makes a signed UKI whose PCR 11 signature matches its sections
+	t_install_local_uki_kept    the entry of a local UKI is kept only while it is in the ESP and current
 	t_entries_linked            the entries of a snapshot include the ones made by bootctl link
 	t_entry_version             the snapshot and the kernel of every kind of entry
 	t_dangling_uki              a UKI entry without its UKI or an addon does not boot

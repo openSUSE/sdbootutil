@@ -2594,25 +2594,34 @@ unlink_replaced_entry()
 }
 
 # The entry of the parent of SUBVOL for the kernel VERSION, if its UKI
-# has the command line OPTIONS: a new snapshot of the same system can
-# use it, like `reuse_initrd` does with the initrd
+# has the command line OPTIONS and the kernel LINUX: a new snapshot of
+# the same system can use it, like `reuse_initrd` does with the initrd
 reusable_uki()
 {
-	local subvol="$1" kernel_version="$2" cmdline="$3"
-	local parent_subvol parent_snapshot entry path
+	local subvol="$1" kernel_version="$2" cmdline="$3" linux="$4"
+	local parent_subvol parent_snapshot entry
 	detect_parent "$subvol"
 	[ -n "$parent_snapshot" ] || return 1
 	entry="$(entry_file "$(linked_entry_id "$kernel_version" "$parent_snapshot")")" || return 1
+	uki_matches "$entry" "$cmdline" "$linux" || return 1
+	echo "$entry"
+}
+
+# Whether the UKI of the entry ENTRY is in the ESP, with the command
+# line CMDLINE and the kernel LINUX
+uki_matches()
+{
+	local entry="$1" cmdline="$2" linux="$3" path same=
 	path="$(sed -n 's/^uki *//p' "$entry")"
 	[ -n "$path" ] && [ -e "${boot_root}$path" ] || return 1
 	# objcopy writes a new file and renames it over its output, so
 	# never /dev/stdout: it can replace the link with a file
-	local same=
 	objcopy -O binary --only-section=.cmdline "${boot_root}$path" "$tmpdir/uki-cmdline"
-	[ "$(< "$tmpdir/uki-cmdline")" != "$cmdline" ] || same=1
-	rm -f "$tmpdir/uki-cmdline"
-	[ -n "$same" ] || return 1
-	echo "$entry"
+	# A kernel rebuilt with the same version is a new UKI
+	objcopy -O binary --only-section=.linux "${boot_root}$path" "$tmpdir/uki-linux"
+	[ "$(< "$tmpdir/uki-cmdline")" != "$cmdline" ] || ! cmp -s "$tmpdir/uki-linux" "$linux" || same=1
+	rm -f "$tmpdir/uki-cmdline" "$tmpdir/uki-linux"
+	[ -n "$same" ]
 }
 
 # The entry of the kernel VERSION of SNAPSHOT (in SUBVOL) as a UKI, made
@@ -2622,14 +2631,8 @@ install_uki()
 {
 	local snapshot="$1" subvol="$2" kernel_version="$3" src="$4"
 	local dstinitrd=() reused_entry=
-	local id
+	local id entry
 	id="$(linked_entry_id "$kernel_version" "$snapshot")"
-
-	if [ -z "$arg_no_reuse_initrd$arg_force" ] && entry_file "$id" > /dev/null; then
-		info "UKI of $kernel_version already in the ESP"
-		unlink_replaced_entry "$kernel_version" "$snapshot" "$id"
-		return 0
-	fi
 
 	# The command line of the UKI is the one of every snapshot, and
 	# the addon adds the snapshot
@@ -2639,11 +2642,18 @@ install_uki()
 	local title sort_key
 	entry_title_and_sort_key title sort_key "$snapshot" "$subvol" "$kernel_version"
 
+	if [ -z "$arg_no_reuse_initrd$arg_force" ] && entry="$(entry_file "$id")" && \
+	   [ -z "$(entry_missing_files "$entry")" ] && uki_matches "$entry" "$boot_options" "$src"; then
+		info "UKI of $kernel_version already in the ESP"
+		unlink_replaced_entry "$kernel_version" "$snapshot" "$id"
+		return 0
+	fi
+
 	# The UKI of the parent snapshot, or a new one.  Its name has
 	# the hash of its content, so "link" shares it between entries
 	local uki="" size=0 sum
 	[ -n "$arg_no_reuse_initrd$arg_force" ] || \
-		reused_entry="$(reusable_uki "$subvol" "$kernel_version" "$boot_options")" || reused_entry=""
+		reused_entry="$(reusable_uki "$subvol" "$kernel_version" "$boot_options" "$src")" || reused_entry=""
 	if [ -n "$reused_entry" ]; then
 		# Freeing space must not remove the entry, and its UKI
 		uki="${boot_root}$(entry_field "$reused_entry" uki)"
