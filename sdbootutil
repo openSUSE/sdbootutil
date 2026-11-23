@@ -799,7 +799,7 @@ pe_add_sections()
 	while [ $# -gt 0 ]; do
 		next=$(((next + 0x$align - 1) / 0x$align * 0x$align))
 		args+=(--add-section "$1=$2" --change-section-vma "$1=$(printf '0x%x' "$next")")
-		next=$((next + $(stat -c %s "$2")))
+		next=$((next + $(stat -L -c %s "$2")))
 		shift 2
 	done
 	objcopy "${args[@]}" "$in" "$out"
@@ -1690,9 +1690,12 @@ remove_kernel()
 
 	settle_entry_token "${snapshot}"
 	local id
-	id="$(entry_conf_file "$kernel_version" "$snapshot")"
-	info "Removing boot entry $id"
-	bootctl_entries unlink "$id"
+	# The entry of the kernel and the initrd, and the one of the UKI
+	for id in "$(entry_conf_file "$kernel_version" "$snapshot")" "$(linked_entry_id "$kernel_version" "$snapshot")"; do
+		entry_file "$id" > /dev/null || continue
+		info "Removing boot entry $id"
+		bootctl_entries unlink "$id"
+	done
 
 	# If we remove the default entry, `bootctl` will mark a new
 	# default, but we still need to update the EFI var (or the
@@ -1852,10 +1855,13 @@ update_snapper()
 	dbg_cat "$snapperfile"
 }
 
+# The title and the sort key of a snapper snapshot, from the ones of
+# the system, in the variables named $1 and $2
 set_snapper_title_and_sortkey()
 {
+	local -n sstsk_title="$1" sstsk_sort_key="$2"
+	local snapshot="${3:?}" kernel_version="$4"
 	[ -n "$have_snapshots" ] || return 0
-	snapshot="${1:?}"
 	local type date desc important pre_num
 	local snapshot_info
 
@@ -1875,9 +1881,8 @@ set_snapper_title_and_sortkey()
 	[ "$type" = "single" ] && type=""
 	snapshot_info="$snapshot,$kernel_version,$date${type:+, $type}${desc:+, $desc}"
 
-	# shellcheck disable=SC2154
-	title="Snapper: ${important}$title ($snapshot_info)"
-	sort_key="snapper-$sort_key"
+	sstsk_title="Snapper: ${important}$sstsk_title ($snapshot_info)"
+	sstsk_sort_key="snapper-$sstsk_sort_key"
 }
 
 set_os_release()
@@ -2046,11 +2051,26 @@ mount_etc()
 	mount overlay -t overlay -o ro,"lowerdir=${upper}:${lower}" "${snapshot_dir}/etc"
 }
 
-add_version_to_title()
+# The title and the sort key of the entry of the kernel VERSION in
+# SNAPSHOT (in SUBVOL), in the variables named $1 and $2
+# shellcheck disable=SC2034  # the namerefs are written for the caller
+entry_title_and_sort_key()
 {
+	local -n etsk_title="$1" etsk_sort_key="$2"
+	local snapshot="$3" subvol="$4" kernel_version="$5"
+
+	etsk_title="${os_release_PRETTY_NAME:-Linux $kernel_version}"
 	# TW pretty name does not include the version
 	# shellcheck disable=SC2154
-	[ -n "$os_release_VERSION" ] || title="$title $os_release_VERSION_ID"
+	[ -n "$os_release_VERSION" ] || etsk_title+=" $os_release_VERSION_ID"
+	# shellcheck disable=SC2154
+	etsk_sort_key="$os_release_ID"
+
+	if is_transactional && [ "$snapshot" = 1 ]; then
+		etsk_title+=" (Initial Installation)"
+	elif ! is_transactional && subvol_is_ro "$subvol"; then
+		set_snapper_title_and_sortkey etsk_title etsk_sort_key "$snapshot" "$kernel_version"
+	fi
 }
 
 pending_kernel_size()
@@ -2471,7 +2491,9 @@ cmdline_params()
 	[ -z "$param" ] || echo "$param"
 }
 
-create_boot_options()
+# The kernel command line of the files of SUBVOL, before "root=" and
+# "rootflags=" are settled (see `sedrootflags`)
+kernel_cmdline()
 {
 	local subvol="$1"
 
@@ -2514,12 +2536,191 @@ create_boot_options()
 		cmdline="${params[*]}${cmdline:+ $cmdline}"
 	fi
 
-	# There can be no command line at all.  Generate the options
-	# anyway: "sedrootflags" adds "root=" and "rootflags=", which are
-	# the minimum required to boot the system
-	local boot_options
-	boot_options="$(echo "$cmdline" | sedrootflags "$subvol")"
+	echo "$cmdline"
+}
+
+# The options of the boot entry of SUBVOL.  There can be no command
+# line at all, and they are generated anyway: "sedrootflags" adds
+# "root=" and "rootflags=", which are the minimum required to boot
+create_boot_options()
+{
+	local subvol="$1" boot_options
+	boot_options="$(kernel_cmdline "$subvol" | sedrootflags "$subvol")"
 	echo "${boot_options# }"
+}
+
+# The options of SUBVOL that every snapshot shares: the ones above,
+# without the "rootflags=subvol=" of a snapshot
+common_boot_options()
+{
+	local subvol="$1" boot_options
+	boot_options="$(kernel_cmdline "$subvol" | sedrootflags "" | sed 's/ \?\<rootflags=subvol=[^ ]*//')"
+	echo "${boot_options# }"
+}
+
+# The name of the entry that "bootctl link" makes for the kernel
+# VERSION of SNAPSHOT.  Without snapshots there is a single commit
+linked_entry_id()
+{
+	local kernel_version="$1" snapshot="$2"
+	echo "$entry_token-commit_${snapshot:-1}.${snapshot:+${snapshot}.}$kernel_version.conf"
+}
+
+# The file of the entry ID, with or without a boot counter
+entry_file()
+{
+	local id="${1%.conf}" f
+	for f in "${boot_root}/loader/entries/$id.conf" "${boot_root}/loader/entries/$id+"*.conf; do
+		[ -e "$f" ] || continue
+		echo "$f"
+		return 0
+	done
+	return 1
+}
+
+# Remove the entry of the kernel and the initrd of VERSION in SNAPSHOT
+# that the UKI entry NEW replaced, but not the booted one: if the UKI
+# does not boot, it is the way back.  A later run removes it.  If it was
+# the default entry, NEW is the default now
+unlink_replaced_entry()
+{
+	local id default
+	id="$(entry_conf_file "$1" "$2")"
+	entry_file "$id" > /dev/null || return 0
+	[ "$(entry_key "$id")" != "$(entry_key "$(bli_efi_var_get "LoaderEntrySelected" 2> /dev/null)")" ] || return 0
+	default="$(get_default_entry 2> /dev/null)" || default=
+	bootctl_entries unlink "$id"
+	[ "$(entry_key "$id")" != "$(entry_key "$default")" ] || set_default_entry "$3"
+}
+
+# The entry of the parent of SUBVOL for the kernel VERSION, if its UKI
+# has the command line OPTIONS: a new snapshot of the same system can
+# use it, like `reuse_initrd` does with the initrd
+reusable_uki()
+{
+	local subvol="$1" kernel_version="$2" cmdline="$3"
+	local parent_subvol parent_snapshot entry path
+	detect_parent "$subvol"
+	[ -n "$parent_snapshot" ] || return 1
+	entry="$(entry_file "$(linked_entry_id "$kernel_version" "$parent_snapshot")")" || return 1
+	path="$(sed -n 's/^uki *//p' "$entry")"
+	[ -n "$path" ] && [ -e "${boot_root}$path" ] || return 1
+	# objcopy writes a new file and renames it over its output, so
+	# never /dev/stdout: it can replace the link with a file
+	local same=
+	objcopy -O binary --only-section=.cmdline "${boot_root}$path" "$tmpdir/uki-cmdline"
+	[ "$(< "$tmpdir/uki-cmdline")" != "$cmdline" ] || same=1
+	rm -f "$tmpdir/uki-cmdline"
+	[ -n "$same" ] || return 1
+	echo "$entry"
+}
+
+# The entry of the kernel VERSION of SNAPSHOT (in SUBVOL) as a UKI, made
+# with "bootctl link": the UKI is shared by every snapshot, and the
+# snapshot is in an addon with its rootflags
+install_uki()
+{
+	local snapshot="$1" subvol="$2" kernel_version="$3" src="$4"
+	local dstinitrd=() reused_entry=
+	local id
+	id="$(linked_entry_id "$kernel_version" "$snapshot")"
+
+	if [ -z "$arg_no_reuse_initrd$arg_force" ] && entry_file "$id" > /dev/null; then
+		info "UKI of $kernel_version already in the ESP"
+		unlink_replaced_entry "$kernel_version" "$snapshot" "$id"
+		return 0
+	fi
+
+	# The command line of the UKI is the one of every snapshot, and
+	# the addon adds the snapshot
+	local boot_options rootflags=""
+	boot_options="$(common_boot_options "$subvol")"
+	[ -z "$subvol" ] || rootflags="rootflags=subvol=$subvol"
+	local title sort_key
+	entry_title_and_sort_key title sort_key "$snapshot" "$subvol" "$kernel_version"
+
+	# The UKI of the parent snapshot, or a new one.  Its name has
+	# the hash of its content, so "link" shares it between entries
+	local uki="" size=0 sum
+	[ -n "$arg_no_reuse_initrd$arg_force" ] || \
+		reused_entry="$(reusable_uki "$subvol" "$kernel_version" "$boot_options")" || reused_entry=""
+	if [ -n "$reused_entry" ]; then
+		# Freeing space must not remove the entry, and its UKI
+		uki="${boot_root}$(entry_field "$reused_entry" uki)"
+		info "Reusing $uki"
+	else
+		stage_initrd "$snapshot" "$subvol" "$kernel_version" "${src%/*}/initrd"
+		# A reused entry can have more than one initrd: the UKI has
+		# one section, so they go in it one after the other
+		local initrds=("$tmpdir/initrd-0") initrd
+		[ "${#dstinitrd[@]}" -eq 0 ] || initrds=("${dstinitrd[@]/#/$boot_root}")
+		initrd="${initrds[0]}"
+		if [ "${#initrds[@]}" -gt 1 ]; then
+			initrd="$tmpdir/uki-initrd"
+			cat "${initrds[@]}" > "$initrd"
+		fi
+		build_uki "$src" "$initrd" "$boot_options" "${subvol#"${subvol_prefix}"}/usr/lib/os-release" \
+			"$kernel_version" "$tmpdir/uki-signed.efi"
+		read -r sum _ < <(sha256sum "$tmpdir/uki-signed.efi")
+		uki="$tmpdir/$kernel_version-${sum:0:16}.efi"
+		mv "$tmpdir/uki-signed.efi" "$uki"
+		size=$(stat -c %s "$uki")
+		rm -f "$tmpdir/uki-initrd" "$tmpdir/initrd-0"
+	fi
+
+	# The addon is named after its command line, so the one of a
+	# snapshot is built once and serves every kernel
+	local extra=() addon=""
+	if [ -n "$rootflags" ]; then
+		read -r sum _ < <(echo -n "$rootflags" | sha256sum)
+		addon="$tmpdir/rootflags-${sum:0:16}.addon.efi"
+		# "link" gets a copy: the one in the ESP can go with the entry
+		# unlinked below, or with the space that is freed
+		if [ -e "${boot_root}/$entry_token/${addon##*/}" ]; then
+			cp "${boot_root}/$entry_token/${addon##*/}" "$addon"
+		else
+			build_addon "$rootflags" "$addon"
+			size=$((size + $(stat -c %s "$addon")))
+		fi
+		extra=(--extra="$addon")
+	fi
+	make_free_space "$snapshot" $((size / 1024 + 1)) || err "No free space in ${boot_root} for the UKI"
+
+	# Recorded after "link" copies them, see below
+	local f added=()
+	for f in "$uki" ${addon:+"$addon"}; do
+		[ -e "${boot_root}/$entry_token/${f##*/}" ] || added+=("${boot_root}/$entry_token/${f##*/}")
+	done
+
+	local tries=""
+	[ ! -f /etc/kernel/tries ] || read -r tries < /etc/kernel/tries
+	[[ "$tries" =~ ^[0-9]+$ ]] || tries=""
+
+	# "link" refuses an entry that is already there.  "unlink"
+	# refuses the booted one, and then "link" says why
+	! entry_file "$id" > /dev/null || bootctl_entries unlink "$id" || :
+	SYSTEMD_LOG_LEVEL=warning bootctl link "$uki" "${extra[@]}" \
+		--entry-token="literal:$entry_token" --entry-commit="${snapshot:-1}" \
+		--entry-version="${snapshot:+${snapshot}.}$kernel_version" \
+		--entry-title="$title" ${tries:+--tries-left="$tries"} --keep-free=0 || \
+		err "Cannot link the UKI of $kernel_version"
+
+	# The new files come from here, so they can be part of a policy
+	# (see `verify_esp_files`)
+	for f in "${added[@]}"; do
+		record_esp_file "$f"
+	done
+
+	# "link" takes the sort key from the os-release of the UKI, that
+	# is the same for every snapshot
+	local entry
+	entry="$(entry_file "$id")" || err "No entry $id after linking the UKI"
+	sed -i "/^sort-key /d; \$a sort-key $sort_key" "$entry"
+
+	unlink_replaced_entry "$kernel_version" "$snapshot" "$id"
+	rm -f "$tmpdir"/*.efi
+	bootctl_cleanup
+	update_predictions=1
 }
 
 # The initrd of the kernel VERSION of SNAPSHOT (in SUBVOL), staged for a
@@ -2609,8 +2810,21 @@ install_kernel()
 		return 0
 	}
 
-	calc_chksum "$src"
 	settle_entry_token "${snapshot}"
+
+	# A UKI entry only when the UKI can boot: with Secure Boot, its
+	# certificate has to be in MOK first.  Until then, the entry of
+	# the kernel and the initrd
+	if [ "${UKI:-}" = "local" ]; then
+		uki_keys
+		if ! is_secure_boot || [ "$(mok_state)" = "enrolled" ]; then
+			install_uki "$snapshot" "$subvol" "$kernel_version" "$src"
+			return 0
+		fi
+		mok_enroll
+	fi
+
+	calc_chksum "$src"
 	local dst="/$entry_token/$kernel_version/linux-$chksum"
 	local devicetree_src=
 	local devicetree_dst=
@@ -2664,16 +2878,8 @@ install_kernel()
 	# `set -e` does not apply, like a command substitution
 	[ "${#dstinitrd[@]}" -ne 0 ] || err "No initrd found for $kernel_version in snapshot $snapshot"
 
-	title="${os_release_PRETTY_NAME:-Linux $kernel_version}"
-	# shellcheck disable=SC2154
-	sort_key="$os_release_ID"
-
-	add_version_to_title
-	if is_transactional && [ "$snapshot" = 1 ]; then
-		title="${title} (Initial Installation)"
-	elif ! is_transactional && subvol_is_ro "$subvol"; then
-		set_snapper_title_and_sortkey "$snapshot"
-	fi
+	local title sort_key
+	entry_title_and_sort_key title sort_key "$snapshot" "$subvol" "$kernel_version"
 
 	local entry_machine_id=
 	[ "$entry_token" = "$machine_id" ] && entry_machine_id="$machine_id"
@@ -6500,7 +6706,8 @@ initrd_crypttab()
 	local id initrd
 	update_entries_for_this_system
 	id="$(get_default_entry)"
-	initrd="$(jq -r --arg id "$id" '.[] | select(.id == $id or .id == $id + ".conf") | .initrd[0] // empty' < "$entryfile" | head -n 1)"
+	# lsinitrd reads the initrd inside a UKI too
+	initrd="$(jq -r --arg id "$id" '.[] | select(.id == $id or .id == $id + ".conf") | .initrd[0] // .uki // empty' < "$entryfile" | head -n 1)"
 	[ -n "$initrd" ] && [ -e "$boot_root$initrd" ] || return 1
 	lsinitrd -f etc/crypttab "$boot_root$initrd" 2> /dev/null
 }
@@ -6592,7 +6799,7 @@ entries_bind_pcr15()
 			[[ "$name" != \#* ]] || continue
 			[[ "$opts" != *"tpm2-measure-pcr=yes"* ]] || [ "$name" = "$anchor" ] || return 1
 		done < "$dir/etc/crypttab"
-	done < <(jq -r '.[] | select(.type == "type1") | .initrd[0] // empty' < "$entryfile" | sort -u)
+	done < <(jq -r '.[] | select(.type == "type1") | .initrd[0] // .uki // empty' < "$entryfile" | sort -u)
 }
 
 # The keyslots of the pcrlock TPM2 slots of "$1" that are not bound to
