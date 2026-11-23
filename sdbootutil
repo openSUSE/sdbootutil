@@ -3193,16 +3193,20 @@ show_entry_fields()
 
 	local conf
 	# Without collecting the status here `set -e` ends the script
-	# with an empty message when there is no entry for the kernel
-	conf="$(find_conf_file "$kernel_version" "$snapshot")" || \
-		err "Missing boot entry for kernel $kernel_version"
+	# with an empty message when there is no entry for the kernel.
+	# Without the entry of the kernel and the initrd, the one of
+	# its UKI
+	if ! conf="$(find_conf_file "$kernel_version" "$snapshot")"; then
+		id="$(linked_entry_id "$kernel_version" "$snapshot")"
+		conf="$(entry_file "$id")" || err "Missing boot entry for kernel $kernel_version"
+	fi
 
 	[ -z "$verbose" ] || echo -e "ID\t$id"
 	local k
 	local v
 	while read -r k v; do
 		case "$k" in
-			title|version|sort-key|options|linux|initrd|devicetree) ;;
+			title|version|sort-key|options|linux|initrd|devicetree|uki|extra) ;;
 			*) continue ;;
 		esac
 
