@@ -4946,18 +4946,21 @@ pcrlock_cmdline_initrd()
 
 	# 710-kernel-cmdline-boot-loader.pcrlock.d is not part of the
 	# pcrlock standards
+	pcrlock_loader_cmdline "$cmdline" \
+		"/var/lib/pcrlock.d/710-kernel-cmdline-boot-loader.pcrlock.d/cmdline-$suffix.pcrlock"
+}
 
-	# We cannot use lock-kernel-cmdline, as it ignore --pcr=12,
-	# and assign PCR 9 in any case
-	echo -ne "$cmdline\x00" > "$tmpdir/cmdline"
-	iconv -t UTF-16LE -o "$tmpdir/cmdline.utf16" "$tmpdir/cmdline"
-	pcrlock \
-		lock-raw \
-		--pcr=12 \
-		--pcrlock="/var/lib/pcrlock.d/710-kernel-cmdline-boot-loader.pcrlock.d/cmdline-$suffix.pcrlock" \
-		"$tmpdir/cmdline.utf16"
-	rm "$tmpdir/cmdline.utf16"
-	rm "$tmpdir/cmdline"
+# The command line CMDLINE as the boot loader (or systemd-stub, for an
+# addon) measures it into PCR 12.  It is the same measurement that the
+# kernel does into PCR 9, but lock-kernel-cmdline ignores --pcr
+pcrlock_loader_cmdline()
+{
+	local cmdline="$1" out="$2"
+
+	echo -n "$cmdline" > "$tmpdir/cmdline"
+	pcrlock lock-kernel-cmdline --pcrlock="$tmpdir/cmdline.pcrlock" "$tmpdir/cmdline"
+	jq -c '.records[].pcr = 12' "$tmpdir/cmdline.pcrlock" > "$out"
+	rm "$tmpdir/cmdline" "$tmpdir/cmdline.pcrlock"
 }
 
 pcrlock_grub2_bls_kernel_initrd_cmdline_initrd()
