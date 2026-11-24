@@ -679,6 +679,12 @@ assert_uki_config()
 	[ "${#missing[@]}" -eq 0 ] || err "UKI=\"local\" needs ${missing[*]}"
 }
 
+# The UKIs are selected in /etc/sysconfig/bootloader
+uki_selected()
+{
+	[ "${UKI:-}" = "local" ] || [ "${UKI:-}" = "yes" ]
+}
+
 # The value of UKI, in words
 uki_mode_text()
 {
@@ -4706,8 +4712,11 @@ select_entries_for_prediction()
 	# $id, $ids and $kernel below are jq variables, bound by --arg
 	# and by "as", so the filter has to reach jq unexpanded
 	# shellcheck disable=SC2016
+	# The snapshot is in the version ("N_" or "N@"), or in the id of
+	# the entries of "bootctl link" ("-commit_N."), whose version is
+	# "<commit>.<snapshot>.<kernel>"
 	if [ -n "$have_snapshots" ]; then
-		filter='def priority(id): id as $id | $ids | split(" ") | index($id); map(. + {"priority": priority(.version | scan("^(\\d+)[@_]") | .[]), "kernel": .version | scan("^\\d+[@_](?:(\\d+).(\\d+).(\\d+)-(\\d+))") | map(. | tonumber)})'
+		filter='def priority(id): id as $id | $ids | split(" ") | index($id); def snapshot: [(.version // "" | scan("^(\\d+)[@_]") | .[]), (.id | scan("-commit_(\\d+)[.@+]") | .[])] | first; map(([.version // "" | scan("(\\d+)\\.(\\d+)\\.(\\d+)-(\\d+)")] | first) as $kernel | . + {"priority": priority(snapshot), "kernel": (($kernel // []) | map(tonumber))})'
 	else
 		filter='map(([.version // "" | scan("(\\d+)\\.(\\d+)\\.(\\d+)-(\\d+)")] | first) as $kernel | . + {"priority": 0, "kernel": (($kernel // []) | map(tonumber))})'
 	fi
@@ -4788,6 +4797,7 @@ shift_component()
 declare -gA variation_limit=(
 	[650-kernel-efi-application]=4
 	[710-kernel-cmdline-initrd-entry]=4
+	[710-kernel-cmdline-boot-loader]=4
 	[650-grub2-bls-entry-cmdline]=8
 	[710-grub2-bls-kernel-initrd-kernel-cmdline-initrd-entry]=2
 )
@@ -4799,7 +4809,7 @@ declare -gA variation_limit=(
 # since the boot"
 restore_shifts()
 {
-	local shifted dir variation component limit
+	local shifted dir variation component limit v n last
 	for shifted in "$tmpdir"/shift/*.pcrlock.d/*.pcrlock; do
 		dir="/var/lib/pcrlock.d/${shifted#"$tmpdir/shift/"}"
 		dir="${dir%/*}"
@@ -4809,13 +4819,20 @@ restore_shifts()
 
 		# A full component makes room for the current boot: the
 		# last variation goes, as the generators number them by
-		# priority.  Otherwise the PCR is dropped from the policy
+		# priority ("linux-1", "uki-2"...).  Otherwise the PCR is
+		# dropped from the policy
 		component="${dir##*/}"
 		limit="${variation_limit["${component%.pcrlock.d}"]:-}"
 		if [ -n "$limit" ]; then
 			local variations=("$dir"/*.pcrlock)
 			if [ "${#variations[@]}" -ge "$limit" ]; then
-				variation="$(printf '%s\n' "${variations[@]}" | sort -V | tail -n 1)"
+				variation='' last=0
+				for v in "${variations[@]}"; do
+					n="${v%.pcrlock}"
+					n="${n##*-}"
+					[[ "$n" =~ ^[0-9]+$ ]] && [ "$n" -gt "$last" ] || continue
+					variation="$v" last="$n"
+				done
 				dbg "Removing ${variation##*/} from $dir, to keep the current boot"
 				rm -f "$variation"
 			fi
@@ -4963,6 +4980,25 @@ pcrlock_loader_cmdline()
 	rm "$tmpdir/cmdline" "$tmpdir/cmdline.pcrlock"
 }
 
+# The command lines of the addons of a UKI entry, in PCR 12, as the
+# variation SUFFIX of 710-kernel-cmdline-boot-loader.  The stub joins
+# them with a space, and measures them as one.  Without addons it is the
+# empty variation: the stub measures nothing.  It is named to go after
+# the others, see systemd#36436
+pcrlock_addons_cmdline()
+{
+	local suffix="$1"
+	shift
+	local dir=/var/lib/pcrlock.d/710-kernel-cmdline-boot-loader.pcrlock.d
+
+	mkdir -p "$dir"
+	if [ "$#" -eq 0 ]; then
+		echo '{"records": []}' > "$dir/zz-empty.pcrlock"
+		return 0
+	fi
+	pcrlock_loader_cmdline "$*" "$dir/addons-$suffix.pcrlock"
+}
+
 pcrlock_grub2_bls_kernel_initrd_cmdline_initrd()
 {
 	local linux="$1"
@@ -5101,27 +5137,56 @@ pcrlock_sdboot()
 	# 650-kernel-efi-application.pcrlock is not part of the
 	# pcrlock standards
 	# TODO: move to kernel-TYPE-pcrlock.rpm
+	# The image that the boot loader starts: the kernel, or the UKI
+	# and then its addons, that the firmware measures one after the
+	# other.  For the UKI `lock-uki` also gives the sections that the
+	# stub measures into PCR 11, between the UKI and the addons.  One
+	# variation per entry, with all of them
 	shift_component 650-kernel-efi-application
-	local n=0
+	local n=0 kind images file missing locks i verb
 	local -A kernels
-	while read -r linux; do
-		[ -f "${boot_root}$linux" ] || {
-			info "Missing ${boot_root}$linux, ignoring entry for prediction"
+	while IFS=$'\t' read -r kind images; do
+		IFS=$'\t' read -r -a images <<< "$images"
+		missing=
+		for file in "${images[@]}"; do
+			[ -f "${boot_root}$file" ] || missing="$file"
+		done
+		[ -z "$missing" ] || {
+			info "Missing ${boot_root}$missing, ignoring entry for prediction"
 			continue
 		}
-		[ -z "${kernels["$linux"]}" ] || continue
-		kernels["$linux"]=1
+		[ -z "${kernels["${images[*]}"]}" ] || continue
+		kernels["${images[*]}"]=1
 		n=$((n+1))
 		# Limit to 4 because of the separator
 		[ "$n" -le "${variation_limit[650-kernel-efi-application]}" ] || {
 			info "Too many variations for 650-kernel-efi-application"
 			continue
 		}
-		track_esp_file "${boot_root}/$linux"
-		pcrlock_file lock-pe \
-			"/var/lib/pcrlock.d/650-kernel-efi-application.pcrlock.d/linux-$n.pcrlock" \
-			"${boot_root}/$linux"
-	done < <(jq --raw-output 'sort_by(.priority, (.kernel | map(-.))) | map(.linux) | .[]' "$entryfile")
+		# A kernel is written as before, so the variation of the
+		# current boot is still the same file (`restore_shifts`)
+		if [ "$kind" = "linux" ]; then
+			track_esp_file "${boot_root}${images[0]}"
+			pcrlock_file lock-pe \
+				"/var/lib/pcrlock.d/650-kernel-efi-application.pcrlock.d/linux-$n.pcrlock" \
+				"${boot_root}${images[0]}"
+			continue
+		fi
+		# The addons are plain PE images for the firmware, and the
+		# stub measures none of their sections into PCR 11
+		locks=()
+		for i in "${!images[@]}"; do
+			verb=lock-pe
+			[ "$i" -gt 0 ] || verb=lock-uki
+			track_esp_file "${boot_root}${images[$i]}"
+			pcrlock_file "$verb" "$tmpdir/image-$i.pcrlock" "${boot_root}${images[$i]}"
+			locks+=("$tmpdir/image-$i.pcrlock")
+		done
+		mkdir -p /var/lib/pcrlock.d/650-kernel-efi-application.pcrlock.d
+		jq --slurp '{"records": [.[].records[]]}' "${locks[@]}" \
+		   > "/var/lib/pcrlock.d/650-kernel-efi-application.pcrlock.d/uki-$n.pcrlock"
+		rm "${locks[@]}"
+	done < <(jq --raw-output 'sort_by(.priority, (.kernel | map(-.))) | .[] | select(.uki or .linux) | if .uki then ["uki", .uki] + [.addons[]? | .globalAddon // .localAddon] else ["linux", .linux] end | join("\t")' "$entryfile")
 
 	# Join the cmdline and the initrd in a single component
 	shift_component 710-kernel-cmdline-initrd-entry
@@ -5152,7 +5217,22 @@ pcrlock_sdboot()
 		track_esp_file "$conf"
 		track_esp_file "${boot_root}$initrd"
 		pcrlock_cmdline_initrd "initrd=$cmdline" "${boot_root}$initrd" "$n"
-	done < <(jq --raw-output 'sort_by(.priority, (.kernel | map(-.))) | .[] | ([(.initrd[0] | sub("/"; "\\"; "g")), .options] | join(" ")), .initrd[0], .path' "$entryfile")
+	done < <(jq --raw-output 'sort_by(.priority, (.kernel | map(-.))) | .[] | select(.uki == null) | ([(.initrd[0] | sub("/"; "\\"; "g")), .options] | join(" ")), .initrd[0], .path' "$entryfile")
+
+	# A UKI has no "options": the stub measures the command line of
+	# each addon into PCR 12 instead, and nothing without addons.
+	# PCR 9 cannot be predicted for a UKI (see
+	# `generate_tpm2_predictions_pcrlock`)
+	local addons=()
+	while IFS=$'\t' read -r -a addons; do
+		n=$((n+1))
+		# Like PCR 9 above, but for PCR 12
+		[ "$n" -le "${variation_limit[710-kernel-cmdline-boot-loader]}" ] || {
+			info "Too many variations for 710-kernel-cmdline-boot-loader"
+			continue
+		}
+		pcrlock_addons_cmdline "$n" "${addons[@]}"
+	done < <(jq --raw-output 'sort_by(.priority, (.kernel | map(-.))) | .[] | select(.uki) | [.addons[]?.options // empty] | join("\t")' "$entryfile")
 
 	# Generate variation for 710-kernel-cmdline-initrd-entry
 	# component that contains the current cmdline and the current
@@ -5176,7 +5256,7 @@ pcrlock_sdboot()
 				continue
 			}
 			pcrlock_cmdline_initrd "initrd=$cmdline" "${tmpdir}$initrd" "0-$n"
-		done < <(jq --raw-output '.[] | ([(.initrd[0] | sub("/"; "\\"; "g")), .options] | join(" ")), .initrd[0]' "$initialentryfile")
+		done < <(jq --raw-output '.[] | select(.uki == null) | ([(.initrd[0] | sub("/"; "\\"; "g")), .options] | join(" ")), .initrd[0]' "$initialentryfile")
 	fi
 }
 
@@ -6135,6 +6215,21 @@ generate_tpm2_predictions_pcrlock()
 	local pcrs="$FDE_SEAL_PCR_LIST"
 
 	info "Generating TPM2 predictions"
+
+	# The kernel measures in PCR 9 the initrd that systemd-stub hands
+	# over: the .initrd of the UKI and the cpio archives that the stub
+	# makes, one of them with the "boot secret".  The secret is unknown
+	# before the first boot of a UKI, and the archives follow internal
+	# formats of the stub, so PCR 9 is not predicted for a UKI.  The
+	# signed PCR 11 policy covers the initrd and the command line of
+	# the UKI instead.  When the UKIs are no longer selected, PCR 9 is
+	# back in the policy
+	if [[ ",$pcrs," == *",9,"* ]] && uki_selected; then
+		info "The UKIs are selected, PCR 9 is left out of the policy"
+		pcrs="$(remove_pcr "$pcrs" 9)"
+		[ -z "$arg_strict" ] || \
+			err "PCR 9 cannot be predicted for the UKIs, so it cannot be part of the policy. No policy is applied, run without --strict to accept the subset"
+	fi
 
 	# Select the affected entries
 	select_entries_for_prediction
@@ -8162,7 +8257,9 @@ status_policy()
 	# refuses unsigned addons, so only PCR 7 matters.  With Secure
 	# Boot off it accepts both, and only PCR 12 sees them.  The PCRs
 	# are the choice of the user, so only a warning
-	if [ -n "${UKI:-}" ] && [ "$UKI" != "no" ]; then
+	if uki_selected; then
+		[[ ",$requested," != *",9,"* ]] || \
+			echo "  PCR 9 is requested, but left out of the policy while the UKIs are selected"
 		if is_secure_boot; then
 			[[ ",$requested," == *",7,"* ]] || \
 				warn "UKI is used, but PCR 7 is not in FDE_SEAL_PCR_LIST: the TPM2 does not check that Secure Boot stays enabled"
