@@ -1529,6 +1529,17 @@ t_shift_limit()
 	restore_shifts
 	is "room: nothing goes" "cmdline-initrd-1.pcrlock shift-cmdline-initrd-1.pcrlock" "$(cd "$d" && echo *)"
 	rm -rf "$d"
+
+	# The number says the priority, not the name
+	c=650-kernel-efi-application d="/var/lib/pcrlock.d/$c.pcrlock.d"
+	mkdir -p "$tmpdir/shift/$c.pcrlock.d" "$d"
+	for n in linux-1 uki-2 linux-3 linux-4; do
+		echo "$n" > "$d/$n.pcrlock"
+	done
+	echo "boot" > "$tmpdir/shift/$c.pcrlock.d/shift-linux-1.pcrlock"
+	restore_shifts
+	is "kernels and UKIs: the last goes" "linux-1.pcrlock linux-3.pcrlock shift-linux-1.pcrlock uki-2.pcrlock" "$(cd "$d" && echo *)"
+	rm -rf "$d"
 }
 
 # entries_bind_pcr15 needs every initrd to measure the anchor alone,
@@ -1946,6 +1957,87 @@ t_dangling_uki()
 	return 0
 }
 
+# The entries of "bootctl link" take part in the prediction: their
+# snapshot is in the id, and their version is "<commit>.<snapshot>.<kernel>"
+# shellcheck disable=SC2034,SC2329  # read and called by the sourced library
+t_prediction_entries_linked()
+{
+	load
+	local entryfile="$workdir/entries.json" have_snapshots=1
+	snapshot_ids_for_prediction() { echo "5 1"; }
+	regex_snapshot_ids_for_prediction() { echo "(?:5|1)"; }
+	update_entries_for_snapshot()
+	{
+		jq -n '[{id: "t-6.2.1-1-default-5.conf", version: "5_6.2.1-1-default"},
+			{id: "t-commit_1.1.7.3.5-1-default.conf", version: "1.1.7.3.5-1-default", uki: "/t/a.efi"},
+			{id: "t-commit_5.5.6.12.10-1-default+3.conf", version: "5.5.6.12.10-1-default", uki: "/t/b.efi"}]' > "$entryfile"
+	}
+	select_entries_for_prediction > /dev/null
+	is "entries" 3 "$(jq length "$entryfile")"
+	is "priorities" "0 1 0" "$(jq -r '[.[].priority] | join(" ")' "$entryfile")"
+	is "kernels" "6.2.1.1 7.3.5.1 6.12.10.1" "$(jq -r '[.[].kernel | join(".")] | join(" ")' "$entryfile")"
+	return 0
+}
+
+# The UKI of an entry is predicted with its addons, and nothing else
+# that "bootctl link" lists as extras (credentials, extensions)
+# shellcheck disable=SC2034,SC2329  # read and called by the sourced library
+t_pcrlock_uki_addons()
+{
+	load
+	local boot_root="$workdir/esp" esp_root="$workdir/esp" tmpdir="$workdir/tmp" entryfile="$workdir/entries"
+	mkdir -p "$boot_root/t" "$boot_root/loader/credentials" "$tmpdir"
+	scratch_dir /var/lib/pcrlock.d
+	touch "$boot_root/t/uki.efi" "$boot_root/t/r.addon.efi" "$boot_root/loader/credentials/a.cred"
+	echo '[{"uki": "/t/uki.efi", "extras": ["/loader/credentials/a.cred", "/t/r.addon.efi"],
+		"addons": [{"localAddon": "/t/r.addon.efi", "options": "rootflags=x"}]}]' > "$entryfile"
+	shift_component() { :; }
+	track_esp_file() { :; }
+	pcrlock_addons_cmdline() { :; }
+	pcrlock_file() { echo "$1 ${3##*/}" >> "$workdir/locks"; echo '{"records": []}' > "$2"; }
+	pcrlock_sdboot > /dev/null 2>&1
+	is "the UKI and its addon" "lock-uki uki.efi|lock-pe r.addon.efi" "$(paste -sd '|' "$workdir/locks")"
+	[ -s /var/lib/pcrlock.d/650-kernel-efi-application.pcrlock.d/uki-1.pcrlock ] || fail "no variation"
+	return 0
+}
+
+# The stub joins the command lines of the addons with a space, and
+# measures them into PCR 12 as one event
+# shellcheck disable=SC2034  # read by the sourced library
+t_pcrlock_addons_cmdline()
+{
+	command -v systemd-pcrlock > /dev/null || [ -x /usr/lib/systemd/systemd-pcrlock ] || skip "systemd-pcrlock is not installed"
+	load
+	local tmpdir="$workdir/tmp" sum d=/var/lib/pcrlock.d/710-kernel-cmdline-boot-loader.pcrlock.d
+	mkdir -p "$tmpdir"
+	scratch_dir /var/lib/pcrlock.d
+	pcrlock_addons_cmdline 1 "root=/dev/mapper/cr_root" "quiet rootflags=subvol=@/.snapshots/5/snapshot"
+	read -r sum _ < <(echo -ne "root=/dev/mapper/cr_root quiet rootflags=subvol=@/.snapshots/5/snapshot\x00" | iconv -t UTF-16LE | sha256sum)
+	is "one record" "12 $sum" "$(jq -r '.records[] | "\(.pcr) \(.digests[] | select(.hashAlg == "sha256") | .digest)"' "$d/addons-1.pcrlock")"
+	pcrlock_addons_cmdline 2
+	is "no addons" '{"records": []}' "$(cat "$d/zz-empty.pcrlock")"
+	return 0
+}
+
+# The command lines of the addons go to PCR 12 for as many entries as
+# fit in the PolicyOR limit, like PCR 9 for the kernel entries
+# shellcheck disable=SC2034,SC2329  # read and called by the sourced library
+t_pcrlock_addons_limit()
+{
+	load
+	local boot_root="$workdir/esp" esp_root="$workdir/esp" tmpdir="$workdir/tmp" entryfile="$workdir/entries"
+	mkdir -p "$boot_root" "$tmpdir"
+	scratch_dir /var/lib/pcrlock.d
+	jq -n '[range(6) | {uki: "/u\(.).efi", addons: [{localAddon: "/r.addon.efi", options: "rootflags=\(.)"}]}]' > "$entryfile"
+	shift_component() { :; }
+	track_esp_file() { :; }
+	pcrlock_file() { :; }
+	pcrlock_addons_cmdline() { echo "$1" >> "$workdir/addons"; }
+	pcrlock_sdboot > /dev/null 2>&1
+	is "variations" "1 2 3 4" "$(paste -sd ' ' "$workdir/addons")"
+	return 0
+}
+
 # show-entry shows the entry of the UKI of a kernel, with its uki and
 # extra lines
 # shellcheck disable=SC2034,SC2329  # read and called by the sourced library
@@ -2115,6 +2207,10 @@ done <<-'EOF'
 	t_entry_version             the snapshot and the kernel of every kind of entry
 	t_dangling_uki              a UKI entry without its UKI or an addon does not boot
 	t_show_entry_uki            show-entry shows the entry of the UKI of a kernel
+	t_prediction_entries_linked the entries of bootctl link take part in the prediction
+	t_pcrlock_uki_addons        the UKI is predicted with its addons, not the other extras
+	t_pcrlock_addons_cmdline    the command lines of the addons go to PCR 12 joined, as one event
+	t_pcrlock_addons_limit      the command lines of the addons stay inside the PolicyOR limit
 	t_pcrlock_unlockable        pcrlock_unlockable names every category that systemd-pcrlock removes via varlink
 EOF
 
