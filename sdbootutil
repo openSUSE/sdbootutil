@@ -670,13 +670,14 @@ assert_uki_config()
 	esac
 	is_sdboot || err "UKI=\"$UKI\" in /etc/sysconfig/bootloader needs systemd-boot (LOADER_TYPE=\"systemd-boot\")"
 
-	# The tools of UKI="local", checked once here
-	[ "$UKI" = "local" ] || return 0
+	# The tools of the UKIs, checked once here.  With UKI="yes" only
+	# the addon of the snapshot is built and signed
 	local tool missing=()
-	for tool in openssl systemd-creds objcopy objdump "$systemd_sbsign" "$systemd_measure" $(is_shim_installed && echo mokutil); do
+	for tool in openssl systemd-creds objcopy objdump "$systemd_sbsign" \
+		    $([ "$UKI" = "local" ] && echo "$systemd_measure") $(is_shim_installed && echo mokutil); do
 		command -v "$tool" > /dev/null || missing+=("${tool##*/}")
 	done
-	[ "${#missing[@]}" -eq 0 ] || err "UKI=\"local\" needs ${missing[*]}"
+	[ "${#missing[@]}" -eq 0 ] || err "UKI=\"$UKI\" needs ${missing[*]}"
 }
 
 # The UKIs are selected in /etc/sysconfig/bootloader
@@ -785,7 +786,7 @@ public_part()
 # Make the keys that are missing, or their public part
 uki_keys()
 {
-	[ "${UKI:-}" = "local" ] || return 0
+	uki_selected || return 0
 
 	if [ ! -e "$credstore/secureboot-private-key.pem" ] || [ ! -e "$secureboot_certificate" ]; then
 		info "Making the Secure Boot key that signs the UKIs"
@@ -797,6 +798,8 @@ uki_keys()
 			-out "$secureboot_certificate"
 	fi
 
+	# The UKIs of the distribution are signed by the distribution
+	[ "$UKI" = "local" ] || return 0
 	grep -qs "tpm2-device" /etc/crypttab || return 0
 	if [ ! -e "$credstore/tpm2-pcr-initrd-private-key.pem" ] || [ ! -e "$pcr_public_key" ]; then
 		info "Making the key that signs the PCR 11 policy"
@@ -1718,8 +1721,8 @@ remove_kernel()
 
 	settle_entry_token "${snapshot}"
 	local id
-	# The entry of the kernel and the initrd, and the one of the UKI
-	for id in "$(entry_conf_file "$kernel_version" "$snapshot")" "$(linked_entry_id "$kernel_version" "$snapshot")"; do
+	# The entry of the kernel and the initrd, and the ones of the UKIs
+	for id in "$(entry_conf_file "$kernel_version" "$snapshot")" $(linked_entry_ids "$kernel_version" "$snapshot"); do
 		entry_file "$id" > /dev/null || continue
 		info "Removing boot entry $id"
 		bootctl_entries unlink "$id"
@@ -2590,8 +2593,24 @@ common_boot_options()
 # VERSION of SNAPSHOT.  Without snapshots there is a single commit
 linked_entry_id()
 {
-	local kernel_version="$1" snapshot="$2"
-	echo "$entry_token-commit_${snapshot:-1}.${snapshot:+${snapshot}.}$kernel_version.conf"
+	local kernel_version="$1" snapshot="$2" variant="${3:-}"
+	echo "$entry_token-commit_${snapshot:-1}.${snapshot:+${snapshot}.}$kernel_version${variant:+.$variant}.conf"
+}
+
+# The ids of the entries of the UKIs of the kernel VERSION of SNAPSHOT:
+# the one of UKI="local", and one per variant with UKI="yes".  A UKI
+# with profiles has one more entry per profile, "<id>@N"
+linked_entry_ids()
+{
+	local base f id
+	base="$(linked_entry_id "$1" "$2")"
+	base="${base%.conf}"
+	for f in "${boot_root}/loader/entries/$base.conf" "${boot_root}/loader/entries/$base"[.@+]*.conf; do
+		[ -e "$f" ] || continue
+		id="${f##*/}"
+		id="${id%.conf}"
+		echo "${id%%+*}.conf"
+	done | sort -u
 }
 
 # The file of the entry ID, with or without a boot counter
@@ -2652,10 +2671,10 @@ uki_matches()
 	[ -n "$same" ]
 }
 
-# The entry of the kernel VERSION of SNAPSHOT (in SUBVOL) as a UKI, made
-# with "bootctl link": the UKI is shared by every snapshot, and the
-# snapshot is in an addon with its rootflags
-install_uki()
+# The entry of the kernel VERSION of SNAPSHOT (in SUBVOL) as a UKI built
+# here (UKI="local"): the UKI is shared by every snapshot, and the
+# snapshot is in an addon with its rootflags (see `link_uki`)
+install_local_uki()
 {
 	local snapshot="$1" subvol="$2" kernel_version="$3" src="$4"
 	local dstinitrd=() reused_entry=
@@ -2664,11 +2683,8 @@ install_uki()
 
 	# The command line of the UKI is the one of every snapshot, and
 	# the addon adds the snapshot
-	local boot_options rootflags=""
+	local boot_options
 	boot_options="$(common_boot_options "$subvol")"
-	[ -z "$subvol" ] || rootflags="rootflags=subvol=$subvol"
-	local title sort_key
-	entry_title_and_sort_key title sort_key "$snapshot" "$subvol" "$kernel_version"
 
 	if [ -z "$arg_no_reuse_initrd$arg_force" ] && entry="$(entry_file "$id")" && \
 	   [ -z "$(entry_missing_files "$entry")" ] && uki_matches "$entry" "$boot_options" "$src"; then
@@ -2679,7 +2695,7 @@ install_uki()
 
 	# The UKI of the parent snapshot, or a new one.  Its name has
 	# the hash of its content, so "link" shares it between entries
-	local uki="" size=0 sum
+	local uki="" sum
 	[ -n "$arg_no_reuse_initrd$arg_force" ] || \
 		reused_entry="$(reusable_uki "$subvol" "$kernel_version" "$boot_options" "$src")" || reused_entry=""
 	if [ -n "$reused_entry" ]; then
@@ -2702,31 +2718,140 @@ install_uki()
 		read -r sum _ < <(sha256sum "$tmpdir/uki-signed.efi")
 		uki="$tmpdir/$kernel_version-${sum:0:16}.efi"
 		mv "$tmpdir/uki-signed.efi" "$uki"
-		size=$(stat -c %s "$uki")
 		rm -f "$tmpdir/uki-initrd" "$tmpdir/initrd-0"
 	fi
 
-	# The addon is named after its command line, so the one of a
-	# snapshot is built once and serves every kernel
-	local extra=() addon=""
-	if [ -n "$rootflags" ]; then
-		read -r sum _ < <(echo -n "$rootflags" | sha256sum)
-		addon="$tmpdir/rootflags-${sum:0:16}.addon.efi"
-		# "link" gets a copy: the one in the ESP can go with the entry
-		# unlinked below, or with the space that is freed
+	link_uki "$snapshot" "$subvol" "$kernel_version" "$uki" "" ""
+}
+
+# A copy of SRC named NAME-<hash>SUFFIX in $tmpdir, for "bootctl link":
+# it takes the names as they are, and keeps a file whose name is in the
+# ESP already.  The files of the packages repeat names for every kernel
+stage_hashed()
+{
+	local src="$1" name="$2" suffix="$3" sum
+	read -r sum _ < <(sha256sum "$src")
+	cp -L "$src" "$tmpdir/$name-${sum:0:16}$suffix"
+	echo "$tmpdir/$name-${sum:0:16}$suffix"
+}
+
+# The UKIs of the kernel VERSION of SNAPSHOT (in SUBVOL) from the
+# packages, one entry per variant with its addons.  They have no
+# "root=", so they need the discovery of the root (DPS).  Without it, or
+# without a UKI, it fails and the caller makes the entry of the kernel
+# and the initrd.  Nothing is built here, so nothing is rebuilt either
+install_distro_ukis()
+{
+	local snapshot="$1" subvol="$2" kernel_version="$3"
+	local ukis=() problem
+	ukis=("${subvol#"${subvol_prefix}"}/usr/lib/modules/$kernel_version"/vmlinuz-*.efi)
+	[ -e "${ukis[0]}" ] || {
+		info "Kernel $kernel_version has no UKI, using the kernel and the initrd"
+		return 1
+	}
+	problem="$(dps_root_problem)"
+	[ -z "$problem" ] || {
+		warn "The UKI of $kernel_version cannot find the root file system: $problem"
+		warn "Using the kernel and the initrd. UKI=\"local\" works with any root file system"
+		return 1
+	}
+
+	# The packages decide the command line, in the UKI and in its
+	# addons.  The options of the files of the kernel command line
+	# that are not there are lost
+	local f known=" " param lost=()
+	for f in "${ukis[0]}" "${ukis[0]}.extra.d"/*.addon.efi; do
+		[ -e "$f" ] || continue
+		objcopy -O binary --only-section=.cmdline "$f" "$tmpdir/uki-cmdline" 2> /dev/null || continue
+		known+="$(< "$tmpdir/uki-cmdline") "
+	done
+	rm -f "$tmpdir/uki-cmdline"
+	while read -r param; do
+		[[ "$param" == root=* ]] || [[ "$known" == *" $param "* ]] || lost+=("$param")
+	done < <(cmdline_params "$(common_boot_options "$subvol")")
+	[ "${#lost[@]}" -eq 0 ] || \
+		warn "The UKI of $kernel_version does not have these options of the kernel command line: ${lost[*]}"
+
+	local uki variant addon extras several=""
+	[ "${#ukis[@]}" -eq 1 ] || several=1
+	for uki in "${ukis[@]}"; do
+		variant="${uki##*/vmlinuz-}"
+		variant="${variant%.efi}"
+		extras=()
+		for addon in "$uki.extra.d"/*.addon.efi; do
+			[ -e "$addon" ] || continue
+			extras+=("$(stage_hashed "$addon" "$(basename "$addon" .addon.efi)" .addon.efi)")
+		done
+		link_uki "$snapshot" "$subvol" "$kernel_version" \
+			"$(stage_hashed "$uki" "$kernel_version-$variant" .efi)" "$variant" "$several" "${extras[@]}"
+	done
+}
+
+# The name of the addon with the rootflags of SUBVOL.  It changes with
+# the command line and with the key that signs it, as "link" keeps the
+# file whose name is in the ESP already
+rootflags_addon_name()
+{
+	local sum
+	read -r sum _ < <({ echo -n "rootflags=subvol=$1"; cat "$secureboot_certificate"; } | sha256sum)
+	echo "rootflags-${sum:0:16}.addon.efi"
+}
+
+# The entry of the UKI of the kernel VERSION of SNAPSHOT (in SUBVOL),
+# made with "bootctl link": the UKI, the addons EXTRA..., and the addon
+# with the rootflags of the snapshot.  VARIANT is in the id of the entry,
+# and in the title when SEVERAL variants are installed
+link_uki()
+{
+	local snapshot="$1" subvol="$2" kernel_version="$3" uki="$4" variant="$5" several="$6"
+	shift 6
+	local id f size=0 extra=()
+	id="$(linked_entry_id "$kernel_version" "$snapshot" "$variant")"
+
+	local title sort_key
+	entry_title_and_sort_key title sort_key "$snapshot" "$subvol" "$kernel_version"
+	[ -z "$several" ] || title="$title ($variant)"
+
+	# The addon of a snapshot is built once and serves every kernel
+	# (see `rootflags_addon_name`).  "link" gets a copy: the one in the
+	# ESP can go with the entry unlinked below, or with the space that
+	# is freed
+	local addon
+	if [ -n "$subvol" ]; then
+		addon="$tmpdir/$(rootflags_addon_name "$subvol")"
 		if [ -e "${boot_root}/$entry_token/${addon##*/}" ]; then
 			cp "${boot_root}/$entry_token/${addon##*/}" "$addon"
 		else
-			build_addon "$rootflags" "$addon"
-			size=$((size + $(stat -c %s "$addon")))
+			build_addon "rootflags=subvol=$subvol" "$addon"
 		fi
-		extra=(--extra="$addon")
+		set -- "$@" "$addon"
 	fi
+
+	# Nothing to do when the entry has the same files already
+	local entry wanted have
+	if [ -z "$arg_force" ] && entry="$(entry_file "$id")"; then
+		wanted="$(for f in "$uki" "$@"; do echo "${f##*/}"; done | sort)"
+		have="$(entry_field "$entry" uki; entry_field "$entry" extra)"
+		have="$(for f in $have; do echo "${f##*/}"; done | sort)"
+		if [ "$wanted" = "$have" ] && [ -z "$(entry_missing_files "$entry")" ]; then
+			info "UKI of $kernel_version${variant:+ ($variant)} already in the ESP"
+			unlink_replaced_entry "$kernel_version" "$snapshot" "$id"
+			return 0
+		fi
+	fi
+
+	# Only the files that are not in the ESP need space
+	for f in "$uki" "$@"; do
+		[ -e "${boot_root}/$entry_token/${f##*/}" ] || size=$((size + $(stat -c %s "$f")))
+	done
+	for f in "$@"; do
+		extra+=(--extra="$f")
+	done
 	make_free_space "$snapshot" $((size / 1024 + 1)) || err "No free space in ${boot_root} for the UKI"
 
 	# Recorded after "link" copies them, see below
-	local f added=()
-	for f in "$uki" ${addon:+"$addon"}; do
+	local added=()
+	for f in "$uki" "$@"; do
 		[ -e "${boot_root}/$entry_token/${f##*/}" ] || added+=("${boot_root}/$entry_token/${f##*/}")
 	done
 
@@ -2734,12 +2859,15 @@ install_uki()
 	[ ! -f /etc/kernel/tries ] || read -r tries < /etc/kernel/tries
 	[[ "$tries" =~ ^[0-9]+$ ]] || tries=""
 
-	# "link" refuses an entry that is already there.  "unlink"
-	# refuses the booted one, and then "link" says why
-	! entry_file "$id" > /dev/null || bootctl_entries unlink "$id" || :
+	# "link" refuses an entry that is already there, also the one of
+	# a profile ("@N").  If "unlink" fails, "link" says why
+	local old
+	for old in "${boot_root}/loader/entries/${id%.conf}"{.conf,[@+]*.conf}; do
+		[ ! -e "$old" ] || bootctl_entries unlink "$(entry_key "${old##*/}").conf" || :
+	done
 	SYSTEMD_LOG_LEVEL=warning bootctl link "$uki" "${extra[@]}" \
 		--entry-token="literal:$entry_token" --entry-commit="${snapshot:-1}" \
-		--entry-version="${snapshot:+${snapshot}.}$kernel_version" \
+		--entry-version="${snapshot:+${snapshot}.}$kernel_version${variant:+.$variant}" \
 		--entry-title="$title" ${tries:+--tries-left="$tries"} --keep-free=0 || \
 		err "Cannot link the UKI of $kernel_version"
 
@@ -2751,7 +2879,6 @@ install_uki()
 
 	# "link" takes the sort key from the os-release of the UKI, that
 	# is the same for every snapshot
-	local entry
 	entry="$(entry_file "$id")" || err "No entry $id after linking the UKI"
 	sed -i "/^sort-key /d; \$a sort-key $sort_key" "$entry"
 
@@ -2853,13 +2980,16 @@ install_kernel()
 	# A UKI entry only when the UKI can boot: with Secure Boot, its
 	# certificate has to be in MOK first.  Until then, the entry of
 	# the kernel and the initrd
-	if [ "${UKI:-}" = "local" ]; then
+	if uki_selected; then
 		uki_keys
-		if ! is_secure_boot || [ "$(mok_state)" = "enrolled" ]; then
-			install_uki "$snapshot" "$subvol" "$kernel_version" "$src"
+		if is_secure_boot && [ "$(mok_state)" != "enrolled" ]; then
+			mok_enroll
+		elif [ "$UKI" = "local" ]; then
+			install_local_uki "$snapshot" "$subvol" "$kernel_version" "$src"
+			return 0
+		elif install_distro_ukis "$snapshot" "$subvol" "$kernel_version"; then
 			return 0
 		fi
-		mok_enroll
 	fi
 
 	calc_chksum "$src"
@@ -3225,8 +3355,8 @@ show_entry_fields()
 	# Without the entry of the kernel and the initrd, the one of
 	# its UKI
 	if ! conf="$(find_conf_file "$kernel_version" "$snapshot")"; then
-		id="$(linked_entry_id "$kernel_version" "$snapshot")"
-		conf="$(entry_file "$id")" || err "Missing boot entry for kernel $kernel_version"
+		id="$(linked_entry_ids "$kernel_version" "$snapshot" | head -n 1)"
+		conf="$(entry_file "${id:-none}")" || err "Missing boot entry for kernel $kernel_version"
 	fi
 
 	[ -z "$verbose" ] || echo -e "ID\t$id"
@@ -8639,10 +8769,15 @@ status_boot()
 		local missing
 		missing="$(uki_missing_kernels | paste -sd ' ')"
 		status_row "UKI files" "${missing:+missing for }${missing:-present for every kernel}"
+		local problem
+		problem="$(dps_root_problem)"
+		status_row "Root discovery" "${problem:+no, }${problem:-yes}"
+		[ -z "$problem" ] || echo "  The kernels use the kernel and the initrd: the UKIs have no \"root=\""
 	fi
-	if [ "${UKI:-}" = "local" ]; then
+	# With UKI="yes" the local key signs the addon of the snapshot
+	if uki_selected; then
 		status_row "UKI key" "$([ -e "$credstore/secureboot-private-key.pem" ] && echo "$secureboot_certificate" || echo "not made yet")"
-		grep -qs "tpm2-device" /etc/crypttab && \
+		[ "$UKI" != "local" ] || ! grep -qs "tpm2-device" /etc/crypttab || \
 			status_row "PCR 11 key" "$([ -e "$credstore/tpm2-pcr-initrd-private-key.pem" ] && echo "$pcr_public_key" || echo "not made yet")"
 		if is_secure_boot && is_shim_installed && [ -e "$secureboot_certificate" ]; then
 			case "$(mok_state)" in
