@@ -1498,11 +1498,12 @@ t_shift()
 	restore_shifts
 	is "still changed" "generated.pcrlock shift-generated.pcrlock" "$(ls "$d" | tr '\n' ' ' | sed 's/ $//')"
 
-	# Nothing matches the event log: the variations are kept
+	# Nothing matches the event log: the old variations go too, or
+	# the ones of entries that are gone would stay in the policy
 	rm -f "$d"/*
 	pcrlock_variation "$LEAVE" > "$d/generated.pcrlock"
 	shift_component 641-test
-	is "no match" "generated.pcrlock" "$(ls "$d")"
+	is "no match" "" "$(ls "$d")"
 }
 
 # restore_shifts keeps the current boot in a full component by removing
