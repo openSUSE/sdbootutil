@@ -4778,16 +4778,18 @@ shift_component()
 	# variations
 	local variation name
 	variation="$(find_matching_variation "$component")"
-	[ -n "$variation" ] || {
+	if [ -n "$variation" ]; then
+		dbg "$variation found in the eventlog"
+		name="${variation##*/}"
+		mkdir -p "$tmpdir/shift/$component.pcrlock.d"
+		# Copied, not moved: the file is written again in
+		# /var/lib/pcrlock.d, with the label of the directory
+		cp "$variation" "$tmpdir/shift/$component.pcrlock.d/shift-${name#shift-}"
+	else
 		dbg "No matching variation found for $component"
-		return 0
-	}
-	dbg "$variation found in the eventlog"
-	name="${variation##*/}"
-	mkdir -p "$tmpdir/shift/$component.pcrlock.d"
-	# Copied, not moved: the file is written again in
-	# /var/lib/pcrlock.d, with the label of the directory
-	cp "$variation" "$tmpdir/shift/$component.pcrlock.d/shift-${name#shift-}"
+	fi
+	# The old variations go in any case, or the ones of entries
+	# that are gone would stay in the policy
 	rm -f /var/lib/pcrlock.d/"$component".pcrlock.d/*.pcrlock
 }
 
