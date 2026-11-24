@@ -1977,6 +1977,19 @@ t_prediction_entries_linked()
 	is "entries" 3 "$(jq length "$entryfile")"
 	is "priorities" "0 1 0" "$(jq -r '[.[].priority] | join(" ")' "$entryfile")"
 	is "kernels" "6.2.1.1 7.3.5.1 6.12.10.1" "$(jq -r '[.[].kernel | join(".")] | join(" ")' "$entryfile")"
+
+	# With the UKIs selected only their entries are predicted, and
+	# the others stay while there is none
+	local UKI=local
+	select_entries_for_prediction > /dev/null
+	is "only UKIs" "t-commit_1.1.7.3.5-1-default.conf t-commit_5.5.6.12.10-1-default+3.conf" \
+		"$(jq -r '[.[].id] | join(" ")' "$entryfile")"
+	update_entries_for_snapshot()
+	{
+		jq -n '[{id: "t-6.2.1-1-default-5.conf", version: "5_6.2.1-1-default"}]' > "$entryfile"
+	}
+	select_entries_for_prediction > /dev/null
+	is "no UKI yet" "t-6.2.1-1-default-5.conf" "$(jq -r '[.[].id] | join(" ")' "$entryfile")"
 	return 0
 }
 
