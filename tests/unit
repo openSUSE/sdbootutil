@@ -1863,6 +1863,24 @@ t_uki()
 	return 0
 }
 
+# The addon of a snapshot is built again for a new signing key: the
+# name in the ESP decides if it is there already
+# shellcheck disable=SC2034  # read by the sourced library
+t_rootflags_addon_name()
+{
+	load
+	local secureboot_certificate="$workdir/cert.pem" a b
+	echo "key 1" > "$secureboot_certificate"
+	a="$(rootflags_addon_name @/.snapshots/5/snapshot)"
+	is "same" "$a" "$(rootflags_addon_name @/.snapshots/5/snapshot)"
+	[ "$a" != "$(rootflags_addon_name @/.snapshots/6/snapshot)" ] || fail "the same name for another snapshot"
+	echo "key 2" > "$secureboot_certificate"
+	b="$(rootflags_addon_name @/.snapshots/5/snapshot)"
+	[ "$a" != "$b" ] || fail "the same name for another key"
+	[[ "$b" == rootflags-*.addon.efi ]] || fail "unexpected name $b"
+	return 0
+}
+
 # An entry of a UKI built here is kept only while its files are in the
 # ESP and the UKI has the kernel and the command line of now
 # shellcheck disable=SC2034,SC2329  # read and called by the sourced library
@@ -1955,6 +1973,55 @@ t_dangling_uki()
 	is "complete" "" "$(dangling_entries <<<"$json")"
 	rm "$boot_root/t/r.addon.efi"
 	is "no addon" "t-commit_5.5.7.3.4-1-default.conf|$conf|5|7.3.4-1-default|/t/r.addon.efi" "$(dangling_entries <<<"$json")"
+	return 0
+}
+
+# The entries of the UKIs of a kernel: the one of UKI="local" and one
+# per variant, with or without a boot counter
+# shellcheck disable=SC2034  # read by the sourced library
+t_linked_entry_ids()
+{
+	load
+	local boot_root="$workdir/esp" entry_token=t f
+	mkdir -p "$boot_root/loader/entries"
+	for f in t-commit_5.5.7.3.5-1-default.conf t-commit_5.5.7.3.5-1-default.virt+3.conf \
+		 t-commit_5.5.7.3.5-1-default.generic.conf t-commit_6.6.7.3.5-1-default.conf \
+		 t-commit_5.5.7.3.5-1-default-rt.conf t-commit_5.5.7.3.5-1-default@1+2.conf; do
+		touch "$boot_root/loader/entries/$f"
+	done
+	is "snapshot 5" "t-commit_5.5.7.3.5-1-default.conf t-commit_5.5.7.3.5-1-default.generic.conf t-commit_5.5.7.3.5-1-default.virt.conf t-commit_5.5.7.3.5-1-default@1.conf" \
+		"$(linked_entry_ids 7.3.5-1-default 5 | paste -sd ' ')"
+	is "variant id" "t-commit_5.5.7.3.5-1-default.virt.conf" "$(linked_entry_id 7.3.5-1-default 5 virt)"
+	return 0
+}
+
+# The UKIs of the packages have their own command line: the options of
+# /etc/kernel/cmdline that are not in the UKI nor in its addons are
+# reported as lost
+# shellcheck disable=SC2034,SC2329  # read and called by the sourced library
+t_distro_uki_lost_options()
+{
+	load
+	local subvol_prefix='' tmpdir="$workdir/tmp" kv=7.3.5-1-default
+	local m="$workdir/root/usr/lib/modules/$kv" out
+	mkdir -p "$m/vmlinuz-virt.efi.extra.d" "$tmpdir"
+	touch "$m/vmlinuz-virt.efi" "$m/vmlinuz-virt.efi.extra.d/gpu.addon.efi"
+	objcopy()
+	{
+		case "$4" in
+			*.addon.efi) echo "nomodeset" > "$5" ;;
+			*) echo "quiet splash=silent" > "$5" ;;
+		esac
+	}
+	dps_root_problem() { :; }
+	common_boot_options() { echo "root=UUID=1 quiet splash=silent nomodeset console=ttyS0 resume=/dev/vda3"; }
+	stage_hashed() { echo "$1"; }
+	link_uki() { :; }
+	out="$(install_distro_ukis 5 "$workdir/root" "$kv" 2>&1)"
+	says "lost" "$out" "does not have these options of the kernel command line: console=ttyS0 resume=/dev/vda3"
+	common_boot_options() { echo "root=UUID=1 quiet nomodeset"; }
+	out="$(install_distro_ukis 5 "$workdir/root" "$kv" 2>&1)"
+	says_not "nothing lost" "$out" "does not have these options"
 	return 0
 }
 
@@ -2216,6 +2283,7 @@ done <<-'EOF'
 	t_mok                       mok_enroll imports the UKI certificate once, and again after a failed boot
 	t_addon                     build_addon makes a signed addon with the exact command line
 	t_uki                       build_uki makes a signed UKI whose PCR 11 signature matches its sections
+	t_rootflags_addon_name      the name of the rootflags addon changes with the snapshot and with the key
 	t_install_local_uki_kept    the entry of a local UKI is kept only while it is in the ESP and current
 	t_entries_linked            the entries of a snapshot include the ones made by bootctl link
 	t_entry_version             the snapshot and the kernel of every kind of entry
@@ -2225,6 +2293,8 @@ done <<-'EOF'
 	t_pcrlock_uki_addons        the UKI is predicted with its addons, not the other extras
 	t_pcrlock_addons_cmdline    the command lines of the addons go to PCR 12 joined, as one event
 	t_pcrlock_addons_limit      the command lines of the addons stay inside the PolicyOR limit
+	t_linked_entry_ids          the entries of the UKIs of a kernel, one per variant
+	t_distro_uki_lost_options   the options of the kernel command line that a UKI of the packages loses are reported
 	t_pcrlock_unlockable        pcrlock_unlockable names every category that systemd-pcrlock removes via varlink
 EOF
 
