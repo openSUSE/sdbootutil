@@ -4722,6 +4722,16 @@ select_entries_for_prediction()
 	fi
 	jq --arg ids "$ids" "$filter" < "$entryfile" > "${entryfile}.ext"
 	mv "${entryfile}.ext" "$entryfile"
+
+	# While the UKIs are selected PCR 9 is out of the policy, so
+	# nothing would bind the initrd of an entry of a kernel and an
+	# initrd.  They are left out: they still boot, but ask for the
+	# password.  Until there is an entry of a UKI they stay, or the
+	# next boot would have no prediction at all
+	if uki_selected && jq -e 'any(.[]; .uki)' "$entryfile" > /dev/null; then
+		jq 'map(select(.uki))' < "$entryfile" > "${entryfile}.uki"
+		mv "${entryfile}.uki" "$entryfile"
+	fi
 	dbg "Added priority and kernel version to entry file (for prediction)"
 	dbg_cat "$entryfile"
 }
@@ -8262,6 +8272,7 @@ status_policy()
 	if uki_selected; then
 		[[ ",$requested," != *",9,"* ]] || \
 			echo "  PCR 9 is requested, but left out of the policy while the UKIs are selected"
+		echo "  Once there is an entry of a UKI, the entries of a kernel and an initrd ask for the password"
 		if is_secure_boot; then
 			[[ ",$requested," == *",7,"* ]] || \
 				warn "UKI is used, but PCR 7 is not in FDE_SEAL_PCR_LIST: the TPM2 does not check that Secure Boot stays enabled"
