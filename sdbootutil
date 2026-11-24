@@ -685,6 +685,28 @@ uki_selected()
 	[ "${UKI:-}" = "local" ] || [ "${UKI:-}" = "yes" ]
 }
 
+# Check if the system follows the Discoverable Partitions Specification
+# (DPS), and if not print why.  The UKIs of the distribution have no
+# "root=", so they need it.  udev names the partitions of the boot disk
+# as the discovery does (90-image-dissect.rules), and a LUKS2 root only
+# when it is opened as "root".  A btrfs over several devices is found,
+# but its other devices are not opened
+dps_root_problem()
+{
+	local dev fstype
+	read -r dev fstype < <(findmnt -n -o SOURCE,FSTYPE /)
+	dev="${dev%%\[*}"
+	if [ "$fstype" = "btrfs" ] && [ "$(btrfs filesystem show --raw / 2> /dev/null | grep -c devid)" -gt 1 ]; then
+		echo "the root file system is on more than one device"
+	elif [ "$(readlink -f /dev/disk/by-designator/root)" != "$(readlink -f "$dev")" ]; then
+		if [ -e /dev/disk/by-designator/root-luks ]; then
+			echo "the encrypted root is not opened as \"root\""
+		else
+			echo "the root file system is not on a partition that the discovery finds"
+		fi
+	fi
+}
+
 # The value of UKI, in words
 uki_mode_text()
 {
