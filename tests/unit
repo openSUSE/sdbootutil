@@ -534,6 +534,30 @@ t_top_entry_install()
 	return 0
 }
 
+# The anchor is the first encrypted device behind the root file system,
+# also when --devices names only some of the devices
+# shellcheck disable=SC2034,SC2329  # read and called by the sourced library
+t_measure_anchor_devices()
+{
+	load
+	local tracked_devices=(/dev/mapper/y)
+	findmnt() { echo "1234"; }
+	lsblk()
+	{
+		case "$*" in
+			*"UUID =="*) printf '%s\n' /dev/mapper/cr_x /dev/mapper/cr_y ;;
+			*cr_x) printf '%s\n' "/dev/mapper/cr_x btrfs" "/dev/vda2 crypto_LUKS" ;;
+			*cr_y) printf '%s\n' "/dev/mapper/cr_y btrfs" "/dev/vda3 crypto_LUKS" ;;
+		esac
+	}
+	cryptsetup() { [ "$1" = isLuks ]; }
+	is_tracked_device() { :; }
+	is "anchor" "/dev/vda2" "$(measure_anchor)"
+	is_tracked_device() { [ "$1" != /dev/vda2 ]; }
+	is "the first is ignored" "/dev/vda3" "$(measure_anchor)"
+	return 0
+}
+
 # entry_key: the spellings a boot loader can leave in
 # "LoaderEntrySelected", all reduced to the ID that `bootctl` reports.
 # systemd-boot writes that ID as it is; grub2-bls drops the ".conf"
@@ -2835,6 +2859,7 @@ done <<-'EOF'
 	t_erk_replace               enroll_recovery_key removes the old recovery key only once the new one works
 	t_can_unlock_bound          a TPM2 slot bound to PCR 15 in the initrd is not used to unlock
 	t_top_entry_install         get_top_entry_id prints only the id, also after installing the kernels
+	t_measure_anchor_devices    the anchor is the one of the boot, also with --devices
 	t_enroll_anchor             enroll: the anchor measures, and its slot is bound to PCR 15 at zero
 	t_enroll_after_anchor       enroll: a device of the initrd is bound to PCR 15 after the anchor
 	t_enroll_after_initrd       enroll: a device out of the initrd is bound to PCR 15 after the initrd
