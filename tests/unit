@@ -492,6 +492,31 @@ t_erk_replace()
 	is "one recovery slot" 1 "$(systemd-cryptenroll "$dev" | grep -c recovery)"
 }
 
+# A TPM2 slot bound to PCR 15 in the initrd cannot authorize a new slot
+# on the running system, so it is not used to unlock.  One bound after
+# the initrd can
+# shellcheck disable=SC2034,SC2329  # read and called by the sourced library
+t_can_unlock_bound()
+{
+	load
+	local binding the_anchor initrd
+	tpm2_slot_binding() { echo "$binding"; }
+	measure_anchor() { echo "$the_anchor"; }
+	initrd_crypttab() { echo "$initrd"; }
+	slot_is_unattended() { :; }
+	have_slot() { :; }
+
+	binding=bound the_anchor="$dev" initrd='' initrd_crypttab_read=''
+	can_unlock "$dev" tpm2 2> /dev/null && fail "the anchor unlocks"
+	binding=bound the_anchor=/dev/the-anchor initrd="cr_b $dev none" initrd_crypttab_read=''
+	can_unlock "$dev" tpm2 2> /dev/null && fail "a device of the initrd unlocks"
+	binding=bound the_anchor=/dev/the-anchor initrd='' initrd_crypttab_read=''
+	can_unlock "$dev" tpm2 2> /dev/null || fail "a device after the initrd does not unlock"
+	binding=bound+plain the_anchor="$dev" initrd_crypttab_read=''
+	can_unlock "$dev" tpm2 2> /dev/null || fail "an unbound slot does not unlock"
+	return 0
+}
+
 # entry_key: the spellings a boot loader can leave in
 # "LoaderEntrySelected", all reduced to the ID that `bootctl` reports.
 # systemd-boot writes that ID as it is; grub2-bls drops the ".conf"
@@ -2782,6 +2807,7 @@ done <<-'EOF'
 	t_erk_shared_nvindex        enroll_recovery_key publishes nothing when another device or a policy has the PIN
 	t_erk_change_fails          enroll_recovery_key publishes nothing when the key could not be set
 	t_erk_replace               enroll_recovery_key removes the old recovery key only once the new one works
+	t_can_unlock_bound          a TPM2 slot bound to PCR 15 in the initrd is not used to unlock
 	t_enroll_anchor             enroll: the anchor measures, and its slot is bound to PCR 15 at zero
 	t_enroll_after_anchor       enroll: a device of the initrd is bound to PCR 15 after the anchor
 	t_enroll_after_initrd       enroll: a device out of the initrd is bound to PCR 15 after the initrd
