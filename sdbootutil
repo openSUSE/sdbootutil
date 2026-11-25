@@ -1863,7 +1863,7 @@ record_esp_file()
 
 	local key digest line_digest line_path
 	key="$(esp_file_key "$path")"
-	read -r digest _ < <(sha256sum "$path")
+	file_digest "$path" digest
 	dbg "Recording $key ($digest)"
 	{
 		while read -r line_digest line_path; do
@@ -4763,14 +4763,8 @@ snapshot_ids_for_prediction()
 	# Get the numbers for the last three snapshots
 	[ -s "$snapperfile" ] || update_snapper
 
-	# Select the default and the active snapshots.
-	local -A snapshots
-	local -a snapshot_ids
-	local id
-	if [ -n "$root_snapshot" ]; then
-		[ -n "${snapshots[$root_snapshot]}" ] || snapshot_ids+=("$root_snapshot")
-		snapshots["$root_snapshot"]=1
-	fi
+	# The running snapshot, the default entry, and the default and
+	# active snapshots of snapper, in this order, without repeats.
 	# What the boot loader is going to boot comes before what
 	# snapper calls default.  They are the same snapshot in the
 	# ordinary case, and then this costs no slot, but when they
@@ -4778,19 +4772,17 @@ snapshot_ids_for_prediction()
 	# measured, and sealing the other one is sealing a boot that
 	# never happens: the machine comes up asking for the recovery
 	# key and no later update can notice (bsc#1252227)
-	id="$(default_entry_snapshot)"
-	if [ -n "$id" ]; then
-		[ -n "${snapshots[$id]}" ] || snapshot_ids+=("$id")
-		snapshots[$id]=1
-	fi
+	local -A snapshots
+	local -a snapshot_ids
+	local id
 	while read -r id; do
-		[ -n "${snapshots[$id]}" ] || snapshot_ids+=("$id")
+		[ -n "$id" ] && [ -z "${snapshots[$id]}" ] || continue
+		snapshot_ids+=("$id")
 		snapshots[$id]=1
-	done < <(jq -r '.root[]|select(.default==true)|.number' "$snapperfile")
-	while read -r id; do
-		[ -n "${snapshots[$id]}" ] || snapshot_ids+=("$id")
-		snapshots[$id]=1
-	done < <(jq -r '.root[]|select(.active==true)|.number' "$snapperfile")
+	done < <(echo "$root_snapshot"
+		 default_entry_snapshot
+		 jq -r '.root[]|select(.default==true)|.number' "$snapperfile"
+		 jq -r '.root[]|select(.active==true)|.number' "$snapperfile")
 
 	if is_transactional && [ -e "${state_file}" ]; then
 		# shellcheck disable=SC1090
@@ -4875,7 +4867,7 @@ select_entries_for_prediction()
 	else
 		filter='map(([.version // "" | scan("(\\d+)\\.(\\d+)\\.(\\d+)-(\\d+)")] | first) as $kernel | . + {"priority": 0, "kernel": (($kernel // []) | map(tonumber))})'
 	fi
-	jq --arg ids "$ids" "$filter" < "$entryfile" > "${entryfile}.ext"
+	jq --arg ids "$ids" "$filter"' | sort_by(.priority, (.kernel | map(-.)))' < "$entryfile" > "${entryfile}.ext"
 	mv "${entryfile}.ext" "$entryfile"
 
 	# While the UKIs are selected PCR 9 is out of the policy, so
@@ -4903,9 +4895,11 @@ parse_eventlog()
 {
 	[ "${#eventlog[@]}" -eq 0 ] || return 0
 
+	# The event log alone: "log" also loads and matches every
+	# component, which is slow with many variations
 	while read -r line; do
 		eventlog["$line"]=1
-	done < <(pcrlock log --json=short | jq -r '.log | .[] | .sha256' | sort -u)
+	done < <(pcrlock cel --json=short | jq -r '.[].digests[]? | select(.hashAlg == "sha256") | .digest' | sort -u)
 }
 
 find_matching_variation()
@@ -4927,13 +4921,12 @@ shift_component()
 {
 	local component="$1"
 
-	parse_eventlog
-
 	dbg "Shifting component $component"
 	[ -d "/var/lib/pcrlock.d/$component.pcrlock.d" ] || {
 		dbg "The component is not a directory or is missing"
 		return 0
 	}
+	parse_eventlog
 
 	# Instead of keeping all the variations of a component (as this
 	# will increase the amount of combinations, reaching early the
@@ -5109,10 +5102,6 @@ pcrlock_cmdline_initrd()
 	# 710-kernel-cmdline-initrd-entry.pcrlock.d is not part of the
 	# pcrlock standards
 	#
-	# When using systemd-boot or GRUB2-BLS >= 2.14, the cmdline is
-	# send to the kernel via UEFI with null termination (double
-	# \x00, as is UTF-16 enconding), but this is missing in
-	# GRUB2-BLS <= 2.12
 	echo -n "$cmdline" > "$tmpdir/cmdline"
 	pcrlock \
 		lock-kernel-cmdline \
@@ -5124,14 +5113,13 @@ pcrlock_cmdline_initrd()
 	   "$tmpdir/cmdline.pcrlock" \
 	   "$tmpdir/initrd.pcrlock" \
 	   > "/var/lib/pcrlock.d/710-kernel-cmdline-initrd-entry.pcrlock.d/cmdline-initrd-$suffix.pcrlock"
-	rm "$tmpdir/cmdline"
-	rm "$tmpdir/cmdline.pcrlock"
-	rm "$tmpdir/initrd.pcrlock"
-
 	# 710-kernel-cmdline-boot-loader.pcrlock.d is not part of the
-	# pcrlock standards
-	pcrlock_loader_cmdline "$cmdline" \
-		"/var/lib/pcrlock.d/710-kernel-cmdline-boot-loader.pcrlock.d/cmdline-$suffix.pcrlock"
+	# pcrlock standards.  The same measurement in PCR 12, see
+	# `pcrlock_loader_cmdline`
+	mkdir -p /var/lib/pcrlock.d/710-kernel-cmdline-boot-loader.pcrlock.d
+	jq -c '.records[].pcr = 12' "$tmpdir/cmdline.pcrlock" \
+	   > "/var/lib/pcrlock.d/710-kernel-cmdline-boot-loader.pcrlock.d/cmdline-$suffix.pcrlock"
+	rm "$tmpdir/cmdline" "$tmpdir/cmdline.pcrlock" "$tmpdir/initrd.pcrlock"
 }
 
 # The command line CMDLINE as the boot loader (or systemd-stub, for an
@@ -5177,7 +5165,7 @@ pcrlock_grub2_bls_kernel_initrd_cmdline_initrd()
 	# GRUB2-BLS >= 2.16 measures the initrd when the kernel loads it,
 	# and the kernel measures the cmdline before that
 	local initrd_in_place=
-	systemd-analyze compare-versions "$(bootloader_version)" "<" "2.16" || initrd_in_place=1
+	systemd-analyze compare-versions "$grub_version" "<" "2.16" || initrd_in_place=1
 
 	local elements=("$linux")
 	[ -n "$initrd_in_place" ] || elements+=("$initrd")
@@ -5196,7 +5184,7 @@ pcrlock_grub2_bls_kernel_initrd_cmdline_initrd()
 	# GRUB2-BLS <= 2.12
 	echo -n "$cmdline" > "$tmpdir/cmdline"
 	n=$((n+1))
-	if systemd-analyze compare-versions "$(bootloader_version)" "<" "2.13"; then
+	if systemd-analyze compare-versions "$grub_version" "<" "2.13"; then
 		iconv -t UTF-16LE -o "$tmpdir/cmdline.utf16" "$tmpdir/cmdline"
 		pcrlock \
 			lock-raw \
@@ -5325,7 +5313,6 @@ pcrlock_sdboot()
 		[ -z "${kernels["${images[*]}"]}" ] || continue
 		kernels["${images[*]}"]=1
 		n=$((n+1))
-		# Limit to 4 because of the separator
 		[ "$n" -le "${variation_limit[650-kernel-efi-application]}" ] || {
 			info "Too many variations for 650-kernel-efi-application"
 			continue
@@ -5353,7 +5340,7 @@ pcrlock_sdboot()
 		jq --slurp '{"records": [.[].records[]]}' "${locks[@]}" \
 		   > "/var/lib/pcrlock.d/650-kernel-efi-application.pcrlock.d/uki-$n.pcrlock"
 		rm "${locks[@]}"
-	done < <(jq --raw-output 'sort_by(.priority, (.kernel | map(-.))) | .[] | select(.uki or .linux) | if .uki then ["uki", .uki] + [.addons[]? | .globalAddon // .localAddon] else ["linux", .linux] end | join("\t")' "$entryfile")
+	done < <(jq --raw-output '.[] | select(.uki or .linux) | if .uki then ["uki", .uki] + [.addons[]? | .globalAddon // .localAddon] else ["linux", .linux] end | join("\t")' "$entryfile")
 
 	# Join the cmdline and the initrd in a single component
 	shift_component 710-kernel-cmdline-initrd-entry
@@ -5384,7 +5371,7 @@ pcrlock_sdboot()
 		track_esp_file "$conf"
 		track_esp_file "${boot_root}$initrd"
 		pcrlock_cmdline_initrd "initrd=$cmdline" "${boot_root}$initrd" "$n"
-	done < <(jq --raw-output 'sort_by(.priority, (.kernel | map(-.))) | .[] | select(.uki == null) | ([(.initrd[0] | sub("/"; "\\"; "g")), .options] | join(" ")), .initrd[0], .path' "$entryfile")
+	done < <(jq --raw-output '.[] | select(.uki == null) | ([(.initrd[0] | sub("/"; "\\"; "g")), .options] | join(" ")), .initrd[0], .path' "$entryfile")
 
 	# A UKI has no "options": the stub measures the command line of
 	# each addon into PCR 12 instead, and nothing without addons.
@@ -5399,7 +5386,7 @@ pcrlock_sdboot()
 			continue
 		}
 		pcrlock_addons_cmdline "$n" "${addons[@]}"
-	done < <(jq --raw-output 'sort_by(.priority, (.kernel | map(-.))) | .[] | select(.uki) | [.addons[]?.options // empty] | join("\t")' "$entryfile")
+	done < <(jq --raw-output '.[] | select(.uki) | [.addons[]?.options // empty] | join("\t")' "$entryfile")
 
 	# Generate variation for 710-kernel-cmdline-initrd-entry
 	# component that contains the current cmdline and the current
@@ -5431,6 +5418,11 @@ pcrlock_grub2_bls()
 {
 	info "Generating TPM2 predictions with systemd-pcrlock (grub2-bls)"
 
+	# Read once: it greps the whole binary, and the helpers below
+	# compare it for every entry
+	local grub_version n
+	grub_version="$(bootloader_version)" || grub_version=
+
 	# 641-grub2-bls-grubenv.pcrlock is not part of the pcrlock
 	# standards
 	if [ -e "${esp_root}${esp_dst}/grubenv" ]; then
@@ -5452,7 +5444,7 @@ pcrlock_grub2_bls()
 	fi
 
 	local grub2_bls_drive
-	if systemd-analyze compare-versions "$(bootloader_version)" "<" "2.13"; then
+	if systemd-analyze compare-versions "$grub_version" "<" "2.13"; then
 		local partno
 		read -r _ partno dseq < <(esp_root_drive_partno_dseq)
 		# We are assuming that the disk sequence (that start
@@ -5495,7 +5487,7 @@ pcrlock_grub2_bls()
 					  "initrd ${grub2_bls_drive}$initrd" \
 					  "${devicetree:+devicetree ${grub2_bls_drive}$devicetree}" \
 					  "$n"
-	done < <(jq --raw-output 'sort_by(.priority, (.kernel | map(-.))) | .[] | .options, .linux, .initrd[0], (.devicetree // "")' "$entryfile")
+	done < <(jq --raw-output '.[] | .options, .linux, .initrd[0], (.devicetree // "")' "$entryfile")
 
 	# Generate variation for 650-grub2-bls-entry-cmdline component
 	# that contains the current cmdline and the current initrd,
@@ -5541,7 +5533,6 @@ pcrlock_grub2_bls()
 			[ -z "${kernels["$linux"]}" ] || continue
 			kernels["$linux"]=1
 			n=$((n+1))
-			# Limit to 4 because of the separator
 			[ "$n" -le "${variation_limit[650-kernel-efi-application]}" ] || {
 				info "Too many variations for 650-kernel-efi-application"
 				continue
@@ -5550,7 +5541,7 @@ pcrlock_grub2_bls()
 			pcrlock_file lock-pe \
 				"/var/lib/pcrlock.d/650-kernel-efi-application.pcrlock.d/linux-$n.pcrlock" \
 				"${esp_root}/$linux"
-		done < <(jq --raw-output 'sort_by(.priority, (.kernel | map(-.))) | map(.linux) | .[]' "$entryfile")
+		done < <(jq --raw-output 'map(.linux) | .[]' "$entryfile")
 	fi
 
 	# In MicroOS with GRUB2-BLS we can easily exceed to 8 arms
@@ -5654,7 +5645,7 @@ pcrlock_grub2_bls()
 			"${devicetree:+${esp_root}$devicetree}" \
 			"BOOT_IMAGE=${grub2_bls_drive}$linux $cmdline" \
 			"$n"
-	done < <(jq --raw-output 'sort_by(.priority, (.kernel | map(-.))) | .[] | .options, .linux, .initrd[0], (.devicetree // "")' "$entryfile")
+	done < <(jq --raw-output '.[] | .options, .linux, .initrd[0], (.devicetree // "")' "$entryfile")
 
 	# Generate variation for
 	# 710-grub2-bls-kernel-initrd-kernel-cmdline-initrd-entry for
@@ -5835,19 +5826,10 @@ predict_pcrs()
 
 remove_pcr()
 {
-	local pcrs="$1"
-	local drop="$2"
-
-	local i
-	local -a list
-	local result=
-	IFS=',' read -r -a list <<<"$pcrs"
-	for i in "${list[@]}"; do
-		[ "$i" != "$drop" ] || continue
-		result+="${result:+,}$i"
-	done
-
-	echo "$result"
+	local pcrs=",$1,"
+	pcrs="${pcrs//,$2,/,}"
+	pcrs="${pcrs#,}"
+	echo "${pcrs%,}"
 }
 
 policy_missing_pcrs()
@@ -5857,22 +5839,8 @@ policy_missing_pcrs()
 	local pcrs="$1"
 
 	[ -e /var/lib/systemd/pcrlock.json ] || return 0
-
-	local i
-	local -A policy_pcrs
-	while read -r i; do
-		policy_pcrs[$i]=1
-	done < <(jq -r '.pcrValues[].pcr' < /var/lib/systemd/pcrlock.json)
-
-	local -a list
-	local missing=
-	IFS=',' read -r -a list <<<"$pcrs"
-	for i in "${list[@]}"; do
-		[ -z "${policy_pcrs[$i]}" ] || continue
-		missing+="${missing:+,}$i"
-	done
-
-	echo "$missing"
+	jq -r --arg pcrs "$pcrs" '($pcrs | split(",") | map(select(. != "") | tonumber)) - [.pcrValues[].pcr] | join(",")' \
+		< /var/lib/systemd/pcrlock.json
 }
 
 policy_stale_pcrs()
@@ -6102,29 +6070,15 @@ get_final_pcrs()
 	# participate in the policy.  To avoid the PolicyOR limit, we
 	# filter the PCRs with more that 8 values
 	#
-	# The status is collected in the same command: with `set -e` a
-	# failing command substitution ends the shell before the next
-	# line can read `$?`, and the error message that is in $tmpfile
-	# would never be printed
+	# The status is read in the same command: with `set -e` a failing
+	# command substitution ends the shell before the error in
+	# $tmpfile is printed.  It predicts again if a component was
+	# masked, as the first prediction was done with it in place
 	local output
-	local pcrlock_status=0
-	output="$(predict_pcrs "$pcrs")" || pcrlock_status=$?
-
-	if [ "$pcrlock_status" -ne 0 ]; then
+	if ! output="$(predict_pcrs "$pcrs")" || \
+	   { mask_unmatched_components "$pcrs" && ! output="$(predict_pcrs "$pcrs")"; }; then
 		warn "Error creating the systemd-pcrlock prediction!\n$(cat "$tmpfile")"
 		return 1
-	fi
-
-	# Predict again if some component was masked, as the previous
-	# prediction was done with it in place
-	if mask_unmatched_components "$pcrs"; then
-		pcrlock_status=0
-		output="$(predict_pcrs "$pcrs")" || pcrlock_status=$?
-
-		if [ "$pcrlock_status" -ne 0 ]; then
-			warn "Error creating the systemd-pcrlock prediction!\n$(cat "$tmpfile")"
-			return 1
-		fi
 	fi
 
 	# An empty prediction means that no PCR survived the event log
@@ -6144,32 +6098,12 @@ get_final_pcrs()
 	local pcrs_policyor
 	pcrs_policyor="$(jq -r '[.sha256[] | select(.values | length > 8) | .pcr] | join(",")' <<<"$output")"
 
-	# The lists are comma separated but do not end with a comma, so
-	# `read -d ','` would always drop the last PCR
-	local i
-	local -a list
-	local -A pcrs_policy_table
-	local -A pcrs_policyor_table
-	IFS=',' read -r -a list <<<"$pcrs_policy"
-	for i in "${list[@]}"; do
-		pcrs_policy_table[$i]=1
-	done
-	IFS=',' read -r -a list <<<"$pcrs_policyor"
-	for i in "${list[@]}"; do
-		pcrs_policyor_table[$i]=1
-	done
-
 	# A PCR dropped by the PolicyOR limit is also absent from the
-	# policy, so it would be reported twice, and the first reason
-	# would be the wrong one.  The list is built in the order that
-	# the user requested: the keys of an associative array come out
-	# in hash order
-	local pcrs_policy_missing=
-	IFS=',' read -r -a list <<<"$pcrs"
-	for i in "${list[@]}"; do
-		[ -z "${pcrs_policy_table[$i]}" ] || continue
-		[ -z "${pcrs_policyor_table[$i]}" ] || continue
-		pcrs_policy_missing+="${pcrs_policy_missing:+,}$i"
+	# policy, so it is not reported twice.  In the order that the user
+	# requested
+	local i pcrs_policy_missing=
+	for i in ${pcrs//,/ }; do
+		[[ ",$pcrs_policy,$pcrs_policyor," == *",$i,"* ]] || pcrs_policy_missing+="${pcrs_policy_missing:+,}$i"
 	done
 
 	# `systemd-pcrlock` can report that a PCR matches the event log
@@ -6179,7 +6113,7 @@ get_final_pcrs()
 	# will not be unsealed after a reboot that changes nothing, so
 	# it is better to report it
 	local pcr_current
-	for i in "${!pcrs_policy_table[@]}"; do
+	for i in ${pcrs_policy//,/ }; do
 		[ -e "/sys/class/tpm/tpm0/pcr-sha256/$i" ] || continue
 		read -r pcr_current < "/sys/class/tpm/tpm0/pcr-sha256/$i"
 		jq -e --argjson pcr "$i" --arg value "${pcr_current,,}" \
