@@ -2323,6 +2323,55 @@ t_rebind_uki()
 	return 0
 }
 
+# enroll_secret takes the secret of the method from its sources
+# shellcheck disable=SC2034  # read by the sourced library
+t_enroll_secret()
+{
+	PW=pw-env PIN=pin-env load
+	local secret arg_method
+	arg_method=password; secret=; enroll_secret secret
+	is "password" "pw-env" "$secret"
+	arg_method=tpm2+pin; secret=; enroll_secret secret
+	is "TPM2 PIN" "pin-env" "$secret"
+	arg_method=fido2; secret=; enroll_secret secret
+	is "fido2 has none" "" "$secret"
+	return 0
+}
+
+# unenroll_device wipes the slot kind of the method, and names the
+# methods of the device when the method is not known
+# shellcheck disable=SC2034,SC2329  # read and called by the sourced library
+t_unenroll_device()
+{
+	load
+	local arg_method m strict_vars="arg_method"
+	have_slot() { false; }
+	systemd-cryptenroll() { [ "$1" != /dev/x ] || { printf '  0 password\n  1 tpm2\n'; return 0; }; echo "$*" >> "$workdir/wipe"; }
+	: > "$workdir/wipe"
+	for m in tpm2 tpm2+pin fido2 password recovery-key; do
+		arg_method="$m"
+		unenroll_device /dev/x
+	done
+	is "slots" "--wipe-slot=tpm2 /dev/x|--wipe-slot=tpm2 /dev/x|--wipe-slot=fido2 /dev/x|--wipe-slot=password /dev/x|--wipe-slot=recovery /dev/x" \
+		"$(paste -sd '|' "$workdir/wipe")"
+	arg_method=bogus
+	says "unknown method" "$(strict unenroll_device /dev/x 2>&1)" "Methods present in /dev/x: password,tpm2"
+	return 0
+}
+
+# get_device_password tries each different candidate once: every wrong
+# one costs one Argon2 per keyslot
+# shellcheck disable=SC2329  # called by the sourced library
+t_gdp_tried_once()
+{
+	PW=same KEY=same RECOVERY_PIN=other load
+	valid_password() { echo "${!2}" >> "$workdir/tried"; false; }
+	: > "$workdir/tried"
+	get_device_password /dev/x
+	is "tried" "same other" "$(paste -sd ' ' "$workdir/tried")"
+	return 0
+}
+
 # pcrlock_unlockable has to name every category that systemd-pcrlock
 # can remove through varlink (fwupd uses them before a firmware update),
 # and the file that each one removes.  A category added upstream would
@@ -2489,6 +2538,9 @@ done <<-'EOF'
 	t_distro_uki_lost_options   the options of the kernel command line that a UKI of the packages loses are reported
 	t_settle_uki_mode           the TPM2 slots decide the UKI mode in effect
 	t_rebind_uki                rebind_tpm2_slots makes the slot that enroll would make
+	t_enroll_secret             enroll_secret takes the secret of the method from its sources
+	t_unenroll_device           unenroll_device wipes the slot kind of the method
+	t_gdp_tried_once            get_device_password tries each different candidate once
 	t_pcrlock_unlockable        pcrlock_unlockable names every category that systemd-pcrlock removes via varlink
 EOF
 
