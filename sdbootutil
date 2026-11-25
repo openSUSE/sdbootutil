@@ -7669,7 +7669,7 @@ enroll_recovery_key()
 	if [ -z "$key" ]; then
 		# systemd-cryptenroll will put in stdout the recovery
 		# key, and the rest of the information in stderr
-		key="$(systemd-cryptenroll --wipe-slot=recovery --recovery-key "${extra_args[@]}" "$dev" 2> /dev/null)"
+		key="$(systemd-cryptenroll --wipe-slot=recovery --recovery-key "${extra_args[@]}" "$dev" 2> /dev/null)" || return 1
 		generated_key=1
 	else
 		# A recovery key has already been generated, use it
@@ -7679,21 +7679,22 @@ enroll_recovery_key()
 		# %u:cryptenroll in systemd-cryptenroll, and the
 		# temporary recovery key in cryptsetup, to avoid
 		# requesting a password
-		local tmp_key
-		tmp_key="$(systemd-cryptenroll --wipe-slot=recovery --recovery-key "${extra_args[@]}" "$dev" 2> /dev/null)"
-		local split
+		local tmp_key split keyslot
+		tmp_key="$(systemd-cryptenroll --wipe-slot=recovery --recovery-key "${extra_args[@]}" "$dev" 2> /dev/null)" || return 1
 		read -r -a split < <(systemd-cryptenroll "$dev" | grep recovery)
-		local keyslot="${split[0]}"
-		# cryptsetup can only read the new passphrase from a
-		# keyfile
-		local tmp_key_file
-		tmp_key_file="$(mktemp -t key_file.XXXXXX)"
-		echo -n "$key" > "$tmp_key_file"
-		cryptsetup luksChangeKey --key-slot "$keyslot" --force-password "$dev" "$tmp_key_file" <<<"$tmp_key"
-		shred "$tmp_key_file"
+		keyslot="${split[0]:-}"
+		[[ "$keyslot" =~ ^[0-9]+$ ]] || return 1
+		# cryptsetup reads the new passphrase from a key file, here
+		# a pipe: never a file on disk
+		cryptsetup luksChangeKey --key-slot "$keyslot" --force-password "$dev" <(echo -n "$key") <<<"$tmp_key" || return 1
 	fi
 
 	check_enrolled "$dev" "recovery" "$header" || return 1
+	# The key is published below, so it has to open the device
+	valid_password "$dev" key || {
+		warn "The recovery key does not open $dev"
+		return 1
+	}
 
 	if [ -n "$generated_key" ]; then
 		echo "Recovery key: $key"
@@ -7716,8 +7717,13 @@ enroll_recovery_key()
 	# while the one it has is reachable: the PIN cannot be read back
 	# from the TPM2, and `systemd-pcrlock` takes a single
 	# --recovery-pin, which has to authorize the old NVIndex and
-	# seal the new one, so it cannot be replaced by this key either
-	local reachable_pin=
+	# seal the new one, so it cannot be replaced by this key either.
+	# The NVIndex is one for every device
+	local reachable_pin='' sealed='' rdev
+	[ ! -e /var/lib/systemd/pcrlock.json ] || sealed=1
+	for rdev in "$dev" "${tracked_devices[@]}"; do
+		! have_slot "$rdev" tpm2 || sealed=1
+	done
 	if [ -n "$env_recovery_pin" ]; then
 		reachable_pin="$env_recovery_pin"
 	elif [ -n "$keyid_int" ]; then
@@ -7728,7 +7734,7 @@ enroll_recovery_key()
 		# replaced: that PIN cannot be recovered from anywhere else
 		[ "$key" = "$reachable_pin" ] || \
 			warn "The recovery key and the recovery PIN are now different"
-	elif have_slot "$dev" "tpm2"; then
+	elif [ -n "$sealed" ]; then
 		# A PIN sealed the NVIndex of this enrollment and it is
 		# not reachable here, so this key is not it.  Publishing
 		# it would name as the recovery PIN a value that no policy

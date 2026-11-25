@@ -336,6 +336,10 @@ t_gdp_wrong_then_valid()
 t_erk_key_env()
 {
 	CURRENT_PW="$BOOTSTRAP" KEY="the-recovery-key" load
+	# No policy of the host, that would have a PIN
+	scratch_dir /var/lib/systemd
+	local -x TMPDIR="$workdir/keyfiles"
+	mkdir -p "$TMPDIR"
 
 	out="$(enroll_recovery_key "$dev" 2>&1)"
 
@@ -343,6 +347,8 @@ t_erk_key_env()
 	# No PIN anywhere, so this key becomes one: a single secret
 	key_is sdbootutil-recovery-pin "the-recovery-key"
 	says_not "output" "$out" "are now different"
+	# The key never goes through a file
+	is "key files" "" "$(ls -A "$TMPDIR")"
 }
 
 # Nothing was given: systemd-cryptenroll generates the key, it is
@@ -350,6 +356,7 @@ t_erk_key_env()
 t_erk_generated()
 {
 	CURRENT_PW="$BOOTSTRAP" load
+	scratch_dir /var/lib/systemd
 
 	out="$(enroll_recovery_key "$dev" 2>&1)"
 
@@ -408,6 +415,51 @@ t_erk_unreachable_pin()
 	opens "the-recovery-key" "enrolled key"
 	says "output" "$out" "There is already a recovery PIN for the TPM2"
 	says "output" "$out" "The recovery key and the recovery PIN are now different"
+	no_key sdbootutil-recovery-pin
+}
+
+# The NVIndex is one for every device: a TPM2 slot in another device,
+# or a policy, means that a PIN already seals it, and this key is not it
+t_erk_shared_nvindex()
+{
+	CURRENT_PW="$BOOTSTRAP" KEY="the-recovery-key" load
+	scratch_dir /var/lib/systemd
+	# shellcheck disable=SC2034  # read by the sourced library
+	local tracked_devices=("$dev" /dev/other)
+	# Called by enroll_recovery_key, from the sourced library
+	# shellcheck disable=SC2329
+	have_slot()
+	{
+		[ "$1" = /dev/other ] && [ "$2" = "tpm2" ] && return 0
+		[ "$1" != /dev/other ] && grep -q "$2" < <(systemd-cryptenroll "$1")
+	}
+
+	out="$(enroll_recovery_key "$dev" 2>&1)"
+	opens "the-recovery-key" "enrolled key"
+	says "TPM2 in another device" "$out" "There is already a recovery PIN for the TPM2"
+	no_key sdbootutil-recovery-pin
+
+	tracked_devices=("$dev")
+	echo '{}' > /var/lib/systemd/pcrlock.json
+	out="$(enroll_recovery_key "$dev" 2>&1)"
+	says "policy" "$out" "There is already a recovery PIN for the TPM2"
+	no_key sdbootutil-recovery-pin
+}
+
+# A key that could not be set is not published as the recovery PIN
+t_erk_change_fails()
+{
+	CURRENT_PW="$BOOTSTRAP" KEY="the-recovery-key" load
+	scratch_dir /var/lib/systemd
+	# Called by enroll_recovery_key, from the sourced library
+	# shellcheck disable=SC2329
+	cryptsetup()
+	{
+		[ "$1" != luksChangeKey ] || return 1
+		command cryptsetup "$@"
+	}
+
+	enroll_recovery_key "$dev" &> /dev/null && fail "the enrollment succeeded"
 	no_key sdbootutil-recovery-pin
 }
 
@@ -2533,6 +2585,8 @@ done <<-'EOF'
 	t_erk_recovery_pin_env      enroll_recovery_key enrolls the presented recovery PIN as the key
 	t_erk_diverging             enroll_recovery_key reports a key that differs from the PIN
 	t_erk_unreachable_pin       enroll_recovery_key publishes nothing when a PIN it cannot reach exists
+	t_erk_shared_nvindex        enroll_recovery_key publishes nothing when another device or a policy has the PIN
+	t_erk_change_fails          enroll_recovery_key publishes nothing when the key could not be set
 	t_ek_systemd_boot           entry_key takes the ID that systemd-boot writes
 	t_ek_no_suffix              entry_key takes the ID without the ".conf" suffix
 	t_ek_counter                entry_key drops the boot counter
