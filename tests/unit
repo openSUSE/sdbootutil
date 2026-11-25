@@ -517,6 +517,23 @@ t_can_unlock_bound()
 	return 0
 }
 
+# The id of the top entry is all that get_top_entry_id prints, also
+# when it has to install the kernels first
+# shellcheck disable=SC2034,SC2329  # read and called by the sourced library
+t_top_entry_install()
+{
+	load
+	local entryfile="$workdir/entries.json" installed=''
+	update_entries_for_snapshot()
+	{
+		if [ -n "$installed" ]; then echo '[{"id": "t-6.2.1-1-default-5.conf"}]'; else echo '[]'; fi > "$entryfile"
+	}
+	install_all_kernels() { installed=1; echo "MOK password: 12345678"; }
+	is "id" "t-6.2.1-1-default-5.conf" "$(get_top_entry_id 5 2> /dev/null)"
+	says "shown" "$(get_top_entry_id 5 2>&1 > /dev/null)" "MOK password: 12345678"
+	return 0
+}
+
 # entry_key: the spellings a boot loader can leave in
 # "LoaderEntrySelected", all reduced to the ID that `bootctl` reports.
 # systemd-boot writes that ID as it is; grub2-bls drops the ".conf"
@@ -2808,6 +2825,7 @@ done <<-'EOF'
 	t_erk_change_fails          enroll_recovery_key publishes nothing when the key could not be set
 	t_erk_replace               enroll_recovery_key removes the old recovery key only once the new one works
 	t_can_unlock_bound          a TPM2 slot bound to PCR 15 in the initrd is not used to unlock
+	t_top_entry_install         get_top_entry_id prints only the id, also after installing the kernels
 	t_enroll_anchor             enroll: the anchor measures, and its slot is bound to PCR 15 at zero
 	t_enroll_after_anchor       enroll: a device of the initrd is bound to PCR 15 after the anchor
 	t_enroll_after_initrd       enroll: a device out of the initrd is bound to PCR 15 after the initrd
