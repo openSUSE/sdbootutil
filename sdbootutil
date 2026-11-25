@@ -6673,8 +6673,13 @@ get_device_password()
 		fi
 	done
 
+	# Each wrong candidate costs one Argon2 per keyslot, and the
+	# sources often hold the same value: each one is tried once
 	local in_keyring=
+	local -A tried=()
 	for candidate in "${from_keyring[@]}"; do
+		[ -n "$candidate" ] || continue
+		tried["$candidate"]=1
 		valid_password "$dev" candidate || continue
 		pw="$candidate"
 		in_keyring=1
@@ -6682,6 +6687,8 @@ get_device_password()
 	done
 	if [ -z "$pw" ]; then
 		for candidate in "${candidates[@]}"; do
+			[ -n "$candidate" ] && [ -z "${tried["$candidate"]+set}" ] || continue
+			tried["$candidate"]=1
 			valid_password "$dev" candidate || continue
 			pw="$candidate"
 			break
@@ -7499,6 +7506,15 @@ require_unlock()
 	return 0
 }
 
+# Make sure that systemd-cryptenroll can authorize a new slot of "$1",
+# with the password in cryptenroll or with a token, added to the
+# "extra_args" of the caller
+enroll_unlock_args()
+{
+	require_unlock "$1" || return 1
+	[ -z "$unlock_method" ] || extra_args+=("$unlock_method")
+}
+
 # The TPM2 PIN, empty for "tpm2", is in the variable named $2
 enroll_tpm2()
 {
@@ -7517,12 +7533,7 @@ enroll_tpm2()
 		warn "Could not find /var/lib/systemd/pcrlock.json"
 	fi
 
-	# Make sure that systemd-cryptenroll can authorize the new
-	# slot, with the password in cryptenroll or with a token
-	require_unlock "$dev" || return 1
-	if [ -n "$unlock_method" ]; then
-		extra_args+=("$unlock_method")
-	fi
+	enroll_unlock_args "$dev" || return 1
 
 	local pcr_oracle_key public_key_args late=
 	! pcr15_unbound_device "$dev" "$enroll_anchor" || late=1
@@ -7568,12 +7579,7 @@ enroll_fido2()
 	info "Enrolling with FIDO2: $dev"
 
 	local extra_args=()
-	# Make sure that systemd-cryptenroll can authorize the new
-	# slot, with the password in cryptenroll or with a token
-	require_unlock "$dev" || return 1
-	if [ -n "$unlock_method" ]; then
-		extra_args+=("$unlock_method")
-	fi
+	enroll_unlock_args "$dev" || return 1
 
 	local header
 	header="$(luks_header "$dev")"
@@ -7591,12 +7597,7 @@ enroll_password()
 	info "Enrolling with password: $dev"
 
 	local extra_args=()
-	# Make sure that systemd-cryptenroll can authorize the new
-	# slot, with the password in cryptenroll or with a token
-	require_unlock "$dev" || return 1
-	if [ -n "$unlock_method" ]; then
-		extra_args+=("$unlock_method")
-	fi
+	enroll_unlock_args "$dev" || return 1
 
 	local header
 	header="$(luks_header "$dev")"
@@ -7612,12 +7613,7 @@ enroll_recovery_key()
 	info "Enrolling with recovery key: $dev"
 
 	local extra_args=()
-	# Make sure that systemd-cryptenroll can authorize the new
-	# slot, with the password in cryptenroll or with a token
-	require_unlock "$dev" || return 1
-	if [ -n "$unlock_method" ]; then
-		extra_args+=("$unlock_method")
-	fi
+	enroll_unlock_args "$dev" || return 1
 
 	# From here on the recovery key is handled, see "Secrets and
 	# --start-trace-code"
@@ -7781,37 +7777,25 @@ enroll_secret()
 	local -; set +x
 	local es_name="$1"
 	local -n es_secret="$1"
-	local keyid keyid_dep
-	if [ "$arg_method" = "tpm2+pin" ]; then
-		keyid="$(keyctl id %user:sdbootutil-tpm2-pin 2> /dev/null)" || true
-		keyid_dep="$(keyctl id %user:sdbootutil 2> /dev/null)" || true
-		if [ -n "$arg_ask_pin" ]; then
-			ask_new_password "TPM2 PIN" "$es_name"
-		elif [ -n "$env_pin" ]; then
-			es_secret="$env_pin"
-		elif [ -n "$keyid" ]; then
-			es_secret="$(keyctl pipe "$keyid")"
-		elif [ -n "$keyid_dep" ]; then
-			deprecated_keyring_secret "TPM2 PIN" "sdbootutil-tpm2-pin"
-			es_secret="$(keyctl pipe "$keyid_dep")"
-		else
-			ask_new_password "TPM2 PIN" "$es_name"
-		fi
-	elif [ "$arg_method" = "password" ]; then
-		keyid="$(keyctl id %user:sdbootutil-pw 2> /dev/null)" || true
-		keyid_dep="$(keyctl id %user:sdbootutil 2> /dev/null)" || true
-		if [ -n "$arg_ask_pw" ]; then
-			ask_new_password "password" "$es_name"
-		elif [ -n "$env_pw" ]; then
-			es_secret="$env_pw"
-		elif [ -n "$keyid" ]; then
-			es_secret="$(keyctl pipe "$keyid")"
-		elif [ -n "$keyid_dep" ]; then
-			deprecated_keyring_secret "password" "sdbootutil-pw"
-			es_secret="$(keyctl pipe "$keyid_dep")"
-		else
-			ask_new_password "password" "$es_name"
-		fi
+	local label env ask keyring keyid keyid_dep
+	case "$arg_method" in
+		tpm2+pin) label="TPM2 PIN" env="$env_pin" ask="$arg_ask_pin" keyring=sdbootutil-tpm2-pin ;;
+		password) label="password" env="$env_pw" ask="$arg_ask_pw" keyring=sdbootutil-pw ;;
+		*) return 0 ;;
+	esac
+	keyid="$(keyctl id %user:"$keyring" 2> /dev/null)" || true
+	keyid_dep="$(keyctl id %user:sdbootutil 2> /dev/null)" || true
+	if [ -n "$ask" ]; then
+		ask_new_password "$label" "$es_name"
+	elif [ -n "$env" ]; then
+		es_secret="$env"
+	elif [ -n "$keyid" ]; then
+		es_secret="$(keyctl pipe "$keyid")"
+	elif [ -n "$keyid_dep" ]; then
+		deprecated_keyring_secret "$label" "$keyring"
+		es_secret="$(keyctl pipe "$keyid_dep")"
+	else
+		ask_new_password "$label" "$es_name"
 	fi
 }
 
@@ -7961,26 +7945,12 @@ unenroll_device()
 {
 	local dev="$1"
 
+	local kind
 	case "$arg_method" in
-		"tpm2"|"tpm2+pin")
-			systemd-cryptenroll \
-				--wipe-slot=tpm2 \
-				"$dev"
-			;;
-
-		"fido2")
-			systemd-cryptenroll \
-				--wipe-slot=fido2 \
-				"$dev"
-			;;
-
-		"password")
-			systemd-cryptenroll \
-				--wipe-slot=password \
-				"$dev"
-			;;
-
+		"tpm2"|"tpm2+pin") kind=tpm2 ;;
+		"fido2"|"password") kind="$arg_method" ;;
 		"recovery-key")
+			kind=recovery
 			# The recovery key and the recovery PIN of the
 			# pcrlock NVIndex are the same secret when sdbootutil
 			# enrolled both.  Only the first one lives in this
@@ -7991,9 +7961,6 @@ unenroll_device()
 				warn "The recovery PIN of the TPM2 policy is not removed with the recovery key of $dev"
 				warn "Keep the value: it is still needed to update the predictions"
 			fi
-			systemd-cryptenroll \
-				--wipe-slot=recovery \
-				"$dev"
 			;;
 
 		*)
@@ -8011,15 +7978,11 @@ unenroll_device()
 				IFS=" " read -r -a s <<<"$line"
 				methods+=("${s[1]}")
 			done < <(systemd-cryptenroll "$dev")
-			if [ "${#methods[@]}" -eq 0 ]; then
-				err "$msg\nThe device $dev has no enrollment"
-			else
-				local methods
-				methods="$(IFS=','; echo "${methods[*]}")"
-				err "$msg\nMethods present in $dev: $methods"
-			fi
+			[ "${#methods[@]}" -gt 0 ] || err "$msg\nThe device $dev has no enrollment"
+			err "$msg\nMethods present in $dev: $(IFS=','; echo "${methods[*]}")"
 			;;
 	esac
+	systemd-cryptenroll --wipe-slot="$kind" "$dev"
 }
 
 unenroll()
@@ -8285,7 +8248,8 @@ status_device()
 	# unseal on the running system (see `pcr15_slot_value`)
 	local binding=none bound="unseals only in the initrd"
 	[ -z "$header" ] || binding="$(tpm2_slot_binding "$dev" "$header")"
-	if [[ "$binding" == bound* ]]; then
+	# The anchor is in the initrd: no need to read it
+	if [[ "$binding" == bound* ]] && [[ "$opts" != *"tpm2-measure-pcr=yes"* ]]; then
 		read_initrd_crypttab
 		in_initrd_crypttab "$dev" || bound="unseals after the initrd, also on the running system"
 	fi
