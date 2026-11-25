@@ -2352,14 +2352,18 @@ t_update_entries_for_snapshot()
 	{
 		jq -n '[{id: "t-6.2.1-1-default-5.conf", options: "root=/dev/mapper/root rootflags=subvol=@/.snapshots/5/snapshot"},
 			{id: "t-commit_7.7.6.2.1-1-default.conf", uki: "/t/a.efi"},
-			{id: "other-6.2.1-1-default-5.conf", options: "root=/dev/sdz1 rootflags=subvol=@/.snapshots/5/snapshot"}]'
+			{id: "other-6.2.1-1-default-5.conf", options: "root=/dev/sdz1 rootflags=subvol=@/.snapshots/5/snapshot"},
+			{id: "t-6.2.1-1-default-6.conf", options: "quiet rootflags=subvol=@/.snapshots/6/snapshot root=/dev/mapper/root"},
+			{id: "t-6.2.1-1-default-60.conf", options: "root=/dev/mapper/root rootflags=subvol=@/.snapshots/60/snapshot"}]'
 	}
 	update_entries_for_snapshot ""
-	is "this system" "t-6.2.1-1-default-5.conf t-commit_7.7.6.2.1-1-default.conf" "$(jq -r '[.[].id] | join(" ")' "$entryfile")"
+	is "this system" "t-6.2.1-1-default-5.conf t-commit_7.7.6.2.1-1-default.conf t-6.2.1-1-default-6.conf t-6.2.1-1-default-60.conf" "$(jq -r '[.[].id] | join(" ")' "$entryfile")"
 	update_entries_for_snapshot 7
 	is "snapshot 7" "t-commit_7.7.6.2.1-1-default.conf" "$(jq -r '[.[].id] | join(" ")' "$entryfile")"
+	update_entries_for_snapshot 6
+	is "rootflags first, not snapshot 60" "t-6.2.1-1-default-6.conf" "$(jq -r '[.[].id] | join(" ")' "$entryfile")"
 	update_entries
-	is "all, the filter does not stay" 3 "$(jq length "$entryfile")"
+	is "all, the filter does not stay" 5 "$(jq length "$entryfile")"
 	return 0
 }
 

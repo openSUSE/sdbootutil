@@ -1413,7 +1413,8 @@ update_entries_for_snapshot()
 	local root
 	root="$(all_rootfs)"
 
-	update_entries jq "[.[]|select((.options // \"\"|test(\"root=(?:$root) .*rootflags=subvol=${subvol_prefix}/.snapshots/$n/snapshot\"))
+	# "root=" and "rootflags=" in any order, each one a whole option
+	update_entries jq "[.[]|select((.options // \"\" | test(\"(^| )root=(?:$root)( |$)\") and test(\"(^| )rootflags=subvol=${subvol_prefix}/.snapshots/$n/snapshot( |$)\"))
 				   or (.id|test(\"^${entry_token}-commit_${n}[.@+]\")))]"
 }
 
