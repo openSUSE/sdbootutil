@@ -153,6 +153,9 @@ rollback=()
 # Set by `enroll` while /etc/crypttab already asks for an unlock method
 # that no keyslot backs yet.  Cleared once the enrollment succeeded
 restore_crypttab=
+# The same for the UKI mode: "=" and the mode of the slots that are
+# there, while `enroll` writes the entries for a new one
+restore_uki=
 
 # Lifetime of the keys that sdbootutil adds to the kernel keyring.  It
 # is re-armed when the script exits, so it measures how long a secret
@@ -203,14 +206,23 @@ cleanup()
 	# asked because there is no terminal.  After the rollback above,
 	# so that the initrds are rebuilt from the restored file instead
 	# of being undone by it
+	local rebuild=
 	if [ -n "$restore_crypttab" ] && ! cmp -s "$tmpdir/crypttab" /etc/crypttab; then
 		info "Restoring /etc/crypttab"
 		cp -p "$tmpdir/crypttab" /etc/crypttab
-		# In a subshell because `err` is an `exit`, and from
-		# inside the trap that would skip the rest of this
-		# function without even removing $tmpdir
+		rebuild=1
+	fi
+	if [ -n "$restore_uki" ]; then
+		info "Restoring the boot entries of the UKI mode in effect"
+		UKI="${restore_uki#=}"
+		rebuild=1
+	fi
+	# In a subshell because `err` is an `exit`, and from inside the
+	# trap that would skip the rest of this function without even
+	# removing $tmpdir
+	if [ -n "$rebuild" ]; then
 		( install_all_kernels "$root_snapshot" ) || \
-			warn "The initrd still carries the /etc/crypttab of the failed enrollment"
+			warn "The boot entries still carry the failed enrollment"
 	fi
 
 	dbg "Cleaning temporary directory $tmpdir"
@@ -680,6 +692,35 @@ assert_uki_config()
 	[ "${#missing[@]}" -eq 0 ] || err "UKI=\"$UKI\" needs ${missing[*]}"
 }
 
+# The UKI of /etc/sysconfig/bootloader.  After `settle_uki_mode`, UKI
+# is the mode in effect
+uki_config=
+
+# The TPM2 slots decide the mode in effect: a slot made for the UKIs
+# (signed PCR 11) never opens a kernel and an initrd, so the UKI of the
+# configuration takes effect with "enroll", that replaces the slots
+settle_uki_mode()
+{
+	uki_config="${UKI:-}"
+	grep -qs "tpm2-device" /etc/crypttab || return 0
+	detect_tracked_devices || return 0
+
+	local dev kind="" slot
+	for dev in "${tracked_devices[@]}"; do
+		slot="$(luks_header "$dev" | jq -r "$jq_tpm2_token_defs"'[.tokens[]? | select(pcrlock)]
+			| if any(signed) then "uki" elif length > 0 then "plain" else empty end')"
+		[ -z "$slot" ] || kind="$slot"
+		[ "$kind" != "uki" ] || break
+	done
+	if [ "$kind" = "plain" ] && uki_selected; then
+		UKI=""
+	elif [ "$kind" = "uki" ] && ! uki_selected; then
+		UKI=yes
+		[ ! -e "$credstore/tpm2-pcr-initrd-private-key.pem" ] || UKI=local
+	fi
+	[ "$UKI" = "$uki_config" ] || dbg "UKI=\"$uki_config\" takes effect with 'sdbootutil enroll', the TPM2 slots are for UKI=\"$UKI\""
+}
+
 # The UKIs are selected in /etc/sysconfig/bootloader
 uki_selected()
 {
@@ -800,6 +841,30 @@ uki_keys()
 		public_part tpm2-pcr-initrd-private-key.pem "$bits" \
 			pkey -pubout -out "$pcr_public_key"
 	fi
+}
+
+# The public key of the signed PCR 11 policy of the UKIs, for the TPM2
+# slot: our own key with UKI="local", and with UKI="yes" the one of the
+# package, or the one inside the UKI of the running kernel
+uki_pcr_public_key()
+{
+	local uki
+	if [ "$UKI" = "local" ]; then
+		[ -e "$pcr_public_key" ] && echo "$pcr_public_key"
+		return
+	fi
+	if [ -e /usr/lib/systemd/tpm2-pcr-public-key.pem ]; then
+		echo /usr/lib/systemd/tpm2-pcr-public-key.pem
+		return 0
+	fi
+	for uki in /usr/lib/modules/"$(uname -r)"/vmlinuz-*.efi; do
+		[ -e "$uki" ] || continue
+		objcopy -O binary --only-section=.pcrpkey "$uki" "$tmpdir/pcrpkey.pem" 2> /dev/null || continue
+		[ -s "$tmpdir/pcrpkey.pem" ] || continue
+		echo "$tmpdir/pcrpkey.pem"
+		return 0
+	done
+	return 1
 }
 
 systemd_sbsign=/usr/lib/systemd/systemd-sbsign
@@ -6748,11 +6813,13 @@ get_device_password()
 }
 
 # jq definitions for the tokens of a LUKS2 header: a pcrlock TPM2 slot,
-# bound to PCR 15, and with a PIN
+# bound to PCR 15, with a PIN, and with a signed PCR policy (the one of
+# the UKIs, next to pcrlock)
 jq_tpm2_token_defs='
 	def pcrlock: .type == "systemd-tpm2" and (.tpm2_pcrlock // false);
 	def bound: (.["tpm2-pcrs"] // []) | index(15) != null;
 	def pin: .["tpm2-pin"] // false;
+	def signed: has("tpm2_pubkey");
 '
 
 # systemd-cryptsetup tries the LUKS2 tokens on its own, so a TPM2 slot
@@ -6803,7 +6870,7 @@ generate_tpm2_predictions()
 	# gone, but the LUKS2 token can still require a signed PCR
 	# policy that nothing signs anymore, in which case the pcrlock
 	# predictions are updated but the TPM2 unlock keeps falling
-	# back to the password.  Only a re-enrollment fixes that.
+	# back to the password.  Only a re-enrollment fixes that
 	local dev
 	if detect_tracked_devices; then
 		for dev in "${tracked_devices[@]}"; do
@@ -6990,6 +7057,35 @@ pcr15_slot_value()
 	fi
 }
 
+# Whether "$1" is left without PCR 15 in its TPM2 slot, with the anchor
+# "$2": with the UKIs, a device that the initrd does not unlock.  On
+# their boots the machine ID and the file systems are measured into PCR
+# 15 after the initrd, and nothing orders them with these devices.  The
+# pcrlock policy still pins the boot, the whole UKI included.  The
+# caller runs `read_initrd_crypttab` first
+pcr15_unbound_device()
+{
+	uki_selected && [ "${1:?}" != "${2:-}" ] && ! in_initrd_crypttab "$1"
+}
+
+# The arguments of systemd-cryptenroll for the signed PCR policy of the
+# TPM2 slot of "$2" (with the anchor "$3"), into the array named "$1".
+# With the UKIs, the signed PCR 11 for the devices unlocked in the
+# initrd: the signatures are for the enter-initrd phase.  Else none,
+# with an empty --tpm2-public-key, or systemd-cryptenroll would load a
+# tpm2-pcr-public-key.pem of the configuration directories.  Fails when
+# the key is missing
+uki_public_key_args()
+{
+	local -n upka_args="$1"
+	local key
+	upka_args=(--tpm2-public-key=)
+	uki_selected && ! pcr15_unbound_device "$2" "${3:-}" || return 0
+	key="$(uki_pcr_public_key)" || return 1
+	# shellcheck disable=SC2034  # nameref
+	upka_args=(--tpm2-public-key="$key" --tpm2-public-key-pcrs=11 --tpm2-public-key-policyref=initrd)
+}
+
 # How the pcrlock TPM2 slots of "$1" (with the LUKS2 header "$2", if
 # the caller has it) are bound: "bound" when one is bound to PCR 15,
 # "bound+plain" when an unbound one is still there too, "plain" when
@@ -7076,7 +7172,7 @@ rebind_tpm2_slots()
 	[ -e /var/lib/systemd/pcrlock.json ] || return 0
 	detect_tracked_devices || return 0
 
-	local anchor dev value slot keyslots replaced=()
+	local anchor dev value slot keyslots replaced=() public_key_args
 	local -A bindings
 	anchor="$(measure_anchor)" || return 0
 	# Enrolled with --no-measure-pcr
@@ -7093,11 +7189,17 @@ rebind_tpm2_slots()
 		# Read from the initrd only when a slot needs it, as this
 		# runs after every update of the predictions
 		[ "$dev" = "$anchor" ] || read_initrd_crypttab
+		! pcr15_unbound_device "$dev" "$anchor" || continue
 		value="$(pcr15_slot_value "$dev" "$anchor")" || continue
+		# The same kind of slot that `enroll_tpm2` makes
+		uki_public_key_args public_key_args "$dev" "$anchor" || {
+			warn "No public key for the signed PCR 11 policy of the UKIs, $dev keeps its TPM2 slot"
+			continue
+		}
 		info "Binding a new TPM2 slot of $dev to the initrd"
 		systemd-cryptenroll \
 			--tpm2-device=auto \
-			--tpm2-public-key= \
+			"${public_key_args[@]}" \
 			--tpm2-pcrlock=/var/lib/systemd/pcrlock.json \
 			--tpm2-pcrs="15:sha256=$value" \
 			--unlock-tpm2-device=auto \
@@ -7199,14 +7301,12 @@ check_enrolled()
 	fi
 }
 
+# A TPM2 slot of pcr-oracle: a signed PCR policy without pcrlock.  The
+# slots of the UKIs have both
 has_signed_pcr_policy()
 {
-	# A "tpm2_pubkey" field in the token means that a shard of the
-	# sealed key is locked to a signed PCR policy, and that
-	# unlocking the device also requires a tpm2-pcr-signature.json
-	local dev="${1:?}"
-	cryptsetup luksDump --dump-json-metadata "$dev" 2> /dev/null | \
-		jq -e 'any(.tokens[]?; .type == "systemd-tpm2" and has("tpm2_pubkey"))' &> /dev/null
+	luks_header "${1:?}" 2> /dev/null | \
+		jq -e "$jq_tpm2_token_defs"'any(.tokens[]?; .type == "systemd-tpm2" and signed and (pcrlock | not))' &> /dev/null
 }
 
 # A slot that can authorize a new one with nobody in front of the
@@ -7530,17 +7630,17 @@ enroll_tpm2()
 		extra_args+=("$unlock_method")
 	fi
 
-	# Unless an empty --tpm2-public-key is passed,
-	# systemd-cryptenroll loads "tpm2-pcr-public-key.pem" from the
-	# configuration directories and adds a signed PCR policy as a
-	# second shard of the sealed key, next to the pcrlock one.
-	local pcr_oracle_key
-	if pcr_oracle_key="$(pcr_oracle_public_key)"; then
+	local pcr_oracle_key public_key_args late=
+	! pcr15_unbound_device "$dev" "$enroll_anchor" || late=1
+	uki_public_key_args public_key_args "$dev" "$enroll_anchor" || \
+		err "No public key for the signed PCR 11 policy of the UKIs"
+	[ "${public_key_args[0]}" != "--tpm2-public-key=" ] || ! pcr_oracle_key="$(pcr_oracle_public_key)" || \
 		warn "Ignoring $pcr_oracle_key for the enrollment. Remove it, and the private key, if pcr-oracle is not used anymore"
-	fi
 
 	local value
-	if [ -n "$enroll_anchor" ]; then
+	if [ -n "$enroll_anchor" ] && [ -n "$late" ]; then
+		info "The TPM2 slot of $dev is not bound to PCR 15: with the UKIs it opens after the initrd"
+	elif [ -n "$enroll_anchor" ]; then
 		if value="$(pcr15_slot_value "$dev" "$enroll_anchor")"; then
 			extra_args+=("--tpm2-pcrs=15:sha256=$value")
 		else
@@ -7555,7 +7655,7 @@ enroll_tpm2()
 	run_with_secret NEWPIN "$pin_name" systemd-cryptenroll \
 	       --wipe-slot=tpm2 \
 	       --tpm2-device=auto \
-	       --tpm2-public-key= \
+	       "${public_key_args[@]}" \
 	       "${extra_args[@]}" \
 	       --tpm2-pcrlock=/var/lib/systemd/pcrlock.json \
 	       "$dev" || return 1
@@ -7846,7 +7946,6 @@ enroll()
 			# Only the anchor measures its volume key, see
 			# `measure_anchor`
 			[ -n "$arg_no_measure_pcr" ] || enroll_anchor="$(measure_anchor)" || enroll_anchor=
-			[ -z "$enroll_anchor" ] || read_initrd_crypttab
 			for dev in "${tracked_devices[@]}"; do
 				add_crypttab_option "$dev" 'tpm2-device=auto'
 				[ -n "$enroll_anchor" ] || continue
@@ -7866,13 +7965,36 @@ enroll()
 			;;
 	esac
 
+	# The new TPM2 slots are made for the UKI of the configuration,
+	# so from here on it is the mode in effect, and the entries are
+	# written again when it changes.  The key of the signed PCR 11
+	# policy of UKI="local" needs "tpm2-device" in /etc/crypttab,
+	# added above
+	local mode_changed=
+	if [ "$arg_method" = "tpm2" ] || [ "$arg_method" = "tpm2+pin" ]; then
+		if [ "${UKI:-}" != "$uki_config" ]; then
+			mode_changed=1
+			restore_uki="=${UKI:-}"
+		fi
+		UKI="$uki_config"
+		uki_keys
+	fi
+
 	# If the crypttab file changed (that is expected), we need to
 	# generate a new initrd
-	if [ "$arg_no_reuse_initrd" = "1" ]; then
+	if [ "$arg_no_reuse_initrd" = "1" ] || [ -n "$mode_changed" ]; then
 		install_all_kernels "$root_snapshot"
 	fi
 
 	if [ "$arg_method" = "tpm2" ] || [ "$arg_method" = "tpm2+pin" ]; then
+		# Which devices the initrd unlocks, see `enroll_tpm2`.  From
+		# the entries written above: a distribution UKI can unlock
+		# other devices
+		initrd_crypttab_read=
+		if [ -n "$enroll_anchor" ] || uki_selected; then
+			read_initrd_crypttab
+		fi
+
 		# During the initial enrollment it is expected that
 		# for systemd-pcrlock the recovery PIN will be
 		# extracted from the %u keyring "sdbootutil[-pin]"
@@ -7899,8 +8021,10 @@ enroll()
 		# backed and must stay, also if a later device fails:
 		# without "tpm2-device" the policy of this slot would never
 		# be updated.  A device left without a slot is harmless
-		# with them, it asks for the password as before
+		# with them, it asks for the password as before.  The same
+		# for the UKI mode
 		restore_crypttab=
+		restore_uki=
 	done
 
 	# /etc/crypttab is put back by the trap, if no device was enrolled
@@ -8159,7 +8283,7 @@ crypttab_field()
 
 status_device()
 {
-	local dev="${1:?}"
+	local dev="${1:?}" anchor="${2:-}"
 	local header name opts
 
 	# A header that cannot be read is not a reason to give up on the
@@ -8201,9 +8325,10 @@ status_device()
 		   else $token.value.type end),
 		  ($token.value.type // ""),
 		  (if $token == null then ""
-		   elif ($token.value | has("tpm2_pubkey")) then ", signed policy"
 		   elif ($token.value | pcrlock) then
 			", pcrlock NVIndex" + (if ($token.value | bound) then ", bound to PCR 15" else "" end)
+				+ (if ($token.value | signed) then ", signed PCR 11" else "" end)
+		   elif ($token.value | signed) then ", signed policy"
 		   else "" end)
 		] | @tsv' <<<"$header")"
 
@@ -8270,7 +8395,13 @@ status_device()
 		read_initrd_crypttab
 		in_initrd_crypttab "$dev" || bound="unseals after the initrd, also on the running system"
 	fi
+	# See `pcr15_unbound_device`
+	if [ "$binding" = "plain" ] && uki_selected && [ -n "$anchor" ]; then
+		read_initrd_crypttab
+		! pcr15_unbound_device "$dev" "$anchor" || binding=late
+	fi
 	case "$binding" in
+		late) status_subrow "TPM2 slot" "unseals after the initrd, also on the running system (not bound to PCR 15 with the UKIs)" ;;
 		bound) status_subrow "TPM2 slot" "$bound" ;;
 		bound+plain) status_subrow "TPM2 slot" "$bound, but an older slot still unseals on the running system" ;;
 		plain|pin) status_subrow "TPM2 slot" "ALSO unseals on the running system" ;;
@@ -8317,8 +8448,11 @@ status_devices()
 		return 0
 	fi
 
+	# The same for every device, so read once
+	local anchor
+	anchor="$(measure_anchor 2> /dev/null)" || anchor=
 	for dev in "${all[@]}"; do
-		status_device "$dev"
+		status_device "$dev" "$anchor"
 	done
 }
 
@@ -8744,6 +8878,8 @@ status_boot()
 	echo "Boot loader"
 	status_row "Type" "$(bootloader_name 2> /dev/null || echo unknown)"
 	status_row "UKI" "$(uki_mode_text)"
+	[ "${UKI:-}" = "$uki_config" ] || \
+		echo "  /etc/sysconfig/bootloader has UKI=\"$uki_config\", but the TPM2 slots are made for this one: run 'sdbootutil enroll' to change"
 	if [ "${UKI:-}" = "yes" ]; then
 		local missing
 		missing="$(uki_missing_kernels | paste -sd ' ')"
@@ -9362,6 +9498,7 @@ fi
 dbg_var "esp_dst"
 
 assert_uki_config
+settle_uki_mode
 
 if [ "$SECURE_BOOT" = "yes" ] || is_shim_installed; then
 	arg_secure_boot=1
