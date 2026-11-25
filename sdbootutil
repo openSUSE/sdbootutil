@@ -1383,13 +1383,23 @@ bootctl_entries()
 	return "$rc"
 }
 
-entry_filter=("cat")
+# The entries in "$entryfile", through the filter "$@" (all of them
+# without one)
 update_entries()
 {
-	[ -z "$1" ] || entry_filter=("$@")
-	bootctl_entries list --json=short | "${entry_filter[@]}" > "$entryfile"
-	dbg "Entry filter: ${entry_filter[*]}"
+	local filter=("${@:-cat}")
+	bootctl_entries list --json=short | "${filter[@]}" > "$entryfile"
+	dbg "Entry filter: ${filter[*]}"
 	dbg_cat "$entryfile"
+}
+
+# The root devices of this system, see `get_all_rootfs`.  They do not
+# change during a run
+all_rootfs_cache=
+all_rootfs()
+{
+	[ -n "$all_rootfs_cache" ] || all_rootfs_cache="$(get_all_rootfs)"
+	echo "$all_rootfs_cache"
 }
 
 # The entries of this system come in two forms.  The ones that
@@ -1399,8 +1409,9 @@ update_entries()
 update_entries_for_snapshot()
 {
 	local n="$1"
+	[ -n "$n" ] || { update_entries_for_this_system; return; }
 	local root
-	root="$(get_all_rootfs)"
+	root="$(all_rootfs)"
 
 	update_entries jq "[.[]|select((.options // \"\"|test(\"root=(?:$root) .*rootflags=subvol=${subvol_prefix}/.snapshots/$n/snapshot\"))
 				   or (.id|test(\"^${entry_token}-commit_${n}[.@+]\")))]"
@@ -1409,7 +1420,7 @@ update_entries_for_snapshot()
 update_entries_for_this_system()
 {
 	local root
-	root="$(get_all_rootfs)"
+	root="$(all_rootfs)"
 
 	update_entries jq "[.[]|select((.options // \"\"|test(\"root=(?:$root)(?: |$)\"))
 				   or (.id|startswith(\"${entry_token}-commit_\")))]"
@@ -1471,27 +1482,11 @@ entry_key()
 	echo "$name"
 }
 
+# The file of the entry of the kernel VERSION of SNAPSHOT, written by
+# sdbootutil (see `entry_conf_file`)
 find_conf_file()
 {
-	local kernel_version="${1:?}"
-	local snapshot="$2"
-	local id
-	id="$(entry_conf_file "$kernel_version" "$snapshot")"
-
-	if [ -n "$snapshot" ]; then
-		update_entries_for_snapshot "$snapshot"
-	else
-		update_entries_for_this_system
-	fi
-
-	while IFS= read -r path; do
-		if [ -f "$path" ]; then
-			echo "$path"
-			return 0
-		fi
-	done < <(jq -r --arg id "$id" '.[] | select(.id == $id) | .path' < "$entryfile")
-
-	return 1
+	entry_file "$(entry_conf_file "${1:?}" "$2")"
 }
 
 # The only place that knows how a type#1 entry is written: a key, a run
@@ -3251,11 +3246,7 @@ cleanup_entries()
 	}
 
 	if [ ! -s "$entryfile" ]; then
-		if [ -n "$snapshot" ]; then
-			update_entries_for_snapshot "$snapshot"
-		else
-			update_entries_for_this_system
-		fi
+		update_entries_for_snapshot "$snapshot"
 	fi
 
 	local id path snapshot kernel_version subvol src
@@ -3484,11 +3475,7 @@ update_all_entries()
 
 	make_free_space "$snapshot" 1024 || warn "Can't free space in ${boot_root}"
 
-	if [ -n "$snapshot" ]; then
-		update_entries_for_snapshot "$snapshot"
-	else
-		update_entries_for_this_system
-	fi
+	update_entries_for_snapshot "$snapshot"
 
 	while read -r conf; do
 		update_entry_conf "$conf" "$snapshot"
@@ -3574,11 +3561,7 @@ update_kernels()
 	for kv in "${!found_kernels[@]}"; do
 		installed_kernels["/$entry_token/$kv/linux-${found_kernels[$kv]}"]=''
 	done
-	if [ -n "$snapshot" ]; then
-		update_entries_for_snapshot "$snapshot"
-	else
-		update_entries_for_this_system
-	fi
+	update_entries_for_snapshot "$snapshot"
 
 	# XXX: maybe we should parse the actual path in the entry
 	while read -r path id; do
@@ -4300,21 +4283,13 @@ get_top_entry_id()
 {
 	local snapshot="$1"
 
-	if [ -n "$snapshot" ]; then
-		update_entries_for_snapshot "$snapshot"
-	else
-		update_entries_for_this_system
-	fi
+	update_entries_for_snapshot "$snapshot"
 
 	mapfile -t ids < <(jq -r '.[]|.id' < "$entryfile")
 	if [ -z "${ids[0]}" ]; then
 		info "No boot entries found, trying to create them..."
 		install_all_kernels "$snapshot"
-		if [ -n "$snapshot" ]; then
-			update_entries_for_snapshot "$snapshot"
-		else
-			update_entries_for_this_system
-		fi
+		update_entries_for_snapshot "$snapshot"
 
 		mapfile -t ids < <(jq -r '.[]|.id' < "$entryfile")
 		if [ -z "${ids[0]}" ]; then
@@ -4341,14 +4316,7 @@ set_default_entry()
 		return 0
 	}
 
-	if [ ! -f "${boot_root}/loader/entries/$id" ] && [ ! -f "${boot_root}/loader/entries/$id.conf" ]; then
-		update_entries
-		while read -r path; do
-			if [ ! -f "$path" ]; then
-				err "Boot loader entry $id not found"
- 			fi
-		done < <(jq -r --arg id "$id" '.[] | select(.id == $id) | .path' < "$entryfile")
-	fi
+	entry_file "$id" > /dev/null || err "Boot loader entry $id not found"
 	if is_sdboot; then
 		set_default_sdboot "$id"
 	elif is_grub2_bls; then
@@ -4845,14 +4813,6 @@ snapshot_ids_for_prediction()
 	echo "${snapshot_ids[@]}"
 }
 
-regex_snapshot_ids_for_prediction()
-{
-	local re
-	re="$(snapshot_ids_for_prediction)"
-	re="${re// /|}"
-	echo "(?:$re)"
-}
-
 select_entries_for_prediction()
 {
 	# The regex of ids is ordered by relevance, but the returns
@@ -4862,7 +4822,7 @@ select_entries_for_prediction()
 	ids="$(snapshot_ids_for_prediction)"
 
 	if [ -n "$have_snapshots" ]; then
-		update_entries_for_snapshot "$(regex_snapshot_ids_for_prediction)"
+		update_entries_for_snapshot "(?:${ids// /|})"
 	else
 		# There is no snapshot to select, and asking for one
 		# ("rootflags=subvol=/.snapshots//snapshot") matches no

@@ -1939,6 +1939,56 @@ t_entries_linked()
 	return 0
 }
 
+# find_conf_file finds the file of the entry of a kernel by its name,
+# with or without a boot counter
+# shellcheck disable=SC2034,SC2329  # read and called by the sourced library
+t_find_conf_file()
+{
+	load
+	local boot_root="$workdir/esp" entry_token=t have_snapshots=1
+	is_grub2_bls() { false; }
+	mkdir -p "$boot_root/loader/entries"
+	touch "$boot_root/loader/entries/t-6.2.1-1-default-5.conf" \
+	      "$boot_root/loader/entries/t-6.2.1-1-default-7+2-1.conf"
+	is "plain" "$boot_root/loader/entries/t-6.2.1-1-default-5.conf" "$(find_conf_file 6.2.1-1-default 5)"
+	is "boot counter" "$boot_root/loader/entries/t-6.2.1-1-default-7+2-1.conf" "$(find_conf_file 6.2.1-1-default 7)"
+	find_conf_file 6.2.1-1-default 6 > /dev/null && fail "an entry for snapshot 6"
+	return 0
+}
+
+# update_entries_for_snapshot without a snapshot gives the entries of
+# this system, and with one only those of the snapshot
+# shellcheck disable=SC2034,SC2329  # read and called by the sourced library
+t_update_entries_for_snapshot()
+{
+	load
+	local entryfile="$workdir/entries.json" entry_token=t subvol_prefix=@ all_rootfs_cache=/dev/mapper/root
+	bootctl_entries()
+	{
+		jq -n '[{id: "t-6.2.1-1-default-5.conf", options: "root=/dev/mapper/root rootflags=subvol=@/.snapshots/5/snapshot"},
+			{id: "t-commit_7.7.6.2.1-1-default.conf", uki: "/t/a.efi"},
+			{id: "other-6.2.1-1-default-5.conf", options: "root=/dev/sdz1 rootflags=subvol=@/.snapshots/5/snapshot"}]'
+	}
+	update_entries_for_snapshot ""
+	is "this system" "t-6.2.1-1-default-5.conf t-commit_7.7.6.2.1-1-default.conf" "$(jq -r '[.[].id] | join(" ")' "$entryfile")"
+	update_entries_for_snapshot 7
+	is "snapshot 7" "t-commit_7.7.6.2.1-1-default.conf" "$(jq -r '[.[].id] | join(" ")' "$entryfile")"
+	update_entries
+	is "all, the filter does not stay" 3 "$(jq length "$entryfile")"
+	return 0
+}
+
+# set_default_entry refuses an entry that is not there
+# shellcheck disable=SC2034  # read by the sourced library
+t_set_default_unknown()
+{
+	load
+	local boot_root="$workdir/esp" strict_vars="boot_root"
+	mkdir -p "$boot_root/loader/entries"
+	says "unknown entry" "$(strict set_default_entry t-nothing.conf 2>&1)" "Boot loader entry t-nothing.conf not found"
+	return 0
+}
+
 # The snapshot and the kernel of every kind of entry.  cleanup removes
 # the entry whose kernel is not installed, so a wrong kernel here
 # deletes a good entry
@@ -2033,7 +2083,6 @@ t_prediction_entries_linked()
 	load
 	local entryfile="$workdir/entries.json" have_snapshots=1
 	snapshot_ids_for_prediction() { echo "5 1"; }
-	regex_snapshot_ids_for_prediction() { echo "(?:5|1)"; }
 	update_entries_for_snapshot()
 	{
 		jq -n '[{id: "t-6.2.1-1-default-5.conf", version: "5_6.2.1-1-default"},
@@ -2345,6 +2394,9 @@ done <<-'EOF'
 	t_rootflags_addon_name      the name of the rootflags addon changes with the snapshot and with the key
 	t_install_local_uki_kept    the entry of a local UKI is kept only while it is in the ESP and current
 	t_entries_linked            the entries of a snapshot include the ones made by bootctl link
+	t_find_conf_file            find_conf_file finds an entry by its name, with a boot counter too
+	t_update_entries_for_snapshot the entries of a snapshot, or of this system without one
+	t_set_default_unknown       set_default_entry refuses an entry that is not there
 	t_entry_version             the snapshot and the kernel of every kind of entry
 	t_dangling_uki              a UKI entry without its UKI or an addon does not boot
 	t_show_entry_uki            show-entry shows the entry of the UKI of a kernel
