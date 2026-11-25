@@ -2138,6 +2138,65 @@ t_show_entry_uki()
 	return 0
 }
 
+# settle_uki_mode: the TPM2 slots decide the UKI mode in effect.  A
+# slot of pcr-oracle (signed policy, no pcrlock) is not a UKI slot
+# shellcheck disable=SC2034,SC2329  # read and called by the sourced library
+t_settle_uki_mode()
+{
+	pcr15_setup
+	local UKI uki_config credstore="$workdir/settle-cred" header
+	rm -rf "$credstore"
+	mkdir -p "$credstore"
+	detect_tracked_devices() { tracked_devices=(/dev/a); }
+	luks_header() { echo "$header"; }
+	header='{"tokens": {"0": {"type": "systemd-tpm2", "tpm2_pubkey": "k"}}}'
+	UKI=local; settle_uki_mode
+	is "pcr-oracle slot" "local" "$UKI"
+	header='{"tokens": {"0": {"type": "systemd-tpm2", "tpm2_pcrlock": true}}}'
+	UKI=local; settle_uki_mode
+	is "plain slot" "" "$UKI"
+	is "configuration" "local" "$uki_config"
+	header='{"tokens": {"0": {"type": "systemd-tpm2", "tpm2_pcrlock": true, "tpm2_pubkey": "k"}}}'
+	UKI=""; settle_uki_mode
+	is "UKI slot" "yes" "$UKI"
+	touch "$credstore/tpm2-pcr-initrd-private-key.pem"
+	UKI=""; settle_uki_mode
+	is "UKI slot with the local key" "local" "$UKI"
+	return 0
+}
+
+# rebind_tpm2_slots makes the slot that enroll would make: with the UKIs
+# the signed PCR 11 for a device of the initrd, and nothing for a device
+# unlocked later; without them, PCR 15 for both
+# shellcheck disable=SC2034,SC2329  # read and called by the sourced library
+t_rebind_uki()
+{
+	pcr15_setup
+	local UKI
+	touch /var/lib/systemd/pcrlock.json
+	detect_tracked_devices() { tracked_devices=(/dev/a /dev/b /dev/c); }
+	measure_anchor() { echo /dev/a; }
+	crypttab_field() { [ "$2" = name ] && echo root || { [ "$1" = /dev/a ] && echo "tpm2-measure-pcr=yes"; } || echo "tpm2-device=auto"; }
+	tpm2_slot_binding() { [ "$1" = /dev/a ] && echo bound || echo plain; }
+	read_initrd_crypttab() { :; }
+	in_initrd_crypttab() { [ "$1" = /dev/b ]; }
+	pcr15_slot_value() { echo "v-$1"; }
+	uki_pcr_public_key() { echo /key; }
+	entries_bind_pcr15() { return 1; }
+	systemd-cryptenroll() { echo "$*" >> "$workdir/enroll"; }
+
+	UKI=local; : > "$workdir/enroll"
+	rebind_tpm2_slots
+	is "UKI" "--tpm2-device=auto --tpm2-public-key=/key --tpm2-public-key-pcrs=11 --tpm2-public-key-policyref=initrd --tpm2-pcrlock=/var/lib/systemd/pcrlock.json --tpm2-pcrs=15:sha256=v-/dev/b --unlock-tpm2-device=auto /dev/b" \
+		"$(cat "$workdir/enroll")"
+
+	UKI=""; : > "$workdir/enroll"
+	rebind_tpm2_slots
+	is "kernel and initrd" "/dev/b /dev/c" "$(sed 's/.* //' "$workdir/enroll" | paste -sd ' ')"
+	says "no signed policy" "$(cat "$workdir/enroll")" "--tpm2-public-key= --tpm2-pcrlock"
+	return 0
+}
+
 # pcrlock_unlockable has to name every category that systemd-pcrlock
 # can remove through varlink (fwupd uses them before a firmware update),
 # and the file that each one removes.  A category added upstream would
@@ -2295,6 +2354,8 @@ done <<-'EOF'
 	t_pcrlock_addons_limit      the command lines of the addons stay inside the PolicyOR limit
 	t_linked_entry_ids          the entries of the UKIs of a kernel, one per variant
 	t_distro_uki_lost_options   the options of the kernel command line that a UKI of the packages loses are reported
+	t_settle_uki_mode           the TPM2 slots decide the UKI mode in effect
+	t_rebind_uki                rebind_tpm2_slots makes the slot that enroll would make
 	t_pcrlock_unlockable        pcrlock_unlockable names every category that systemd-pcrlock removes via varlink
 EOF
 
