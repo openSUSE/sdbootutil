@@ -3391,7 +3391,7 @@ show_entry_fields()
 			*) continue ;;
 		esac
 
-		if [ "${#arg_entry_keys[@]}" -eq 0 ] || [[ ${arg_entry_keys[*]} == *"all"* ]] || [[ ${arg_entry_keys[*]} == *"$k"* ]]; then
+		if [ "${#arg_entry_keys[@]}" -eq 0 ] || [[ " ${arg_entry_keys[*]} " == *" all "* ]] || [[ " ${arg_entry_keys[*]} " == *" $k "* ]]; then
 			echo -e "$k\t$v"
 		fi
 	done < <(entry_fields "$conf")
@@ -3592,7 +3592,7 @@ list_devices()
 {
 	info "Listing devices"
 
-	detect_tracked_devices
+	detect_tracked_devices || return 0
 
 	for dev in "${tracked_devices[@]}"; do
 		echo "$dev"
@@ -4642,6 +4642,9 @@ pcrlock_file()
 	key="${key//[^a-zA-Z0-9.=+-]/_}"
 	pcrlock_cache_used["$key"]=1
 	if [ -s "$pcrlock_cache/$key" ]; then
+		# The directory of the component can be gone, as unenroll
+		# keeps the cache
+		mkdir -p "${out%/*}"
 		cp "$pcrlock_cache/$key" "$out"
 		return 0
 	fi
@@ -5830,6 +5833,16 @@ policy_missing_pcrs()
 		< /var/lib/systemd/pcrlock.json
 }
 
+# Bound PCRs that are no longer requested
+policy_extra_pcrs()
+{
+	local pcrs="$1"
+
+	[ -e /var/lib/systemd/pcrlock.json ] || return 0
+	jq -r --arg pcrs "$pcrs" '[.pcrValues[].pcr] - ($pcrs | split(",") | map(select(. != "") | tonumber)) | join(",")' \
+		< /var/lib/systemd/pcrlock.json
+}
+
 policy_stale_pcrs()
 {
 	# Bound PCRs whose current value is not one of the alternatives
@@ -6053,6 +6066,13 @@ get_final_pcrs()
 {
 	local pcrs="$1"
 
+	# An empty "--pcr=" is not "no PCR" for systemd-pcrlock, but its
+	# default list
+	[ -n "$pcrs" ] || {
+		warn "No PCR is left for the policy"
+		return 1
+	}
+
 	# Generate a JSON prediction, to get the final PCRs that will
 	# participate in the policy.  To avoid the PolicyOR limit, we
 	# filter the PCRs with more that 8 values
@@ -6134,6 +6154,10 @@ get_final_pcrs()
 	[ -z "$arg_strict" ] || [ -z "$pcrs_policy_missing$pcrs_policyor" ] || \
 		err "Not all the requested PCRs can be predicted ($pcrs -> ${pcrs_policy:-none}). No policy is applied, run without --strict to accept the subset"
 
+	[ -n "$pcrs_policy" ] || {
+		warn "No PCR from $pcrs can be part of the policy"
+		return 1
+	}
 	echo "$pcrs_policy"
 }
 
@@ -6465,8 +6489,9 @@ generate_tpm2_predictions_pcrlock()
 	# about the current event log, that the next boot resolves.
 	# The components do not need to change for that to happen, so
 	# the hashes alone would reuse the reduced policy forever
-	local missing_pcrs
+	local missing_pcrs extra_pcrs
 	missing_pcrs="$(policy_missing_pcrs "$pcrs")"
+	extra_pcrs="$(policy_extra_pcrs "$pcrs")"
 
 	if [ -n "$arg_force" ]; then
 		dbg "A new policy is forced (--force)"
@@ -6484,6 +6509,8 @@ generate_tpm2_predictions_pcrlock()
 		dbg "The components changed since the current policy was created"
 	elif [ -n "$missing_pcrs" ]; then
 		dbg "The current policy does not cover the requested PCR $missing_pcrs"
+	elif [ -n "$extra_pcrs" ]; then
+		dbg "The current policy binds the PCR $extra_pcrs, no longer requested"
 	else
 		info "Policy is up to date"
 		return 0
