@@ -672,7 +672,9 @@ is_grub2_bls()
 # "no", empty or unset for a Type #1 entry (kernel and initrd), "yes"
 # for the UKI of the kernel package, signed by the distribution, and
 # "local" for a UKI built here, signed with the local key when
-# SECURE_BOOT is "yes".  Only systemd-boot boots them
+# SECURE_BOOT is "yes".  Only systemd-boot boots them: it loads the
+# addons of an entry, where the snapshot is.  With another boot loader
+# the entries are of the kernel and the initrd
 assert_uki_config()
 {
 	case "${UKI:-}" in
@@ -680,7 +682,11 @@ assert_uki_config()
 		yes|local) ;;
 		*) err "/etc/sysconfig/bootloader has UKI=\"$UKI\", but only \"yes\", \"no\" or \"local\" are recognized" ;;
 	esac
-	is_sdboot || err "UKI=\"$UKI\" in /etc/sysconfig/bootloader needs systemd-boot (LOADER_TYPE=\"systemd-boot\")"
+	is_sdboot || {
+		warn "UKI=\"$UKI\" in /etc/sysconfig/bootloader needs systemd-boot, using the kernel and the initrd"
+		UKI=""
+		return 0
+	}
 
 	# The tools of the UKIs, checked once here.  With UKI="yes" only
 	# the addon of the snapshot is built and signed

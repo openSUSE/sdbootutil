@@ -1995,8 +1995,9 @@ t_p15_status()
 	says "nothing measured" "$out" "NOTHING was measured"
 }
 
-# UKI from /etc/sysconfig/bootloader: empty, "no", "yes" or "local",
-# and the last two only with systemd-boot
+# UKI from /etc/sysconfig/bootloader: empty, "no", "yes" or "local".
+# The last two need systemd-boot, and grub2-bls falls back to the
+# kernel and the initrd
 # shellcheck disable=SC2034  # UKI is read by the sourced library
 t_uki_config()
 {
@@ -2026,10 +2027,13 @@ t_uki_config()
 	( PATH=/nonexistent; assert_uki_config ) > /dev/null 2>&1 && fail "UKI=local without its tools was accepted"
 	UKI=distribution
 	( assert_uki_config ) > /dev/null 2>&1 && fail "UKI=\"distribution\" was accepted"
+	# grub2-bls boots the kernel and the initrd, with a warning
 	loader=grub2-bls
 	for value in yes local; do
 		UKI="$value"
-		( assert_uki_config ) > /dev/null 2>&1 && fail "UKI=\"$value\" with grub2-bls was accepted"
+		says "$value with grub2-bls" "$( (assert_uki_config) 2>&1)" "needs systemd-boot, using the kernel and the initrd"
+		assert_uki_config 2> /dev/null || fail "UKI=\"$value\" with grub2-bls failed"
+		is "$value with grub2-bls: no UKI" "" "$UKI"
 	done
 	UKI=no
 	( assert_uki_config ) > /dev/null 2>&1 || fail "UKI=\"no\" with grub2-bls was refused"
@@ -3017,7 +3021,7 @@ done <<-'EOF'
 	t_shift_limit               restore_shifts makes room for the current boot in a full component
 	t_entries_bind              entries_bind_pcr15 checks the measurement layout and the devices of every initrd
 	t_p15_status                status_pcr15 reports the measurements of this boot
-	t_uki_config                assert_uki_config accepts empty, no, yes or local, the last two only with systemd-boot
+	t_uki_config                assert_uki_config accepts empty, no, yes or local; grub2-bls falls back to no UKI
 	t_uki_status                uki_mode_text and uki_missing_kernels report the UKI mode and the kernels without a UKI
 	t_uki_keys                  uki_keys makes the keys of UKI=local, stored only encrypted
 	t_mok                       mok_enroll imports the UKI certificate once, and again after a failed boot
