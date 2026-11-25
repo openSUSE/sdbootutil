@@ -1243,7 +1243,9 @@ esp_setup()
 	# shellcheck disable=SC2034  # read by the sourced library
 	esp_files="$workdir/esp-files" esp_root="$workdir/esp" boot_root="$workdir/esp" esp_dst="/EFI/systemd" arg_force=
 	rm -rf "$workdir/esp" "$esp_files"
-	mkdir -p "$workdir/esp/loader/entries" "$workdir/esp/token/7.2.3"
+	mkdir -p "$workdir/esp/loader/entries" "$workdir/esp/token/7.2.3" /var/lib/pcrlock.d
+	# A refusal puts back the components, never the ones of the host
+	scratch_dir /var/lib/pcrlock.d
 	echo "options root=UUID=x" > "$workdir/esp/loader/entries/$ENTRY+3.conf"
 	echo "kernel" > "$workdir/esp/token/7.2.3/linux-1"
 	echo "initrd" > "$workdir/esp/token/7.2.3/initrd-1"
@@ -1313,11 +1315,16 @@ t_vef_modified()
 	verify_esp_files &> /dev/null
 
 	echo "options root=UUID=x quiet" > "$workdir/esp/loader/entries/$ENTRY+3.conf"
+	# The components made from it, and the ones before
+	mkdir -p /var/lib/pcrlock.d/710-c.pcrlock.d "$tmpdir/pcrlock.d/710-c.pcrlock.d"
+	echo "new" > /var/lib/pcrlock.d/710-c.pcrlock.d/cmdline-1.pcrlock
+	echo "old" > "$tmpdir/pcrlock.d/710-c.pcrlock.d/cmdline-1.pcrlock"
 	local out rc=0
 	out="$( verify_esp_files 2>&1 )" || rc=$?
 	is "exit status" 1 "$rc"
 	says "error" "$out" "$workdir/esp/loader/entries/$ENTRY+3.conf"
 	says_not "error" "$out" "initrd-1"
+	is "components as before" "old" "$(cat /var/lib/pcrlock.d/710-c.pcrlock.d/cmdline-1.pcrlock)"
 }
 
 t_vef_new_file()

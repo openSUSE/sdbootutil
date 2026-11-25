@@ -1922,6 +1922,12 @@ verify_esp_files()
 
 	[ "${#foreign[@]}" -ne 0 ] || return 0
 
+	# The components go back to what they were, or a later policy
+	# (fwupd, see `sync_pcrlock_policy`) would seal these files
+	[ -n "$arg_force" ] || {
+		rm -rf /var/lib/pcrlock.d/*
+		[ ! -d "$tmpdir/pcrlock.d" ] || cp -R "$tmpdir/pcrlock.d/." /var/lib/pcrlock.d/
+	}
 	[ -n "$arg_force" ] || \
 		err "These files in the ESP were not installed by sdbootutil, or changed after it installed them:\n$(printf '  %s\n' "${foreign[@]}")\nA new TPM2 policy would unlock the disk when booting them.  If the change is expected, use --force"
 
@@ -6349,6 +6355,9 @@ generate_tpm2_predictions_pcrlock()
 			err "PCR 9 cannot be predicted for the UKIs, so it cannot be part of the policy. No policy is applied, run without --strict to accept the subset"
 	fi
 
+	# The components as they were, for `verify_esp_files`
+	rm -rf "$tmpdir/pcrlock.d"
+	[ ! -d /var/lib/pcrlock.d ] || cp -R /var/lib/pcrlock.d "$tmpdir/pcrlock.d"
 	clean_pcrlock_d
 	rm -f "$tmpdir/esp-files"
 
