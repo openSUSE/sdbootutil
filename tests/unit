@@ -2372,6 +2372,52 @@ t_gdp_tried_once()
 	return 0
 }
 
+# reuse_initrd takes the initrd of the parent, and leaves the entry
+# token of the snapshot: the new entry is written with it
+# shellcheck disable=SC2034,SC2329  # read and called by the sourced library
+t_reuse_initrd_token()
+{
+	load
+	local boot_root="$workdir/esp" entry_token arg_no_reuse_initrd="" dstinitrd=() reused_entry=
+	mkdir -p "$boot_root/t"
+	touch "$boot_root/t/initrd-1"
+	echo "initrd /t/initrd-1" > "$workdir/parent.conf"
+	settle_entry_token() { entry_token="token-of-$1"; }
+	find_conf_file() { [ "$2" = 5 ] && echo "$workdir/parent.conf"; }
+	detect_parent() { parent_subvol=@/.snapshots/5/snapshot parent_snapshot=5; }
+	entry_token=token-of-6
+	reuse_initrd 6 @/.snapshots/6/snapshot 7.3.5-1-default || fail "the initrd of the parent is not reused"
+	is "initrd" "/t/initrd-1" "${dstinitrd[*]}"
+	is "entry token" "token-of-6" "$entry_token"
+	return 0
+}
+
+# stage_initrd stages the initrd of the package for every kernel, also
+# when the one of the previous kernel is still there
+# shellcheck disable=SC2034  # read by the sourced library
+t_stage_initrd_twice()
+{
+	load
+	local tmpdir="$workdir/tmp" arg_no_reuse_initrd=1
+	mkdir -p "$tmpdir"
+	touch "$workdir/initrd-a" "$workdir/initrd-b"
+	stage_initrd 1 "" 7.3.4-1-default "$workdir/initrd-a"
+	stage_initrd 1 "" 7.3.5-1-default "$workdir/initrd-b" || fail "the second initrd is not staged"
+	is "second" "$workdir/initrd-b" "$(readlink "$tmpdir/initrd-0")"
+	return 0
+}
+
+# pending_initrds_size counts the initrd that a link points to
+t_pending_initrds_size()
+{
+	load
+	mkdir -p "$workdir/pend"
+	head -c 204800 /dev/zero > "$workdir/big-initrd"
+	ln -sf "$workdir/big-initrd" "$workdir/pend/initrd-0"
+	is "size in KB" 201 "$(pending_initrds_size "$workdir/pend")"
+	return 0
+}
+
 # pcrlock_unlockable has to name every category that systemd-pcrlock
 # can remove through varlink (fwupd uses them before a firmware update),
 # and the file that each one removes.  A category added upstream would
@@ -2541,6 +2587,9 @@ done <<-'EOF'
 	t_enroll_secret             enroll_secret takes the secret of the method from its sources
 	t_unenroll_device           unenroll_device wipes the slot kind of the method
 	t_gdp_tried_once            get_device_password tries each different candidate once
+	t_reuse_initrd_token        reuse_initrd leaves the entry token of the snapshot
+	t_stage_initrd_twice        stage_initrd stages the initrd of the package for every kernel
+	t_pending_initrds_size      pending_initrds_size counts the initrd behind a link
 	t_pcrlock_unlockable        pcrlock_unlockable names every category that systemd-pcrlock removes via varlink
 EOF
 
