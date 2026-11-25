@@ -16,8 +16,6 @@
 #
 
 
-%global rustflags '-Clink-arg=-Wl,-z,relro,-z,now'
-
 # Body shared by the file triggers below.  `sdbootutil update` is the
 # one command that reconciles the ESP with the system: the bootloader,
 # the shim and the extra entries that other packages drop in
