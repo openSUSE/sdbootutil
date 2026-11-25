@@ -1953,9 +1953,9 @@ t_entry_version()
 		{"id": "t-commit_5.5.7.3.5-1-default.virt+3.conf", "version": "5.5.7.3.5-1-default.virt"},
 		{"id": "t-commit_1.7.3.5-1-default.conf", "version": "1.7.3.5-1-default"}]'
 	is "with snapshots" "5 7.3.5-1-default|5 7.3.5-1-default|5 7.3.5-1-default|5 7.3.5-1-default|1 3.5-1-default" \
-		"$(jq -r --argjson snapshots true "$jq_entry_version"'.[] | entry_version($snapshots) | "\(.snapshot) \(.kernel)"' <<<"$entries" | paste -sd '|')"
+		"$(jq -r --arg snapshots 1 "$jq_entry_version"'.[] | entry_version | "\(.snapshot) \(.kernel)"' <<<"$entries" | paste -sd '|')"
 	is "without snapshots" "null 7.3.5-1-default" \
-		"$(jq -r --argjson snapshots false "$jq_entry_version"'.[4] | entry_version($snapshots) | "\(.snapshot) \(.kernel)"' <<<"$entries")"
+		"$(jq -r --arg snapshots "" "$jq_entry_version"'.[4] | entry_version | "\(.snapshot) \(.kernel)"' <<<"$entries")"
 	return 0
 }
 
