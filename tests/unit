@@ -1313,6 +1313,171 @@ t_vef_force()
 	( verify_esp_files ) &> /dev/null || fail "the accepted change was refused later"
 }
 
+####### enroll: what goes into /etc/crypttab and into the TPM2 slot.
+####### The real `enroll` runs on the loop device, with the TPM2, the
+####### prediction and the initrds replaced by stubs that record
+
+# The values of PCR 15 that the stubs give: after the anchor (B), and
+# also after the initrd (C)
+pcr15_b="$(printf 'b%.0s' {1..64})"
+pcr15_c="$(printf 'c%.0s' {1..64})"
+
+# The state of a TPM2 enrollment of "$dev" with the anchor "$anchor",
+# where the initrd unlocks what "$initrd_crypttab" says.  "$workdir/log"
+# has the order of the slow steps, and "$workdir/args" the arguments of
+# the TPM2 enrollment
+# shellcheck disable=SC2034,SC2329  # read and called by the sourced library
+enroll_setup()
+{
+	CURRENT_PW="$BOOTSTRAP" load
+	scratch_dir /var/lib/systemd
+	[ -e /etc/crypttab ] || skip "/etc/crypttab is needed as a mount point"
+	echo "cr_test $dev none x-initrd.attach" > "$workdir/crypttab"
+	mountpoint -q /etc/crypttab || mount --bind "$workdir/crypttab" /etc/crypttab
+	tracked_devices=("$dev")
+	tmpdir="$workdir/tmp"
+	mkdir -p "$tmpdir"
+	arg_method=tpm2 UKI='' uki_config='' enroll_anchor='' arg_no_measure_pcr='' arg_no_reuse_initrd=''
+	update_predictions=1 anchor="$dev" initrd_crypttab='' cryptenroll_fails=''
+	: > "$workdir/log"
+	: > "$workdir/args"
+	have_tpm2() { :; }
+	have_pcrlock() { :; }
+	in_lockout() { false; }
+	measure_anchor() { echo "$anchor"; }
+	uki_keys() { :; }
+	uki_pcr_public_key() { echo "$workdir/pcr.pem"; }
+	install_all_kernels() { echo "install${UKI:+:$UKI}" >> "$workdir/log"; }
+	initrd_crypttab() { echo initrd >> "$workdir/log"; echo "$initrd_crypttab"; }
+	generate_tpm2_predictions() { echo predict >> "$workdir/log"; echo '{}' > /var/lib/systemd/pcrlock.json; }
+	pcr15_bound_value() { if [ "$2" = leave-initrd ]; then echo "$pcr15_c"; else echo "$pcr15_b"; fi; }
+	systemctl() { :; }
+	check_enrolled() { :; }
+	# /etc/crypttab is a bind mount here, and "mv" cannot replace it
+	replace_crypttab() { [ -z "$2" ] || cat "$1" > /etc/crypttab; rm -f "$1"; }
+	systemd-cryptenroll()
+	{
+		if [[ " $* " == *" --tpm2-device=auto "* ]]; then
+			printf '%s\n' "$@" > "$workdir/args"
+			[ -z "$cryptenroll_fails" ]
+			return
+		fi
+		command systemd-cryptenroll "$@"
+	}
+}
+
+# `enroll` in a subshell, as it ends with `err` on failure, and with the
+# trap of sdbootutil that puts /etc/crypttab back
+run_enroll()
+{
+	( trap cleanup EXIT; enroll ) > "$workdir/out" 2>&1
+}
+
+# The options of the line of "$dev" in /etc/crypttab
+crypttab_opts()
+{
+	read -r _ _ _ opts < /etc/crypttab
+	echo "$opts"
+}
+
+# The anchor measures its volume key, and its slot is bound to PCR 15
+# before any measurement.  The changed crypttab rebuilds the initrds,
+# and only then the initrd says which devices it unlocks
+t_enroll_anchor()
+{
+	enroll_setup
+	run_enroll || fail "enroll failed: $(cat "$workdir/out")"
+	is "crypttab" "x-initrd.attach,tpm2-device=auto,tpm2-measure-pcr=yes" "$(crypttab_opts)"
+	is "steps" "install initrd predict" "$(paste -sd ' ' "$workdir/log")"
+	says "PCR 15" "$(cat "$workdir/args")" "--tpm2-pcrs=15:sha256=$(printf '%064d' 0)"
+	says "pcrlock" "$(cat "$workdir/args")" "--tpm2-pcrlock=/var/lib/systemd/pcrlock.json"
+	says "no signed policy" "$(cat "$workdir/args")" "--tpm2-public-key="
+}
+
+# Another device than the anchor does not measure, and its slot is bound
+# to PCR 15 after the anchor when the initrd unlocks it
+t_enroll_after_anchor()
+{
+	enroll_setup
+	echo "cr_test $dev none x-initrd.attach,tpm2-device=auto,tpm2-measure-pcr=yes" > /etc/crypttab
+	anchor=/dev/the-anchor initrd_crypttab="cr_test $dev none x-initrd.attach"
+	run_enroll || fail "enroll failed: $(cat "$workdir/out")"
+	is "crypttab" "x-initrd.attach,tpm2-device=auto" "$(crypttab_opts)"
+	says "PCR 15" "$(cat "$workdir/args")" "--tpm2-pcrs=15:sha256=$pcr15_b"
+}
+
+# Without the initrd, the slot is bound to PCR 15 after the initrd
+t_enroll_after_initrd()
+{
+	enroll_setup
+	anchor=/dev/the-anchor
+	run_enroll || fail "enroll failed: $(cat "$workdir/out")"
+	says "PCR 15" "$(cat "$workdir/args")" "--tpm2-pcrs=15:sha256=$pcr15_c"
+}
+
+# --no-measure-pcr: no anchor, so nothing measures and no slot is bound
+# shellcheck disable=SC2034  # read by the sourced library
+t_enroll_no_measure()
+{
+	enroll_setup
+	arg_no_measure_pcr=1
+	run_enroll || fail "enroll failed: $(cat "$workdir/out")"
+	is "crypttab" "x-initrd.attach,tpm2-device=auto" "$(crypttab_opts)"
+	says_not "PCR 15" "$(cat "$workdir/args")" "--tpm2-pcrs=15"
+	is "steps" "install predict" "$(paste -sd ' ' "$workdir/log")"
+}
+
+# Switching to the UKIs writes the entries again before the initrd is
+# read: the UKI decides which devices are unlocked in the initrd.  The
+# slot adds the signed PCR 11 policy
+t_enroll_uki_switch()
+{
+	enroll_setup
+	echo "cr_test $dev none x-initrd.attach,tpm2-device=auto" > /etc/crypttab
+	uki_config=local anchor=/dev/the-anchor initrd_crypttab="cr_test $dev none x-initrd.attach"
+	run_enroll || fail "enroll failed: $(cat "$workdir/out")"
+	is "steps" "install:local initrd predict" "$(paste -sd ' ' "$workdir/log")"
+	says "signed policy" "$(cat "$workdir/args")" "--tpm2-public-key=$workdir/pcr.pem"
+	says "PCR 11" "$(cat "$workdir/args")" "--tpm2-public-key-pcrs=11"
+	says "policyref" "$(cat "$workdir/args")" "--tpm2-public-key-policyref=initrd"
+	says "PCR 15" "$(cat "$workdir/args")" "--tpm2-pcrs=15:sha256=$pcr15_b"
+}
+
+# With the UKIs, a device that the initrd does not unlock opens after
+# PCR 15 has the identity of the system: a slot of the pcrlock policy
+# alone
+t_enroll_uki_late()
+{
+	enroll_setup
+	echo "cr_test $dev none x-initrd.attach,tpm2-device=auto" > /etc/crypttab
+	UKI=local uki_config=local anchor=/dev/the-anchor
+	run_enroll || fail "enroll failed: $(cat "$workdir/out")"
+	is "steps" "initrd predict" "$(paste -sd ' ' "$workdir/log")"
+	says "no signed policy" "$(cat "$workdir/args")" "--tpm2-public-key="
+	says_not "PCR 15" "$(cat "$workdir/args")" "--tpm2-pcrs=15"
+}
+
+# A failed enrollment puts /etc/crypttab back, and the initrds with it
+t_enroll_fails()
+{
+	enroll_setup
+	cryptenroll_fails=1
+	run_enroll && fail "enroll succeeded"
+	is "crypttab" "x-initrd.attach" "$(crypttab_opts)"
+	is "steps" "install initrd predict install" "$(paste -sd ' ' "$workdir/log")"
+}
+
+# A failed switch to the UKIs writes the entries of the old mode again,
+# as the slots that are still there are of that mode
+t_enroll_fails_uki()
+{
+	enroll_setup
+	echo "cr_test $dev none x-initrd.attach,tpm2-device=auto" > /etc/crypttab
+	uki_config=local cryptenroll_fails=1
+	run_enroll && fail "enroll succeeded"
+	is "steps" "install:local initrd predict install" "$(paste -sd ' ' "$workdir/log")"
+}
+
 ####### --start-trace-code: the secrets stay out of the trace, and the
 ####### paths that keep them out still work
 
@@ -2617,6 +2782,14 @@ done <<-'EOF'
 	t_erk_shared_nvindex        enroll_recovery_key publishes nothing when another device or a policy has the PIN
 	t_erk_change_fails          enroll_recovery_key publishes nothing when the key could not be set
 	t_erk_replace               enroll_recovery_key removes the old recovery key only once the new one works
+	t_enroll_anchor             enroll: the anchor measures, and its slot is bound to PCR 15 at zero
+	t_enroll_after_anchor       enroll: a device of the initrd is bound to PCR 15 after the anchor
+	t_enroll_after_initrd       enroll: a device out of the initrd is bound to PCR 15 after the initrd
+	t_enroll_no_measure         enroll: --no-measure-pcr binds no slot to PCR 15
+	t_enroll_uki_switch         enroll: a switch to the UKIs rewrites the entries before reading the initrd
+	t_enroll_uki_late           enroll: with the UKIs, a device out of the initrd gets a pcrlock slot only
+	t_enroll_fails              enroll: a failure puts /etc/crypttab and the initrds back
+	t_enroll_fails_uki          enroll: a failed switch to the UKIs writes the entries of the old mode again
 	t_ek_systemd_boot           entry_key takes the ID that systemd-boot writes
 	t_ek_no_suffix              entry_key takes the ID without the ".conf" suffix
 	t_ek_counter                entry_key drops the boot counter
