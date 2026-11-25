@@ -7276,6 +7276,19 @@ can_unlock()
 	local dev="${1:?}"
 	local kind="${2:?}"
 
+	# A slot bound to PCR 15 before the end of the initrd, the one of
+	# the anchor and the ones of the devices of the initrd (see
+	# `pcr15_slot_value`), never opens on the running system
+	if [ "$kind" = "tpm2" ] && [ "$(tpm2_slot_binding "$dev")" = "bound" ]; then
+		local anchor
+		anchor="$(measure_anchor)" || anchor=
+		read_initrd_crypttab
+		if [ "$dev" = "$anchor" ] || in_initrd_crypttab "$dev"; then
+			info "Not unlocking using TPM2: the slot of $dev opens only in the initrd"
+			return 1
+		fi
+	fi
+
 	if [ -t 0 ]; then
 		have_slot "$dev" "$kind"
 	else
