@@ -558,6 +558,70 @@ t_measure_anchor_devices()
 	return 0
 }
 
+# get_top_entry_id does not install every kernel when bootctl fails:
+# that is not an empty ESP
+# shellcheck disable=SC2034,SC2329  # read and called by the sourced library
+t_top_entry_bootctl_fails()
+{
+	load
+	local entryfile="$workdir/entries.json"
+	update_entries_for_snapshot() { echo '[]' > "$entryfile"; }
+	bootctl_entries() { return 1; }
+	install_all_kernels() { echo installed; }
+	local out
+	out="$( (get_top_entry_id 5) 2>&1)" && fail "it succeeded"
+	says_not "no installation" "$out" "installed"
+	return 0
+}
+
+# entry_snapshot finds the entry also when the id has no ".conf" (as
+# grub2-bls writes it) or has a boot counter
+t_entry_snapshot_id()
+{
+	load
+	local entries='[{"id": "t-6.2.1-1-default-5.conf", "version": "5_6.2.1-1-default"}]'
+	is "id" "5" "$(entry_snapshot t-6.2.1-1-default-5.conf <<<"$entries")"
+	is "no .conf" "5" "$(entry_snapshot t-6.2.1-1-default-5 <<<"$entries")"
+	is "counter" "5" "$(entry_snapshot t-6.2.1-1-default-5+2-1.conf <<<"$entries")"
+	is "another" "" "$(entry_snapshot t-6.2.1-1-default-6 <<<"$entries")"
+	return 0
+}
+
+# update_entry_conf writes the options once, also when they have "&"
+# or "|", and the entry had more than one options line
+# shellcheck disable=SC2034,SC2329  # read and called by the sourced library
+t_update_entry_conf()
+{
+	load
+	local tmpdir="$workdir/tmp" have_snapshots=1 subvol_prefix=@
+	mkdir -p "$tmpdir"
+	printf 'title T\noptions root=UUID=1 quiet\noptions splash\nlinux /t/linux-1\n' > "$workdir/e.conf"
+	create_boot_options() { echo 'root=UUID=1 a=x&y b=c|d'; }
+	update_entry_conf "$workdir/e.conf" 5
+	is "entry" "$(printf 'title T\noptions    root=UUID=1 a=x&y b=c|d\nlinux /t/linux-1')" "$(cat "$workdir/e.conf")"
+	return 0
+}
+
+# remove_kernel changes the default entry only when it removed it
+# shellcheck disable=SC2034,SC2329  # read and called by the sourced library
+t_remove_kernel_default()
+{
+	load
+	local TRANSACTIONAL_UPDATE='' default
+	settle_entry_token() { :; }
+	entry_conf_file() { echo "t-$1-$2.conf"; }
+	linked_entry_ids() { :; }
+	entry_file() { :; }
+	bootctl_entries() { :; }
+	get_default_entry() { echo "$default"; }
+	get_default_bootctl() { echo "t-new.conf"; }
+	set_default_entry() { echo "default $1"; }
+	default="t-6.2.1-1-default-5.conf"
+	is "another kernel" "" "$(remove_kernel 5 6.3.0-1-default 2> /dev/null)"
+	is "the default" "default t-new.conf" "$(remove_kernel 5 6.2.1-1-default 2> /dev/null)"
+	return 0
+}
+
 # entry_key: the spellings a boot loader can leave in
 # "LoaderEntrySelected", all reduced to the ID that `bootctl` reports.
 # systemd-boot writes that ID as it is; grub2-bls drops the ".conf"
@@ -2749,6 +2813,12 @@ t_reuse_initrd_token()
 	reuse_initrd 6 @/.snapshots/6/snapshot 7.3.5-1-default || fail "the initrd of the parent is not reused"
 	is "initrd" "/t/initrd-1" "${dstinitrd[*]}"
 	is "entry token" "token-of-6" "$entry_token"
+
+	# An entry with a missing initrd is not reused
+	printf 'initrd /t/initrd-1\ninitrd /t/initrd-gone\n' > "$workdir/parent.conf"
+	dstinitrd=()
+	reuse_initrd 6 @/.snapshots/6/snapshot 7.3.5-1-default 2> /dev/null && fail "an entry with a missing initrd is reused"
+	is "no initrd" "" "${dstinitrd[*]}"
 	return 0
 }
 
@@ -2860,6 +2930,10 @@ done <<-'EOF'
 	t_can_unlock_bound          a TPM2 slot bound to PCR 15 in the initrd is not used to unlock
 	t_top_entry_install         get_top_entry_id prints only the id, also after installing the kernels
 	t_measure_anchor_devices    the anchor is the one of the boot, also with --devices
+	t_top_entry_bootctl_fails   get_top_entry_id installs nothing when bootctl fails
+	t_entry_snapshot_id         entry_snapshot finds the entry without .conf or with a boot counter
+	t_update_entry_conf         update_entry_conf writes the options once, as they are
+	t_remove_kernel_default     remove_kernel changes the default entry only when it removed it
 	t_enroll_anchor             enroll: the anchor measures, and its slot is bound to PCR 15 at zero
 	t_enroll_after_anchor       enroll: a device of the initrd is bound to PCR 15 after the anchor
 	t_enroll_after_initrd       enroll: a device out of the initrd is bound to PCR 15 after the initrd
@@ -2963,7 +3037,7 @@ done <<-'EOF'
 	t_enroll_secret             enroll_secret takes the secret of the method from its sources
 	t_unenroll_device           unenroll_device wipes the slot kind of the method
 	t_gdp_tried_once            get_device_password tries each different candidate once
-	t_reuse_initrd_token        reuse_initrd leaves the entry token of the snapshot
+	t_reuse_initrd_token        reuse_initrd leaves the entry token of the snapshot, and needs every initrd
 	t_stage_initrd_twice        stage_initrd stages the initrd of the package for every kernel
 	t_pending_initrds_size      pending_initrds_size counts the initrd behind a link
 	t_pcrlock_unlockable        pcrlock_unlockable names every category that systemd-pcrlock removes via varlink

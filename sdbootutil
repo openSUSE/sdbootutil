@@ -1771,23 +1771,27 @@ remove_kernel()
 	}
 
 	settle_entry_token "${snapshot}"
-	local id
+	local id old_default removed_default=
+	old_default="$(get_default_entry 2> /dev/null)" || old_default=
 	# The entry of the kernel and the initrd, and the ones of the UKIs
 	for id in "$(entry_conf_file "$kernel_version" "$snapshot")" $(linked_entry_ids "$kernel_version" "$snapshot"); do
 		entry_file "$id" > /dev/null || continue
 		info "Removing boot entry $id"
 		bootctl_entries unlink "$id"
+		[ "$(entry_key "$id")" != "$(entry_key "$old_default")" ] || removed_default=1
 	done
 
 	# If we remove the default entry, `bootctl` will mark a new
 	# default, but we still need to update the EFI var (or the
-	# grubenv value)
+	# grubenv value).  Another default stays as it is
 	local default
-	default="$(get_default_bootctl)"
-	if [ -z "$default" ]; then
-		warn "Can't determine the new default entry"
-	else
-		set_default_entry "$default"
+	if [ -n "$removed_default" ] || [ -z "$old_default" ]; then
+		default="$(get_default_bootctl)"
+		if [ -z "$default" ]; then
+			warn "Can't determine the new default entry"
+		else
+			set_default_entry "$default"
+		fi
 	fi
 
 	# This action will require to update the PCR predictions
@@ -2035,7 +2039,11 @@ reuse_initrd()
 	if [ -n "$conf" ]; then
 		local v
 		while read -r v; do
-			[ -f "${boot_root}$v" ] || continue
+			# An entry with a missing initrd does not boot
+			[ -f "${boot_root}$v" ] || {
+				dstinitrd=()
+				break
+			}
 			info "Found existing initrd $v"
 			dstinitrd+=("$v")
 		done < <(entry_field "$conf" initrd)
@@ -3414,8 +3422,18 @@ update_entry_conf()
 	local boot_options
 	boot_options="$(create_boot_options "$subvol")"
 
-	cp "$conf" "$tmpdir/entry.conf"
-	sed -i "s|^options\s*.*$|options    $boot_options|g" "$tmpdir/entry.conf"
+	# The first "options" line gets the new options, and the others
+	# go, as they would add the old ones again.  Not with sed: the
+	# options can have "&" or "|"
+	local line found=
+	while IFS= read -r line || [ -n "$line" ]; do
+		if [[ "$line" =~ ^options([[:space:]]|$) ]]; then
+			[ -z "$found" ] || continue
+			found=1
+			line="options    $boot_options"
+		fi
+		echo "$line"
+	done < "$conf" > "$tmpdir/entry.conf"
 	cp "$tmpdir/entry.conf" "$conf"
 }
 
@@ -4280,6 +4298,8 @@ get_top_entry_id()
 
 	mapfile -t ids < <(jq -r '.[]|.id' < "$entryfile")
 	if [ -z "${ids[0]}" ]; then
+		# An error of bootctl is not an empty ESP
+		bootctl_entries list --json=short > /dev/null || err "Cannot read the boot entries"
 		info "No boot entries found, trying to create them..."
 		# The callers read the id from stdout, and the user has to
 		# see what the installation says (the MOK password)
@@ -4397,8 +4417,9 @@ entry_snapshot()
 {
 	local id="${1:?}"
 
-	jq -r --arg id "$id" '.[]
-		| select(.id == $id)
+	# The id can come without ".conf", or with a boot counter
+	jq -r --arg id "$(entry_key "$id")" '.[]
+		| select((.id // "" | sub("\\.conf$"; "") | sub("\\+[0-9]+(-[0-9]+)?$"; "")) == $id)
 		| ((.options // "") | capture("rootflags=subvol=[^ ]*/\\.snapshots/(?<n>[0-9]+)/snapshot") | .n)
 		  // ((.id // "") | capture("-commit_(?<n>[0-9]+)[.@+]") | .n)
 		  // ((.version // "") | capture("^(?<n>[0-9]+)[@_]") | .n)
@@ -5420,6 +5441,7 @@ pcrlock_grub2_bls()
 	# compare it for every entry
 	local grub_version n
 	grub_version="$(bootloader_version)" || grub_version=
+	[ -n "$grub_version" ] || warn "Cannot read the version of grub2-bls, the prediction is done as for an old version"
 
 	# 641-grub2-bls-grubenv.pcrlock is not part of the pcrlock
 	# standards
