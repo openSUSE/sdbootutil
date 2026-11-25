@@ -461,6 +461,35 @@ t_erk_change_fails()
 
 	enroll_recovery_key "$dev" &> /dev/null && fail "the enrollment succeeded"
 	no_key sdbootutil-recovery-pin
+	is "no slot of an unknown key" "" "$(systemd-cryptenroll "$dev" | grep recovery)"
+}
+
+# A new recovery key replaces the old one only once it opens the device
+t_erk_replace()
+{
+	CURRENT_PW="$BOOTSTRAP" KEY="the-old-key" load
+	scratch_dir /var/lib/systemd
+	enroll_recovery_key "$dev" &> /dev/null || fail "the first enrollment failed"
+
+	# shellcheck disable=SC2034  # read by the sourced library
+	env_key="the-new-key"
+	# Called by enroll_recovery_key, from the sourced library
+	# shellcheck disable=SC2329
+	cryptsetup()
+	{
+		[ "$1" != luksChangeKey ] || return 1
+		command cryptsetup "$@"
+	}
+	enroll_recovery_key "$dev" &> /dev/null && fail "the failed enrollment succeeded"
+	opens "the-old-key" "failed: the old key"
+	is "failed: one recovery slot" 1 "$(systemd-cryptenroll "$dev" | grep -c recovery)"
+
+	unset -f cryptsetup
+	enroll_recovery_key "$dev" &> /dev/null || fail "the second enrollment failed"
+	opens "the-new-key" "the new key"
+	command cryptsetup luksOpen --test-passphrase --disable-external-tokens "$dev" <<<"the-old-key" &> /dev/null && \
+		fail "the old key still opens the device"
+	is "one recovery slot" 1 "$(systemd-cryptenroll "$dev" | grep -c recovery)"
 }
 
 # entry_key: the spellings a boot loader can leave in
@@ -2587,6 +2616,7 @@ done <<-'EOF'
 	t_erk_unreachable_pin       enroll_recovery_key publishes nothing when a PIN it cannot reach exists
 	t_erk_shared_nvindex        enroll_recovery_key publishes nothing when another device or a policy has the PIN
 	t_erk_change_fails          enroll_recovery_key publishes nothing when the key could not be set
+	t_erk_replace               enroll_recovery_key removes the old recovery key only once the new one works
 	t_ek_systemd_boot           entry_key takes the ID that systemd-boot writes
 	t_ek_no_suffix              entry_key takes the ID without the ".conf" suffix
 	t_ek_counter                entry_key drops the boot counter
