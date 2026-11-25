@@ -4275,7 +4275,9 @@ get_top_entry_id()
 	mapfile -t ids < <(jq -r '.[]|.id' < "$entryfile")
 	if [ -z "${ids[0]}" ]; then
 		info "No boot entries found, trying to create them..."
-		install_all_kernels "$snapshot"
+		# The callers read the id from stdout, and the user has to
+		# see what the installation says (the MOK password)
+		install_all_kernels "$snapshot" >&2
 		update_entries_for_snapshot "$snapshot"
 
 		mapfile -t ids < <(jq -r '.[]|.id' < "$entryfile")
