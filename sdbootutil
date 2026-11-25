@@ -7661,7 +7661,7 @@ enroll_recovery_key()
 	local header
 	header="$(luks_header "$dev")"
 
-	local generated_key=
+	local generated_key='' old_slots=''
 	# This function will be called for every device.  Let systemd
 	# generate a secure recovery key only the first time if there
 	# is no recovery key or pin selected (%user:sdbootutil-key,
@@ -7679,20 +7679,35 @@ enroll_recovery_key()
 		# %u:cryptenroll in systemd-cryptenroll, and the
 		# temporary recovery key in cryptsetup, to avoid
 		# requesting a password
-		local tmp_key split keyslot
-		tmp_key="$(systemd-cryptenroll --wipe-slot=recovery --recovery-key "${extra_args[@]}" "$dev" 2> /dev/null)" || return 1
-		read -r -a split < <(systemd-cryptenroll "$dev" | grep recovery)
-		keyslot="${split[0]:-}"
-		[[ "$keyslot" =~ ^[0-9]+$ ]] || return 1
+		#
+		# The old recovery keys go only once the new one opens the
+		# device, so a failure keeps them
+		local tmp_key slot type keyslot=
+		while read -r slot type; do
+			[ "$type" = "recovery" ] || continue
+			old_slots+="${old_slots:+,}$slot"
+		done < <(systemd-cryptenroll "$dev")
+		tmp_key="$(systemd-cryptenroll --recovery-key "${extra_args[@]}" "$dev" 2> /dev/null)" || return 1
+		while read -r slot type; do
+			[ "$type" = "recovery" ] && [[ ",$old_slots," != *",$slot,"* ]] && keyslot="$slot"
+		done < <(systemd-cryptenroll "$dev")
+		[ -n "$keyslot" ] || return 1
 		# cryptsetup reads the new passphrase from a key file, here
 		# a pipe: never a file on disk
-		cryptsetup luksChangeKey --key-slot "$keyslot" --force-password "$dev" <(echo -n "$key") <<<"$tmp_key" || return 1
+		cryptsetup luksChangeKey --key-slot "$keyslot" --force-password "$dev" <(echo -n "$key") <<<"$tmp_key" || {
+			systemd-cryptenroll --wipe-slot="$keyslot" "${extra_args[@]}" "$dev" &> /dev/null
+			return 1
+		}
 	fi
 
 	check_enrolled "$dev" "recovery" "$header" || return 1
 	# The key is published below, so it has to open the device
 	valid_password "$dev" key || {
 		warn "The recovery key does not open $dev"
+		return 1
+	}
+	[ -z "$old_slots" ] || systemd-cryptenroll --wipe-slot="$old_slots" "${extra_args[@]}" "$dev" &> /dev/null || {
+		warn "Cannot remove the old recovery keys of $dev"
 		return 1
 	}
 
