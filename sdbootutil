@@ -6872,18 +6872,22 @@ is_tracked_device()
 # The device that measures its volume key into PCR 15: the first
 # tracked device behind the root file system (a btrfs can span
 # several).  It is unlocked first, and its slots are bound to PCR 15
-# still at zero, so they only unseal in the initrd
+# still at zero, so they only unseal in the initrd.  Tracked as in
+# `detect_tracked_devices`, but not limited by --devices: the anchor is
+# the one of the boot
 measure_anchor()
 {
-	local uuid path dev tracked
+	local uuid path dev fstype
 	read -r uuid < <(findmnt / -v -n -o UUID 2> /dev/null)
 	[ -n "$uuid" ] || return 1
 	while read -r path; do
-		while read -r dev; do
-			for tracked in "${tracked_devices[@]}"; do
-				[ "$tracked" != "$dev" ] || { echo "$dev"; return 0; }
-			done
-		done < <(lsblk --noheadings --list --inverse -o PATH "$path" 2> /dev/null)
+		while read -r dev fstype; do
+			[ "$fstype" = 'crypto_LUKS' ] || continue
+			cryptsetup isLuks --type luks2 "$dev" || continue
+			is_tracked_device "$dev" || continue
+			echo "$dev"
+			return 0
+		done < <(lsblk --noheadings --list --inverse -o PATH,FSTYPE "$path" 2> /dev/null)
 	done < <(lsblk --noheadings --list -o PATH -Q "UUID == \"$uuid\"" 2> /dev/null)
 	return 1
 }
