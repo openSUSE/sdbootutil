@@ -4724,19 +4724,12 @@ is_pcr_oracle()
 
 pcr_oracle_public_key()
 {
-	# The public key that pcr-oracle used to sign the PCR policy
-	# is not removed when the package goes away, and
-	# systemd-cryptenroll picks it up from any of the
-	# configuration directories.  Print the first one found.
-	local dir
-	for dir in /etc/systemd /run/systemd /usr/local/lib/systemd /usr/lib/systemd; do
-		if [ -e "$dir/tpm2-pcr-public-key.pem" ]; then
-			echo "$dir/tpm2-pcr-public-key.pem"
-			return 0
-		fi
-	done
-
-	return 1
+	# The public key that pcr-oracle used to sign the PCR policy is
+	# not removed when the package goes away.  pcr-oracle writes it
+	# in /etc only: the one in /run is the key of the booted UKI, and
+	# the one in /usr/lib the key of the UKIs of the distribution
+	[ -e /etc/systemd/tpm2-pcr-public-key.pem ] || return 1
+	echo /etc/systemd/tpm2-pcr-public-key.pem
 }
 
 snapshot_ids_for_prediction()
