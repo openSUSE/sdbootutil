@@ -898,11 +898,12 @@ pe_add_sections()
 	objcopy "${args[@]}" "$in" "$out"
 }
 
-# A signed addon in OUT, that adds CMDLINE to the kernel command line.
-# Without .uname, it works with any kernel
+# A signed addon in OUT, that adds CMDLINE to the kernel command line,
+# and the initrd INITRD if there is one.  Without .uname, it works with
+# any kernel
 build_addon()
 {
-	local cmdline="$1" out="$2"
+	local cmdline="$1" out="$2" initrd="${3:-}"
 	echo -n "$cmdline" > "$tmpdir/addon.cmdline"
 	cat > "$tmpdir/addon.sbat" <<-EOF
 	sbat,1,SBAT Version,sbat,1,https://github.com/rhboot/shim/blob/main/SBAT.md
@@ -910,11 +911,61 @@ build_addon()
 	EOF
 	pe_add_sections "/usr/lib/systemd/boot/efi/addon$firmware_arch.efi.stub" "$tmpdir/addon.efi" \
 		.cmdline "$tmpdir/addon.cmdline" \
-		.sbat "$tmpdir/addon.sbat"
+		.sbat "$tmpdir/addon.sbat" \
+		${initrd:+.initrd "$initrd"}
 	SYSTEMD_LOG_LEVEL=warning "$systemd_sbsign" sign --private-key=<(private_key secureboot-private-key.pem) \
 		--certificate="$secureboot_certificate" --output="$out" "$tmpdir/addon.efi" || \
 		err "Cannot sign the addon"
 	rm -f "$tmpdir/addon.cmdline" "$tmpdir/addon.sbat" "$tmpdir/addon.efi"
+}
+
+# The lines of /etc/crypttab that dracut puts in a host-only initrd:
+# the ones with "x-initrd.attach" or "force", and the devices that the
+# system needs (root, resume...), the ones that `dracut --print-cmdline`
+# names in "rd.luks.uuid=".  For an initrd that is not made for this
+# system, as the one of a UKI of the packages
+dracut_crypttab()
+{
+	local param uuids="" line name device _ opts uuid
+	[ -e /etc/crypttab ] || return 0
+	while IFS= read -r line || [ -n "$line" ]; do
+		read -r name device _ opts <<<"$line"
+		[ -n "$name" ] && [[ "$name" != \#* ]] || continue
+		if [[ ",$opts," != *",x-initrd.attach,"* ]] && [[ ",$opts," != *",force,"* ]]; then
+			# dracut takes seconds to answer, so it is asked only
+			# here, once
+			if [ -z "$uuids" ]; then
+				uuids=" "
+				while read -r param; do
+					[[ "$param" == rd.luks.uuid=* ]] || continue
+					param="${param#rd.luks.uuid=}"
+					uuids+="${param#luks-} "
+				done < <(cmdline_params "$(dracut --print-cmdline 2> /dev/null)")
+			fi
+			case "$device" in
+				UUID=*) uuid="${device#UUID=}" ;;
+				*) uuid="$(cryptsetup luksUUID "$device" 2> /dev/null)" || continue ;;
+			esac
+			[[ "$uuids" == *" $uuid "* ]] || continue
+		fi
+		echo "$line"
+	done < /etc/crypttab
+}
+
+# A cpio archive in OUT with the crypttab of `dracut_crypttab`.  The
+# same lines give the same bytes, as the addon that carries it is named
+# after its content
+crypttab_cpio()
+{
+	local out="${1:?}" dir="$tmpdir/crypttab-cpio"
+	rm -rf "$dir"
+	mkdir -p "$dir/etc"
+	dracut_crypttab > "$dir/etc/crypttab"
+	chmod 755 "$dir" "$dir/etc"
+	chmod 644 "$dir/etc/crypttab"
+	touch -h -d @0 "$dir/etc/crypttab" "$dir/etc" "$dir"
+	(cd "$dir" && find . | LC_ALL=C sort | cpio --quiet -o -H newc --reproducible -R 0:0) > "$out"
+	rm -rf "$dir"
 }
 
 # A signed UKI in OUT, from the kernel LINUX, the initrd INITRD, the

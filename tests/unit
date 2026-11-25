@@ -2159,8 +2159,9 @@ t_mok()
 	return 0
 }
 
-# build_addon makes a signed addon with the exact command line, and
-# pe_add_sections puts each section after the last one
+# build_addon makes a signed addon with the exact command line, and the
+# initrd when given, and pe_add_sections puts each section after the
+# last one
 # shellcheck disable=SC2034  # read by the sourced library
 t_addon()
 {
@@ -2185,6 +2186,14 @@ t_addon()
 	says "signed" "$(objdump -p "$addon")" "Security Directory"
 	is "size of .cmdline" "00000029" "$(objdump -h "$addon" | awk '$2 == ".cmdline" {print $3}')"
 	is "aligned" "000" "$(objdump -h "$addon" | awk '$2 == ".sbat" {print substr($4, length($4) - 2)}')"
+	objdump -h "$addon" | grep -q '\.initrd' && fail "an initrd that was not asked for"
+
+	# With an initrd
+	head -c 1000 /dev/urandom > "$workdir/addon-initrd"
+	build_addon "root=/dev/mapper/cr_root" "$addon" "$workdir/addon-initrd" || fail "build_addon with an initrd failed"
+	objcopy -O binary --only-section=.initrd "$addon" "$workdir/section"
+	cmp -s "$workdir/section" "$workdir/addon-initrd" || fail "the initrd is not the one given"
+	is "command line with an initrd" "root=/dev/mapper/cr_root" "$(pe_section_text "$addon" .cmdline)"
 	return 0
 }
 
@@ -2613,6 +2622,68 @@ t_list_devices_none()
 	return 0
 }
 
+# dracut_crypttab keeps the lines of /etc/crypttab that dracut puts in a
+# host-only initrd: "x-initrd.attach" or "force", or a device that
+# `dracut --print-cmdline` names (root, resume)
+# shellcheck disable=SC2034,SC2329  # read and called by the sourced library
+t_dracut_crypttab()
+{
+	load
+	[ -e /etc/crypttab ] || skip "/etc/crypttab is needed as a mount point"
+	local luks_uuid
+	luks_uuid="$(cryptsetup luksUUID "$dev")"
+	cat > "$workdir/crypttab" <<-EOF
+	# a comment
+	cr_swap $dev none tpm2-device=auto
+	cr_root UUID=1111 none x-initrd.attach,tpm2-device=auto
+	cr_force UUID=2222 none force
+	cr_late UUID=3333 none tpm2-device=auto
+
+	cr_byuuid UUID=$luks_uuid none
+	EOF
+	mountpoint -q /etc/crypttab || mount --bind "$workdir/crypttab" /etc/crypttab
+	dracut() { echo "rd.driver.pre=btrfs rd.luks.uuid=luks-$luks_uuid root=UUID=4444"; }
+	is "lines" "cr_swap $dev none tpm2-device=auto|cr_root UUID=1111 none x-initrd.attach,tpm2-device=auto|cr_force UUID=2222 none force|cr_byuuid UUID=$luks_uuid none" \
+		"$(dracut_crypttab | paste -sd '|')"
+
+	# dracut is asked only for a line without "x-initrd.attach" or
+	# "force"
+	echo "cr_root UUID=1111 none x-initrd.attach" > "$workdir/crypttab"
+	dracut() { echo asked >> "$workdir/dracut-asked"; }
+	is "only initrd lines" "cr_root UUID=1111 none x-initrd.attach" "$(dracut_crypttab)"
+	[ ! -e "$workdir/dracut-asked" ] || fail "dracut was asked"
+
+	# Without /etc/crypttab there is nothing to copy
+	umount /etc/crypttab
+	mount -t tmpfs none /etc
+	local strict_vars="verbose"
+	strict dracut_crypttab > "$workdir/no-crypttab" || fail "a missing /etc/crypttab ends the script"
+	umount /etc
+	is "no crypttab" "" "$(< "$workdir/no-crypttab")"
+	return 0
+}
+
+# crypttab_cpio makes the same archive for the same crypttab, with the
+# file in etc/crypttab
+# shellcheck disable=SC2034,SC2329  # read and called by the sourced library
+t_crypttab_cpio()
+{
+	command -v cpio > /dev/null || skip "cpio is not installed"
+	load
+	local tmpdir="$workdir/tmp"
+	mkdir -p "$tmpdir"
+	dracut_crypttab() { echo "cr_root UUID=1111 none x-initrd.attach"; }
+	crypttab_cpio "$workdir/a.cpio"
+	sleep 1
+	crypttab_cpio "$workdir/b.cpio"
+	cmp -s "$workdir/a.cpio" "$workdir/b.cpio" || fail "two archives of the same crypttab differ"
+	is "content" "cr_root UUID=1111 none x-initrd.attach" "$(cpio --quiet -i --to-stdout etc/crypttab < "$workdir/a.cpio")"
+	dracut_crypttab() { echo "cr_root UUID=1111 none"; }
+	crypttab_cpio "$workdir/c.cpio"
+	cmp -s "$workdir/a.cpio" "$workdir/c.cpio" && fail "two crypttabs give the same archive"
+	return 0
+}
+
 # remove_pcr and policy_missing_pcrs work on the comma lists of PCRs
 # shellcheck disable=SC2034  # read by the sourced library
 t_pcr_lists()
@@ -3025,7 +3096,9 @@ done <<-'EOF'
 	t_uki_status                uki_mode_text and uki_missing_kernels report the UKI mode and the kernels without a UKI
 	t_uki_keys                  uki_keys makes the keys of UKI=local, stored only encrypted
 	t_mok                       mok_enroll imports the UKI certificate once, and again after a failed boot
-	t_addon                     build_addon makes a signed addon with the exact command line
+	t_addon                     build_addon makes a signed addon with the exact command line, and the initrd when given
+	t_dracut_crypttab           the lines of /etc/crypttab that dracut puts in a host-only initrd
+	t_crypttab_cpio             the same crypttab gives the same cpio archive
 	t_uki                       build_uki makes a signed UKI whose PCR 11 signature matches its sections
 	t_rootflags_addon_name      the name of the rootflags addon changes with the snapshot and with the key
 	t_install_local_uki_kept    the entry of a local UKI is kept only while it is in the ESP and current
