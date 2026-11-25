@@ -7050,7 +7050,7 @@ crypttab_names()
 # Until then a rollback needs the unbound slots
 entries_bind_pcr15()
 {
-	local anchor="${1:?}" initrd dir name _ opts expected names
+	local anchor="${1:?}" initrd dir name _ opts expected names measuring
 
 	read_initrd_crypttab
 	expected="$(crypttab_names <<<"$initrd_crypttab_cache")"
@@ -7072,10 +7072,14 @@ entries_bind_pcr15()
 		names=""
 		[ ! -e "$dir/etc/crypttab" ] || names="$(crypttab_names < "$dir/etc/crypttab")"
 		[ "$names" = "$expected" ] || return 1
-		[ ! -e "$dir/etc/crypttab" ] || while read -r name _ _ opts; do
+		# Only the anchor measures
+		[ -e "$dir/etc/crypttab" ] || continue
+		measuring=""
+		while read -r name _ _ opts; do
 			[[ "$name" != \#* ]] || continue
-			[[ "$opts" != *"tpm2-measure-pcr=yes"* ]] || [ "$name" = "$anchor" ] || return 1
+			[[ "$opts" != *"tpm2-measure-pcr=yes"* ]] || measuring+="$name "
 		done < "$dir/etc/crypttab"
+		[ "$measuring" = "$anchor " ] || return 1
 	done < <(jq -r '.[] | select(.type == "type1") | .initrd[0] // .uki // empty' < "$entryfile" | sort -u)
 }
 
