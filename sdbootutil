@@ -702,7 +702,7 @@ uki_config=
 settle_uki_mode()
 {
 	uki_config="${UKI:-}"
-	grep -qs "tpm2-device" /etc/crypttab || return 0
+	grep -qs "^[^#]*tpm2-device" /etc/crypttab || return 0
 	detect_tracked_devices || return 0
 
 	local dev kind="" slot
@@ -832,7 +832,7 @@ uki_keys()
 
 	# The UKIs of the distribution are signed by the distribution
 	[ "$UKI" = "local" ] || return 0
-	grep -qs "tpm2-device" /etc/crypttab || return 0
+	grep -qs "^[^#]*tpm2-device" /etc/crypttab || return 0
 	if [ ! -e "$credstore/tpm2-pcr-initrd-private-key.pem" ] || [ ! -e "$pcr_public_key" ]; then
 		info "Making the key that signs the PCR 11 policy"
 		local bits=2048
@@ -6741,7 +6741,7 @@ warn_tpm2_slot_without_option()
 generate_tpm2_predictions()
 {
 	[ -e /etc/crypttab ] || return 0
-	grep -q "tpm2-device" /etc/crypttab || { warn_tpm2_slot_without_option; return 0; }
+	grep -q "^[^#]*tpm2-device" /etc/crypttab || { warn_tpm2_slot_without_option; return 0; }
 	! in_lockout || err "The TPM2 is in lockout. Use 'tpm2_dictionarylockout -c [ -p passwd ]' to clear the DA lockout and re-try the sdbootutil command"
 
 	info "Updating predictions"
@@ -8559,7 +8559,7 @@ status_pcr15()
 {
 	echo "PCR 15"
 
-	if ! grep -q "tpm2-measure-pcr=yes" /etc/crypttab 2> /dev/null; then
+	if ! grep -q "^[^#]*tpm2-measure-pcr=yes" /etc/crypttab 2> /dev/null; then
 		status_row "Enabled" "no"
 		return 0
 	fi
@@ -8786,7 +8786,7 @@ status_boot()
 	# With UKI="yes" the local key signs the addon of the snapshot
 	if uki_selected; then
 		status_row "UKI key" "$([ -e "$credstore/secureboot-private-key.pem" ] && echo "$secureboot_certificate" || echo "not made yet")"
-		[ "$UKI" != "local" ] || ! grep -qs "tpm2-device" /etc/crypttab || \
+		[ "$UKI" != "local" ] || ! grep -qs "^[^#]*tpm2-device" /etc/crypttab || \
 			status_row "PCR 11 key" "$([ -e "$credstore/tpm2-pcr-initrd-private-key.pem" ] && echo "$pcr_public_key" || echo "not made yet")"
 		if is_secure_boot && is_shim_installed && [ -e "$secureboot_certificate" ]; then
 			case "$(mok_state)" in
