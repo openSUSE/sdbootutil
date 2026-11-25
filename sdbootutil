@@ -2176,12 +2176,17 @@ pending_kernel_size()
 	echo $(($(stat -c %s "$1") / 1024 + 1))
 }
 
+# The size of the initrds staged in DIR, without the ones that are in
+# the directory ESP_DIR of the ESP already: their name is the checksum
+# of the content
 pending_initrds_size()
 {
 	local size=0
-	local i=0
+	local i=0 chksum
 	while [ -e "$1/initrd-$i" ]; do
-		size=$((size + $(stat -L -c %s "$1/initrd-$i")))
+		calc_chksum "$1/initrd-$i"
+		[ -n "${2:-}" ] && [ -e "${boot_root}$2/initrd-$chksum" ] || \
+			size=$((size + $(stat -L -c %s "$1/initrd-$i")))
 		((++i))
 	done
 	echo $((size / 1024 + 1))
@@ -2414,11 +2419,12 @@ make_free_space_for_kernel()
 	local kernel="$2"
 	local initrds="$3"
 	local devicetree="${4:-}"
+	local initrds_dst="${5:-}"
 
 	# Calculate the free space and the required size.  All sizes
 	# are in Kb to avoid big numbers
 	local free_space total_size
-	total_size=$(($(pending_kernel_size "$kernel") + $(pending_initrds_size "$initrds") + $(pending_devicetree_size "$devicetree")))
+	total_size=$(($(pending_kernel_size "$kernel") + $(pending_initrds_size "$initrds" "$initrds_dst") + $(pending_devicetree_size "$devicetree")))
 
 	make_free_space "$snapshot" "$total_size"
 }
@@ -3086,7 +3092,7 @@ install_kernel()
 	local kernel_size_src="$src" devicetree_size_src="$devicetree_src"
 	[ ! -e "${boot_root}$dst" ] || kernel_size_src=
 	[ -z "$devicetree_dst" ] || [ ! -e "${boot_root}$devicetree_dst" ] || devicetree_size_src=
-	make_free_space_for_kernel "$snapshot" "$kernel_size_src" "$tmpdir" "$devicetree_size_src" || err "No free space in ${boot_root} for new kernel"
+	make_free_space_for_kernel "$snapshot" "$kernel_size_src" "$tmpdir" "$devicetree_size_src" "${dst%/*}" || err "No free space in ${boot_root} for new kernel"
 
 	local boot_options
 	[ -z "$in_buildroot" ] || subvol="${subvol_prefix}/.snapshots/${snapshot}/snapshot"

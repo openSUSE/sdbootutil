@@ -2845,6 +2845,14 @@ t_pending_initrds_size()
 	head -c 204800 /dev/zero > "$workdir/big-initrd"
 	ln -sf "$workdir/big-initrd" "$workdir/pend/initrd-0"
 	is "size in KB" 201 "$(pending_initrds_size "$workdir/pend")"
+
+	# One with the same content in the ESP needs no space
+	local boot_root="$workdir/esp" sum
+	read -r sum _ < <(sha1sum "$workdir/big-initrd")
+	mkdir -p "$boot_root/t/7.3.5"
+	touch "$boot_root/t/7.3.5/initrd-$sum"
+	is "in the ESP" 1 "$(pending_initrds_size "$workdir/pend" /t/7.3.5)"
+	is "another directory" 201 "$(pending_initrds_size "$workdir/pend" /t/7.3.4)"
 	return 0
 }
 
@@ -3039,7 +3047,7 @@ done <<-'EOF'
 	t_gdp_tried_once            get_device_password tries each different candidate once
 	t_reuse_initrd_token        reuse_initrd leaves the entry token of the snapshot, and needs every initrd
 	t_stage_initrd_twice        stage_initrd stages the initrd of the package for every kernel
-	t_pending_initrds_size      pending_initrds_size counts the initrd behind a link
+	t_pending_initrds_size      pending_initrds_size counts the initrd behind a link, not one in the ESP
 	t_pcrlock_unlockable        pcrlock_unlockable names every category that systemd-pcrlock removes via varlink
 EOF
 
