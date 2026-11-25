@@ -2184,7 +2184,39 @@ t_show_entry_uki()
 	is "all keys" "$(printf 'title\tT\nuki\t/t/a.efi\nextra\t/t/rootflags-1.addon.efi')" "$(show_entry_fields 5 6.2.0-1-default)"
 	arg_entry_keys=(uki)
 	is "uki" "$(printf 'uki\t/t/a.efi')" "$(show_entry_fields 5 6.2.0-1-default)"
+	arg_entry_keys=(xuki)
+	is "only the exact key" "" "$(show_entry_fields 5 6.2.0-1-default)"
 	(show_entry_fields 6 6.2.0-1-default > /dev/null 2>&1) && fail "an entry for snapshot 6"
+	return 0
+}
+
+# A cached variation is written also when the directory of its
+# component is gone (unenroll keeps the cache)
+# shellcheck disable=SC2034,SC2329  # read and called by the sourced library
+t_pcrlock_file_cache()
+{
+	load
+	local pcrlock_cache="$workdir/cache" out="$workdir/c.pcrlock.d/linux-1.pcrlock"
+	echo kernel > "$workdir/cached-kernel"
+	mkdir -p "${out%/*}"
+	pcrlock() { local a; for a; do [[ "$a" != --pcrlock=* ]] || echo '{"records": []}' > "${a#--pcrlock=}"; done; }
+	pcrlock_file lock-pe "$out" "$workdir/cached-kernel" || fail "the first lock failed"
+	rm -r "${out%/*}"
+	pcrlock() { fail "not read from the cache"; }
+	pcrlock_file lock-pe "$out" "$workdir/cached-kernel" 2> /dev/null || fail "the cached lock failed"
+	[ -s "$out" ] || fail "no variation"
+	return 0
+}
+
+# list-devices on a system without encrypted devices lists nothing
+# shellcheck disable=SC2034,SC2329  # read and called by the sourced library
+t_list_devices_none()
+{
+	load
+	local strict_vars="verbose" out
+	detect_tracked_devices() { return 1; }
+	out="$(strict list_devices 2> /dev/null)" || fail "it fails"
+	is "nothing" "" "$out"
 	return 0
 }
 
@@ -2204,6 +2236,8 @@ t_pcr_lists()
 	echo '{"pcrValues": [{"pcr": 4}, {"pcr": 7}]}' > /var/lib/systemd/pcrlock.json
 	is "missing" "9" "$(policy_missing_pcrs 4,7,9)"
 	is "none missing" "" "$(policy_missing_pcrs 4,7)"
+	is "extra" "7" "$(policy_extra_pcrs 4)"
+	is "none extra" "" "$(policy_extra_pcrs 4,7,9)"
 	return 0
 }
 
@@ -2241,6 +2275,11 @@ t_get_final_pcrs()
 	says "policyor" "$(cat "$workdir/err")" "PCRs 7 dropped from the policy (PolicyOR)"
 	predict_pcrs() { echo '{}'; }
 	get_final_pcrs 4,7 > /dev/null 2>&1 && fail "an empty prediction is accepted"
+	# "--pcr=" is the default list of systemd-pcrlock
+	predict_pcrs() { echo '{"sha256": [{"pcr": 4, "values": ["a"]}]}'; }
+	get_final_pcrs "" > /dev/null 2>&1 && fail "an empty list is accepted"
+	predict_pcrs() { echo '{"sha256": [{"pcr": 7, "values": ["1","2","3","4","5","6","7","8","9"]}]}'; }
+	get_final_pcrs 7 > /dev/null 2>&1 && fail "a policy without PCRs is accepted"
 	return 0
 }
 
@@ -2569,7 +2608,9 @@ done <<-'EOF'
 	t_find_conf_file            find_conf_file finds an entry by its name, with a boot counter too
 	t_update_entries_for_snapshot the entries of a snapshot, or of this system without one
 	t_set_default_unknown       set_default_entry refuses an entry that is not there
-	t_pcr_lists                 remove_pcr and policy_missing_pcrs on comma lists of PCRs
+	t_pcr_lists                 remove_pcr and policy_missing_pcrs, policy_extra_pcrs on comma lists of PCRs
+	t_pcrlock_file_cache        a cached variation is written also when its directory is gone
+	t_list_devices_none         list-devices without encrypted devices lists nothing and succeeds
 	t_snapshot_ids_for_prediction the snapshots of the prediction, in order and without repeats
 	t_get_final_pcrs            get_final_pcrs reports the PCRs that cannot be predicted
 	t_pcrlock_cmdline_initrd    the command line is measured once, for PCR 9 and PCR 12
