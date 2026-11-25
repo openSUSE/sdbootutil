@@ -2091,14 +2091,15 @@ t_prediction_entries_linked()
 	}
 	select_entries_for_prediction > /dev/null
 	is "entries" 3 "$(jq length "$entryfile")"
-	is "priorities" "0 1 0" "$(jq -r '[.[].priority] | join(" ")' "$entryfile")"
-	is "kernels" "6.2.1.1 7.3.5.1 6.12.10.1" "$(jq -r '[.[].kernel | join(".")] | join(" ")' "$entryfile")"
+	# Sorted by priority, then the newest kernel first
+	is "priorities" "0 0 1" "$(jq -r '[.[].priority] | join(" ")' "$entryfile")"
+	is "kernels" "6.12.10.1 6.2.1.1 7.3.5.1" "$(jq -r '[.[].kernel | join(".")] | join(" ")' "$entryfile")"
 
 	# With the UKIs selected only their entries are predicted, and
 	# the others stay while there is none
 	local UKI=local
 	select_entries_for_prediction > /dev/null
-	is "only UKIs" "t-commit_1.1.7.3.5-1-default.conf t-commit_5.5.6.12.10-1-default+3.conf" \
+	is "only UKIs" "t-commit_5.5.6.12.10-1-default+3.conf t-commit_1.1.7.3.5-1-default.conf" \
 		"$(jq -r '[.[].id] | join(" ")' "$entryfile")"
 	update_entries_for_snapshot()
 	{
@@ -2184,6 +2185,82 @@ t_show_entry_uki()
 	arg_entry_keys=(uki)
 	is "uki" "$(printf 'uki\t/t/a.efi')" "$(show_entry_fields 5 6.2.0-1-default)"
 	(show_entry_fields 6 6.2.0-1-default > /dev/null 2>&1) && fail "an entry for snapshot 6"
+	return 0
+}
+
+# remove_pcr and policy_missing_pcrs work on the comma lists of PCRs
+# shellcheck disable=SC2034  # read by the sourced library
+t_pcr_lists()
+{
+	load
+	is "middle" "4,9" "$(remove_pcr 4,7,9 7)"
+	is "first" "7,9" "$(remove_pcr 4,7,9 4)"
+	is "last" "4,7" "$(remove_pcr 4,7,9 9)"
+	is "absent" "4,7,9" "$(remove_pcr 4,7,9 1)"
+	is "similar" "11,4" "$(remove_pcr 11,1,4 1)"
+	is "alone" "" "$(remove_pcr 9 9)"
+	scratch_dir /var/lib/systemd
+	is "no policy" "" "$(policy_missing_pcrs 4,7,9)"
+	echo '{"pcrValues": [{"pcr": 4}, {"pcr": 7}]}' > /var/lib/systemd/pcrlock.json
+	is "missing" "9" "$(policy_missing_pcrs 4,7,9)"
+	is "none missing" "" "$(policy_missing_pcrs 4,7)"
+	return 0
+}
+
+# snapshot_ids_for_prediction: the running snapshot, the default entry,
+# the default and active snapshots of snapper, without repeats, and the
+# newest ones up to three
+# shellcheck disable=SC2034,SC2329  # read and called by the sourced library
+t_snapshot_ids_for_prediction()
+{
+	load
+	local snapperfile="$workdir/snapper.json" have_snapshots=1 root_snapshot=5
+	is_transactional() { false; }
+	default_entry_snapshot() { echo 7; }
+	jq -n '{root: [{number: 5, active: true, date: "2026-01-01"}, {number: 7, default: true, date: "2026-01-03"},
+		       {number: 9, date: "2026-01-05"}, {number: 8, date: "2026-01-04"}]}' > "$snapperfile"
+	is "order" "5 7 9" "$(snapshot_ids_for_prediction)"
+	default_entry_snapshot() { echo 5; }
+	is "the default entry is the running one" "5 7 9" "$(snapshot_ids_for_prediction)"
+	return 0
+}
+
+# get_final_pcrs reports the PCRs that cannot be predicted, and the
+# reason, and prints the ones of the policy
+# shellcheck disable=SC2034,SC2329  # read and called by the sourced library
+t_get_final_pcrs()
+{
+	load
+	local tmpfile="$workdir/tmpfile" out
+	: > "$tmpfile"
+	mask_unmatched_components() { false; }
+	predict_pcrs() { echo '{"sha256": [{"pcr": 4, "values": ["a", "b"]}, {"pcr": 7, "values": ["1","2","3","4","5","6","7","8","9"]}]}'; }
+	out="$(get_final_pcrs 4,7,9 2> "$workdir/err")"
+	is "policy" "4" "$out"
+	says "missing" "$(cat "$workdir/err")" "PCRs 9 dropped from the policy (component mapping)"
+	says "policyor" "$(cat "$workdir/err")" "PCRs 7 dropped from the policy (PolicyOR)"
+	predict_pcrs() { echo '{}'; }
+	get_final_pcrs 4,7 > /dev/null 2>&1 && fail "an empty prediction is accepted"
+	return 0
+}
+
+# pcrlock_cmdline_initrd measures the command line once, for PCR 9 with
+# the initrd, and for the boot loader in PCR 12, as UTF-16 with a NUL
+# shellcheck disable=SC2034  # read by the sourced library
+t_pcrlock_cmdline_initrd()
+{
+	command -v systemd-pcrlock > /dev/null || [ -x /usr/lib/systemd/systemd-pcrlock ] || skip "systemd-pcrlock is not installed"
+	load
+	local tmpdir="$workdir/tmp" pcrlock_cache="$workdir/cache" cmdline='initrd=\cfe\initrd-1 root=UUID=1 quiet' sum
+	mkdir -p "$tmpdir"
+	scratch_dir /var/lib/pcrlock.d
+	head -c 4096 /dev/urandom > "$workdir/initrd"
+	pcrlock_cmdline_initrd "$cmdline" "$workdir/initrd" 1
+	read -r sum _ < <(echo -ne "${cmdline//\\/\\\\}\x00" | iconv -t UTF-16LE | sha256sum)
+	is "PCR 12" "12 $sum" "$(jq -r '.records[] | "\(.pcr) \(.digests[] | select(.hashAlg == "sha256") | .digest)"' \
+		/var/lib/pcrlock.d/710-kernel-cmdline-boot-loader.pcrlock.d/cmdline-1.pcrlock)"
+	is "PCR 9" "9 $sum|9" "$(jq -r '[.records[] | "\(.pcr) \(.digests[] | select(.hashAlg == "sha256") | .digest)"] | .[0] + "|" + (.[1] | split(" ")[0])' \
+		/var/lib/pcrlock.d/710-kernel-cmdline-initrd-entry.pcrlock.d/cmdline-initrd-1.pcrlock)"
 	return 0
 }
 
@@ -2397,6 +2474,10 @@ done <<-'EOF'
 	t_find_conf_file            find_conf_file finds an entry by its name, with a boot counter too
 	t_update_entries_for_snapshot the entries of a snapshot, or of this system without one
 	t_set_default_unknown       set_default_entry refuses an entry that is not there
+	t_pcr_lists                 remove_pcr and policy_missing_pcrs on comma lists of PCRs
+	t_snapshot_ids_for_prediction the snapshots of the prediction, in order and without repeats
+	t_get_final_pcrs            get_final_pcrs reports the PCRs that cannot be predicted
+	t_pcrlock_cmdline_initrd    the command line is measured once, for PCR 9 and PCR 12
 	t_entry_version             the snapshot and the kernel of every kind of entry
 	t_dangling_uki              a UKI entry without its UKI or an addon does not boot
 	t_show_entry_uki            show-entry shows the entry of the UKI of a kernel
