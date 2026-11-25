@@ -695,11 +695,10 @@ uki_selected()
 dps_root_problem()
 {
 	local dev fstype
-	read -r dev fstype < <(findmnt -n -o SOURCE,FSTYPE /)
-	dev="${dev%%\[*}"
+	read -r dev fstype < <(findmnt -n -v -o SOURCE,FSTYPE /)
 	if [ "$fstype" = "btrfs" ] && [ "$(btrfs filesystem show --raw / 2> /dev/null | grep -c devid)" -gt 1 ]; then
 		echo "the root file system is on more than one device"
-	elif [ "$(readlink -f /dev/disk/by-designator/root)" != "$(readlink -f "$dev")" ]; then
+	elif ! is_same_device /dev/disk/by-designator/root "$dev"; then
 		if [ -e /dev/disk/by-designator/root-luks ]; then
 			echo "the encrypted root is not opened as \"root\""
 		else
@@ -730,14 +729,6 @@ uki_missing_kernels()
 		[ -e "$image" ] || continue
 		dir="${image%/vmlinuz}"
 		compgen -G "$dir/vmlinuz-*.efi" > /dev/null || echo "${dir##*/}"
-	done
-}
-
-warn_missing_uki_packages()
-{
-	local version
-	for version in $(uki_missing_kernels); do
-		warn "Kernel $version has no UKI.  Install a kernel-${version##*-}-uki-<variant> package"
 	done
 }
 
@@ -1541,6 +1532,24 @@ entry_missing_files()
 	done < <(entry_files "$conf")
 }
 
+# jq: the snapshot and the kernel version of an entry, as
+# {snapshot, kernel}.  The entries of sdbootutil say "N_<kernel>" (or
+# "N@" before), the ones of "bootctl link" have the snapshot in the id
+# ("-commit_N.") and the version "<commit>.<snapshot>.<kernel>", or
+# "<commit>.<kernel>" without snapshots, maybe with ".<variant>".  jq
+# gets --arg snapshots "$have_snapshots"
+# shellcheck disable=SC2016  # jq variables
+jq_entry_version='def entry_version:
+	if (.id // "" | test("-commit_[0-9]+[.@+]")) then
+		(.id | capture("-commit_(?<n>[0-9]+)[.@+]") | .n) as $n
+		| {snapshot: (if $snapshots != "" then $n else null end),
+		   kernel: ((.version // "") | sub("^[0-9]+\\."; "")
+			    | if $snapshots != "" then sub("^[0-9]+\\."; "") else . end
+			    | sub("\\.[^.-]+$"; ""))}
+	else
+		(.version // "") | capture("((?<snapshot>[0-9]*)[@_])?(?<kernel>.*)")
+	end;'
+
 # Reads a `bootctl list --json` array and prints one line per entry that
 # does not boot, as "id|path|snapshot|version|missing".
 #
@@ -1553,24 +1562,6 @@ entry_missing_files()
 # other snapshot is in the same menu and boots with the same key press,
 # and nothing else in this script ever looks at one: "add-all-kernels"
 # and "install_kernel" are given a single snapshot and repair only that
-# jq: the snapshot and the kernel version of an entry, as
-# {snapshot, kernel}.  The entries of sdbootutil say "N_<kernel>" (or
-# "N@" before), the ones of "bootctl link" have the snapshot in the id
-# ("-commit_N.") and the version "<commit>.<snapshot>.<kernel>", or
-# "<commit>.<kernel>" without snapshots, maybe with ".<variant>".  The
-# argument is true when the system has snapshots
-# shellcheck disable=SC2016  # jq variables
-jq_entry_version='def entry_version($snapshots):
-	if (.id // "" | test("-commit_[0-9]+[.@+]")) then
-		(.id | capture("-commit_(?<n>[0-9]+)[.@+]") | .n) as $n
-		| {snapshot: (if $snapshots then $n else null end),
-		   kernel: ((.version // "") | sub("^[0-9]+\\."; "")
-			    | if $snapshots then sub("^[0-9]+\\."; "") else . end
-			    | sub("\\.[^.-]+$"; ""))}
-	else
-		(.version // "") | capture("((?<snapshot>[0-9]*)[@_])?(?<kernel>.*)")
-	end;'
-
 dangling_entries()
 {
 	local id path snapshot kernel_version missing
@@ -1584,10 +1575,10 @@ dangling_entries()
 		[ -n "$missing" ] || continue
 		printf '%s|%s|%s|%s|%s\n' \
 		       "$id" "$path" "$snapshot" "$kernel_version" "${missing% }"
-	done < <(jq -r --argjson snapshots "$([ -n "$have_snapshots" ] && echo true || echo false)" "$jq_entry_version"'.[]
+	done < <(jq -r --arg snapshots "$have_snapshots" "$jq_entry_version"'.[]
 		       | select(.type? == "type1")
 		       | select(.path != null)
-		       | .id, .path, (entry_version($snapshots) | .snapshot, .kernel)')
+		       | .id, .path, (entry_version | .snapshot, .kernel)')
 }
 
 # The entry that is on disk, set by "cleanup --repair" to the one it is
@@ -2227,7 +2218,7 @@ removable_entries()
 	# The columns are never empty, as `read` and `sort` would
 	# collapse consecutive tabs and shift the fields
 	jq -r --arg in_use "${in_use[*]}" --arg last "$root_snapshot" --arg keep "${reused_entry:-}" \
-	   --argjson snapshots "$([ -n "$have_snapshots" ] && echo true || echo false)" "$jq_entry_version"'
+	   --arg snapshots "$have_snapshots" "$jq_entry_version"'
 		def snapshot_of:
 			((.options // "") | capture("rootflags=subvol=[^ ]*/\\.snapshots/(?<n>[0-9]+)/snapshot") | .n)
 			// ((.id // "") | capture("-commit_(?<n>[0-9]+)[.@+]") | .n)
@@ -2237,7 +2228,7 @@ removable_entries()
 		def kernel_of:
 			((.linux // "") | capture("^/[^/]+/(?<k>[^/]+)/[^/]+$") | .k)
 			// ((.version // "") | capture("^[0-9]+[@_](?<k>.+)$") | .k)
-			// (select(.id // "" | test("-commit_[0-9]+[.@+]")) | entry_version($snapshots) | .kernel)
+			// (select(.id // "" | test("-commit_[0-9]+[.@+]")) | entry_version | .kernel)
 			// "";
 
 		($in_use | split(" ") | map(select(. != ""))) as $in_use
@@ -2608,8 +2599,7 @@ linked_entry_ids()
 	for f in "${boot_root}/loader/entries/$base.conf" "${boot_root}/loader/entries/$base"[.@+]*.conf; do
 		[ -e "$f" ] || continue
 		id="${f##*/}"
-		id="${id%.conf}"
-		echo "${id%%+*}.conf"
+		echo "$(entry_key "$id").conf"
 	done | sort -u
 }
 
@@ -2659,7 +2649,7 @@ reusable_uki()
 uki_matches()
 {
 	local entry="$1" cmdline="$2" linux="$3" path same=
-	path="$(sed -n 's/^uki *//p' "$entry")"
+	path="$(entry_field "$entry" uki)"
 	[ -n "$path" ] && [ -e "${boot_root}$path" ] || return 1
 	# objcopy writes a new file and renames it over its output, so
 	# never /dev/stdout: it can replace the link with a file
@@ -2695,7 +2685,7 @@ install_local_uki()
 
 	# The UKI of the parent snapshot, or a new one.  Its name has
 	# the hash of its content, so "link" shares it between entries
-	local uki="" sum
+	local uki=""
 	[ -n "$arg_no_reuse_initrd$arg_force" ] || \
 		reused_entry="$(reusable_uki "$subvol" "$kernel_version" "$boot_options" "$src")" || reused_entry=""
 	if [ -n "$reused_entry" ]; then
@@ -2715,23 +2705,22 @@ install_local_uki()
 		fi
 		build_uki "$src" "$initrd" "$boot_options" "${subvol#"${subvol_prefix}"}/usr/lib/os-release" \
 			"$kernel_version" "$tmpdir/uki-signed.efi"
-		read -r sum _ < <(sha256sum "$tmpdir/uki-signed.efi")
-		uki="$tmpdir/$kernel_version-${sum:0:16}.efi"
-		mv "$tmpdir/uki-signed.efi" "$uki"
+		uki="$(stage_hashed "$tmpdir/uki-signed.efi" "$kernel_version" .efi)"
 		rm -f "$tmpdir/uki-initrd" "$tmpdir/initrd-0"
 	fi
 
 	link_uki "$snapshot" "$subvol" "$kernel_version" "$uki" "" ""
 }
 
-# A copy of SRC named NAME-<hash>SUFFIX in $tmpdir, for "bootctl link":
-# it takes the names as they are, and keeps a file whose name is in the
-# ESP already.  The files of the packages repeat names for every kernel
+# SRC as NAME-<hash>SUFFIX in $tmpdir, for "bootctl link": it takes the
+# names as they are, and keeps a file whose name is in the ESP already.
+# The files of the packages repeat names for every kernel.  A link, as
+# "link" reads the file it points to
 stage_hashed()
 {
 	local src="$1" name="$2" suffix="$3" sum
 	read -r sum _ < <(sha256sum "$src")
-	cp -L "$src" "$tmpdir/$name-${sum:0:16}$suffix"
+	ln -sf "$(realpath "$src")" "$tmpdir/$name-${sum:0:16}$suffix"
 	echo "$tmpdir/$name-${sum:0:16}$suffix"
 }
 
@@ -2746,7 +2735,7 @@ install_distro_ukis()
 	local ukis=() problem
 	ukis=("${subvol#"${subvol_prefix}"}/usr/lib/modules/$kernel_version"/vmlinuz-*.efi)
 	[ -e "${ukis[0]}" ] || {
-		info "Kernel $kernel_version has no UKI, using the kernel and the initrd"
+		warn "Kernel $kernel_version has no UKI, using the kernel and the initrd.  Install a kernel-${kernel_version##*-}-uki-<variant> package"
 		return 1
 	}
 	problem="$(dps_root_problem)"
@@ -2840,20 +2829,16 @@ link_uki()
 		fi
 	fi
 
-	# Only the files that are not in the ESP need space
-	for f in "$uki" "$@"; do
-		[ -e "${boot_root}/$entry_token/${f##*/}" ] || size=$((size + $(stat -c %s "$f")))
-	done
-	for f in "$@"; do
-		extra+=(--extra="$f")
-	done
-	make_free_space "$snapshot" $((size / 1024 + 1)) || err "No free space in ${boot_root} for the UKI"
-
-	# Recorded after "link" copies them, see below
+	# Only the files that are not in the ESP need space, and are
+	# recorded after "link" copies them
 	local added=()
 	for f in "$uki" "$@"; do
-		[ -e "${boot_root}/$entry_token/${f##*/}" ] || added+=("${boot_root}/$entry_token/${f##*/}")
+		[ ! -e "${boot_root}/$entry_token/${f##*/}" ] || continue
+		size=$((size + $(stat -L -c %s "$f")))
+		added+=("${boot_root}/$entry_token/${f##*/}")
 	done
+	extra=("${@/#/--extra=}")
+	make_free_space "$snapshot" $((size / 1024 + 1)) || err "No free space in ${boot_root} for the UKI"
 
 	local tries=""
 	[ ! -f /etc/kernel/tries ] || read -r tries < /etc/kernel/tries
@@ -3222,8 +3207,8 @@ cleanup_entries()
 			info "Cleaning boot entry $id"
 			rm "$path"
 		}
-	done < <(jq -r --argjson snapshots "$([ -n "$have_snapshots" ] && echo true || echo false)" \
-		    "$jq_entry_version"'.[] | .id, .path, (entry_version($snapshots) | .snapshot, .kernel)' "$entryfile")
+	done < <(jq -r --arg snapshots "$have_snapshots" \
+		    "$jq_entry_version"'.[] | .id, .path, (entry_version | .snapshot, .kernel)' "$entryfile")
 
 	# The loop above drops the entry whose kernel is gone.  The
 	# opposite case -- the kernel is still there and what went missing
@@ -6373,23 +6358,24 @@ generate_tpm2_predictions_pcrlock()
 
 	info "Generating TPM2 predictions"
 
+	# Select the affected entries
+	select_entries_for_prediction
+
 	# The kernel measures in PCR 9 the initrd that systemd-stub hands
 	# over: the .initrd of the UKI and the cpio archives that the stub
 	# makes, one of them with the "boot secret".  The secret is unknown
 	# before the first boot of a UKI, and the archives follow internal
 	# formats of the stub, so PCR 9 is not predicted for a UKI.  The
 	# signed PCR 11 policy covers the initrd and the command line of
-	# the UKI instead.  When the UKIs are no longer selected, PCR 9 is
-	# back in the policy
-	if [[ ",$pcrs," == *",9,"* ]] && uki_selected; then
+	# the UKI instead.  As in `select_entries_for_prediction`: while
+	# the UKIs are selected and there are UKI entries to predict.  When
+	# the UKIs are no longer selected, PCR 9 is back in the policy
+	if [[ ",$pcrs," == *",9,"* ]] && uki_selected && jq -e 'any(.[]; .uki)' "$entryfile" > /dev/null; then
 		info "The UKIs are selected, PCR 9 is left out of the policy"
 		pcrs="$(remove_pcr "$pcrs" 9)"
 		[ -z "$arg_strict" ] || \
 			err "PCR 9 cannot be predicted for the UKIs, so it cannot be part of the policy. No policy is applied, run without --strict to accept the subset"
 	fi
-
-	# Select the affected entries
-	select_entries_for_prediction
 
 	clean_pcrlock_d
 	rm -f "$tmpdir/esp-files"
@@ -9430,15 +9416,12 @@ case "$1" in
 		bootloader_name "${2:-$root_snapshot}" ;;
 	add-kernel)
 		assert_snapshot "$3"
-		warn_missing_uki_packages
 		install_kernel "${3:-$root_snapshot}" "$2" ;;
 	add-all-kernels)
 		assert_snapshot "$2"
-		warn_missing_uki_packages
 		install_all_kernels "${2:-$root_snapshot}" ;;
 	mkinitrd)
 		assert_snapshot "$2"
-		warn_missing_uki_packages
 		arg_no_reuse_initrd=1
 		install_all_kernels "${2:-$root_snapshot}" ;;
 	remove-kernel)
@@ -9451,7 +9434,6 @@ case "$1" in
 		cleanup_entries "${2:-}" ;;
 	set-default-snapshot)
 		assert_snapshot "$2"
-		warn_missing_uki_packages
 		set_default_snapshot "${2:-$root_snapshot}" ;;
 	is-installed)
 		if is_installed; then
