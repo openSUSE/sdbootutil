@@ -5459,6 +5459,15 @@ pcrlock_grub2_bls_entry_files()
 	}
 }
 
+# jq: the addons of an entry in the order that systemd-stub loads them,
+# the order of their measurements: the global ones first, then the ones
+# of the entry, each group sorted by the file name
+# shellcheck disable=SC2016  # jq
+jq_addons_in_order='def addons_in_order:
+	def name(f): f | split("/") | last;
+	([.addons[]? | select(.globalAddon)] | sort_by(name(.globalAddon)))
+	+ ([.addons[]? | select(.localAddon)] | sort_by(name(.localAddon)));'
+
 pcrlock_sdboot()
 {
 	info "Generating TPM2 predictions with systemd-pcrlock (systemd-boot)"
@@ -5526,7 +5535,7 @@ pcrlock_sdboot()
 		jq --slurp '{"records": [.[].records[]]}' "${locks[@]}" \
 		   > "/var/lib/pcrlock.d/650-kernel-efi-application.pcrlock.d/uki-$n.pcrlock"
 		rm "${locks[@]}"
-	done < <(jq --raw-output '.[] | select(.uki or .linux) | if .uki then ["uki", .uki] + [.addons[]? | .globalAddon // .localAddon] else ["linux", .linux] end | join("\t")' "$entryfile")
+	done < <(jq --raw-output "$jq_addons_in_order"'.[] | select(.uki or .linux) | if .uki then ["uki", .uki] + [addons_in_order[] | .globalAddon // .localAddon] else ["linux", .linux] end | join("\t")' "$entryfile")
 
 	# Join the cmdline and the initrd in a single component
 	shift_component 710-kernel-cmdline-initrd-entry
@@ -5587,8 +5596,8 @@ pcrlock_sdboot()
 		}
 		pcrlock_addons_cmdline "$n" "${addons[@]}"
 		pcrlock_addons_initrd "$n" "${files[@]/#/$boot_root}"
-	done < <(jq --raw-output '.[] | select(.uki) | ([.addons[]?.options // empty] | join("\t")),
-						([.addons[]? | .globalAddon // .localAddon] | join("\t"))' "$entryfile")
+	done < <(jq --raw-output "$jq_addons_in_order"'.[] | select(.uki) | ([addons_in_order[] | .options // empty] | join("\t")),
+						([addons_in_order[] | .globalAddon // .localAddon] | join("\t"))' "$entryfile")
 
 	# Generate variation for 710-kernel-cmdline-initrd-entry
 	# component that contains the current cmdline and the current
