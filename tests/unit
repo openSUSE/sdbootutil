@@ -1661,6 +1661,17 @@ kip()
 		 kernel-install "$@"
 }
 
+# The entry token as sdbootutil reads the argument from the plugin
+kip_token()
+{
+	load
+	# shellcheck disable=SC2034  # read by the sourced library
+	arg_entry_token="$(sed -n 's/.*--entry-token=\([^ ]*\).*/\1/p' "$workdir/stub-args")"
+	settle_entry_token ""
+	# shellcheck disable=SC2154  # set by the sourced library
+	echo "$entry_token"
+}
+
 t_kip_layout()
 {
 	kip_setup
@@ -1685,6 +1696,7 @@ t_kip_add()
 	kip add "$version" "/usr/lib/modules/$version/vmlinuz" &> "$workdir/kip.log" || \
 		fail "kernel-install add failed: $(cat "$workdir/kip.log")"
 	says "plugin" "$(cat "$workdir/stub-args")" "add-kernel $version"
+	is "entry token" "unit" "$(kip_token)"
 	[ ! -e "$kip_esp/unit/$version" ] || fail "kernel-install made the kernel directory"
 }
 
@@ -1694,6 +1706,7 @@ t_kip_remove()
 	kip remove "$KIP_VERSION" &> "$workdir/kip.log" || \
 		fail "kernel-install remove failed: $(cat "$workdir/kip.log")"
 	says "plugin" "$(cat "$workdir/stub-args")" "remove-kernel $KIP_VERSION"
+	is "entry token" "unit" "$(kip_token)"
 	[ -e "$kip_esp/unit/$KIP_VERSION/linux-1" ] || \
 		fail "kernel-install removed the kernel directory of the snapshots"
 }
@@ -1825,8 +1838,8 @@ done <<-'EOF'
 	t_p15_status                status_pcr15 reports the measurements of this boot
 	t_pcrlock_unlockable        pcrlock_unlockable names every category that systemd-pcrlock removes via varlink
 	t_kip_layout                the kernel-install configuration of the plugin sets its layout and initrd generator
-	t_kip_add                   kernel-install add calls the plugin and makes no kernel directory
-	t_kip_remove                kernel-install remove calls the plugin and keeps the kernel directory
+	t_kip_add                   kernel-install add calls the plugin with the entry token and makes no kernel directory
+	t_kip_remove                kernel-install remove calls the plugin with the entry token and keeps the kernel directory
 	t_kip_bls                   negative control: with the layout bls the plugin does nothing and the directory goes
 EOF
 

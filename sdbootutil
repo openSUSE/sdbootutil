@@ -235,7 +235,8 @@ helpandquit()
 		OPTIONS:
 		  --esp-path		Manually specify path to ESP
 		  --arch		Manually set architecture
-		  --entry-token		Override entry token
+		  --entry-token		"auto", "machine-id", "os-id", "os-image",
+		                        "literal:TOKEN"
 		  --image		Specify Linux kernel file name
 		  --all			List all entries (inc. from other systems)
 		  --entry-keys		Comma separated list of keys

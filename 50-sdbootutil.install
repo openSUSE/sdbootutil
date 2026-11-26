@@ -17,7 +17,7 @@ MACHINE_ID="${KERNEL_INSTALL_MACHINE_ID:?}"
 
 args=()
 [ "$KERNEL_INSTALL_VERBOSE" -lt 1 ] || args+=("-v")
-args+=("--esp-path=$KERNEL_INSTALL_BOOT_ROOT" "--entry-token=$KERNEL_INSTALL_ENTRY_TOKEN")
+args+=("--esp-path=$KERNEL_INSTALL_BOOT_ROOT" "--entry-token=literal:$KERNEL_INSTALL_ENTRY_TOKEN")
 
 case "$COMMAND" in
 	remove)
