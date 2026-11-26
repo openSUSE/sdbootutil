@@ -2845,19 +2845,44 @@ entry_file()
 	return 1
 }
 
-# Remove the entry of the kernel and the initrd of VERSION in SNAPSHOT
-# that the UKI entry NEW replaced, but not the booted one: if the UKI
-# does not boot, it is the way back.  A later run removes it.  If it was
-# the default entry, NEW is the default now
+# Remove the entries of the kernel VERSION in SNAPSHOT that are of
+# another kind than NEW, the entry just written.  The kinds are the
+# entry of the kernel and the initrd, the one of a local UKI, and the
+# ones of the UKIs of the packages (one per variant).  After a change of
+# UKI the others do not boot, as the TPM2 slots are made for the new
+# kind.  But not the booted one: if NEW does not boot, it is the way
+# back, and a later run removes it.  If one was the default entry, NEW
+# is the default now, also when it stays as the booted one
 unlink_replaced_entry()
 {
-	local id default
-	id="$(entry_conf_file "$1" "$2")"
-	entry_file "$id" > /dev/null || return 0
-	[ "$(entry_key "$id")" != "$(entry_key "$(bli_efi_var_get "LoaderEntrySelected" 2> /dev/null)")" ] || return 0
+	local kernel_version="$1" snapshot="$2" new="$3"
+	local type1 local_uki kind id selected default ids=()
+	type1="$(entry_conf_file "$kernel_version" "$snapshot")"
+	local_uki="$(linked_entry_id "$kernel_version" "$snapshot")"
+	if [ "$(entry_key "$new")" = "$(entry_key "$type1")" ]; then
+		kind=type1
+	elif [ "$(entry_key "$new")" = "$(entry_key "$local_uki")" ]; then
+		kind=local
+	else
+		kind=yes
+	fi
+	[ "$kind" = type1 ] || ids+=("$type1")
+	for id in $(linked_entry_ids "$kernel_version" "$snapshot"); do
+		case "$kind" in
+			type1) ids+=("$id") ;;
+			local) [ "$id" = "$local_uki" ] || ids+=("$id") ;;
+			yes) [ "$id" != "$local_uki" ] || ids+=("$id") ;;
+		esac
+	done
+
+	selected="$(entry_key "$(bli_efi_var_get "LoaderEntrySelected" 2> /dev/null)")"
 	default="$(get_default_entry 2> /dev/null)" || default=
-	bootctl_entries unlink "$id"
-	[ "$(entry_key "$id")" != "$(entry_key "$default")" ] || set_default_entry "$3"
+	for id in "${ids[@]}"; do
+		entry_file "$id" > /dev/null || continue
+		[ "$(entry_key "$id")" != "$(entry_key "$default")" ] || set_default_entry "$new"
+		[ "$(entry_key "$id")" != "$selected" ] || continue
+		bootctl_entries unlink "$id"
+	done
 }
 
 # The entry of SNAPSHOT (in SUBVOL), or of its parent, for the kernel
@@ -3208,6 +3233,7 @@ install_kernel()
 		|| [ -n "$arg_force" ] \
 		|| {
 		info "Kernel $kernel_version already in the ESP"
+		unlink_replaced_entry "$kernel_version" "$snapshot" "$(entry_conf_file "$kernel_version" "$snapshot")"
 		return 0
 	}
 
@@ -3328,6 +3354,7 @@ install_kernel()
 	fi
 	[ -z "$failed" ] || err "Failed to install $failed"
 	reset_rollback
+	unlink_replaced_entry "$kernel_version" "$snapshot" "$(entry_conf_file "$kernel_version" "$snapshot")"
 
 	# A replaced initrd is left in the ESP, see `bootctl_cleanup`
 	cleanup_pending=1
