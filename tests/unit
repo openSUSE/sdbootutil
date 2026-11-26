@@ -1611,6 +1611,9 @@ t_enroll_fails_uki()
 	enroll_setup
 	echo "cr_test $dev none x-initrd.attach,tpm2-device=auto" > /etc/crypttab
 	uki_config=local cryptenroll_fails=1
+	# The addon of the root is written once per run: the rollback
+	# must write it again (`dps_addon_done`)
+	install_all_kernels() { echo "install${UKI:+:$UKI}${dps_addon_done:+:addon-done}" >> "$workdir/log"; dps_addon_done=1; }
 	run_enroll && fail "enroll succeeded"
 	is "steps" "install:local initrd predict install" "$(paste -sd ' ' "$workdir/log")"
 }
@@ -2282,30 +2285,103 @@ t_addon_name()
 	return 0
 }
 
-# The command line of the addon of a UKI entry: "root=" only when the
-# root is not found by the discovery, the "rootflags=" of the snapshot,
-# and the options of the system only with UKI_CMDLINE="yes"
+# link_uki links the addon of the snapshot, never one with an initrd:
+# the crypttab is in the addon of the root, that is not linked
+# shellcheck disable=SC2034,SC2329  # read and called by the sourced library
+t_link_uki_addon()
+{
+	load
+	local boot_root="$workdir/esp" entry_token=t tmpdir="$workdir/tmp" secureboot_certificate="$workdir/cert.pem"
+	local UKI=yes arg_force=''
+	mkdir -p "$boot_root/t" "$boot_root/loader/entries" "$tmpdir"
+	echo "key" > "$secureboot_certificate"
+	touch "$workdir/uki.efi"
+	entry_title_and_sort_key() { local -n t_t="$1" t_s="$2"; t_t=T; t_s=s; }
+	uki_addon_cmdline() { echo "rootflags=subvol=@/.snapshots/5/snapshot"; }
+	build_addon() { echo "addon[$1]${3:+ with an initrd}" >> "$workdir/link-addons"; touch "$2"; }
+	make_free_space() { :; }
+	record_esp_file() { :; }
+	unlink_replaced_entry() { :; }
+	bootctl_entries() { :; }
+	bootctl() { echo "$*" > "$workdir/link-args"; echo "sort-key x" > "$boot_root/loader/entries/t-commit_5.5.7.3.5-1-default.conf"; }
+	link_uki 5 @/.snapshots/5/snapshot 7.3.5-1-default "$workdir/uki.efi" "" "" > /dev/null 2>&1
+	is "addon" "addon[rootflags=subvol=@/.snapshots/5/snapshot]" "$(cat "$workdir/link-addons")"
+	says "linked" "$(cat "$workdir/link-args")" "--extra=$tmpdir/cmdline-"
+	return 0
+}
+
+# The addon of the root has "root=" and the crypttab when the discovery
+# does not find the root, is written again only when they change, and
+# goes away with the discovery or without UKIs
+# shellcheck disable=SC2034,SC2329  # read and called by the sourced library
+t_update_dps_addon()
+{
+	load
+	local boot_root="$workdir/esp" entry_token=t tmpdir="$workdir/tmp" UKI=yes t_problem="not DPS" t_ct="cr_root"
+	local out="$workdir/esp/loader/addons/t-dps.addon.efi"
+	mkdir -p "$boot_root" "$tmpdir"
+	uki_keys() { :; }
+	dps_root_problem() { echo "$t_problem"; }
+	get_rootfs() { echo /dev/mapper/cr_root; }
+	crypttab_cpio() { echo "$t_ct" > "$1"; }
+	# The addon is the two sections, one after the other
+	build_addon() { { echo "$1"; cat "$3"; } > "$2"; echo built >> "$workdir/dps-built"; }
+	objcopy() { case "$3" in *.cmdline) head -n 1 "$4" | tr -d '\n' > "$5" ;; *.initrd) tail -n +2 "$4" > "$5" ;; esac; }
+	record_esp_file() { :; }
+
+	dps_addon_done='' update_dps_addon > /dev/null 2>&1
+	is "made" "$(printf 'root=/dev/mapper/cr_root\ncr_root')" "$(cat "$out" 2> /dev/null)"
+	dps_addon_done='' update_dps_addon > /dev/null 2>&1
+	is "not written again" 1 "$(wc -l < "$workdir/dps-built")"
+	t_ct="cr_root cr_new"
+	dps_addon_done='' update_dps_addon > /dev/null 2>&1
+	is "a new disk" "$(printf 'root=/dev/mapper/cr_root\ncr_root cr_new')" "$(cat "$out" 2> /dev/null)"
+	t_problem=""
+	dps_addon_done='' update_dps_addon > /dev/null 2>&1
+	[ -e "$out" ] && fail "the addon stays with DPS"
+	t_problem="not DPS"
+	dps_addon_done='' update_dps_addon > /dev/null 2>&1
+	UKI=""
+	dps_addon_done='' update_dps_addon > /dev/null 2>&1
+	[ -e "$out" ] && fail "the addon stays without UKIs"
+	return 0
+}
+
+# The initrd of a UKI is made new, without the crypttab and the command
+# line of the disks
+# shellcheck disable=SC2034,SC2329  # read and called by the sourced library
+t_stage_initrd_uki()
+{
+	load
+	local tmpdir="$workdir/tmp" have_snapshots='' verbose=''
+	mkdir -p "$tmpdir"
+	reuse_initrd() { echo reused >> "$workdir/stage-log"; return 0; }
+	dracut() { echo "$*" >> "$workdir/stage-log"; }
+	stage_initrd 1 "" 7.3.5-1-default /nonexistent uki
+	says "dracut" "$(cat "$workdir/stage-log")" "--no-hostonly-cmdline --include $tmpdir/uki-etc /etc"
+	says_not "not reused" "$(cat "$workdir/stage-log")" "reused"
+	[ -e "$tmpdir/uki-etc/crypttab" ] && [ ! -s "$tmpdir/uki-etc/crypttab" ] || fail "no empty crypttab"
+	return 0
+}
+
+# The command line of the addon of a UKI entry: the "rootflags=" of the
+# snapshot, and the options of the system only with UKI_CMDLINE="yes".
+# Never "root=", that is in the addon of the root
 # shellcheck disable=SC2034,SC2329  # read and called by the sourced library
 t_uki_addon_cmdline()
 {
 	load
-	local UKI_CMDLINE t_problem
+	local UKI_CMDLINE
 	get_rootfs() { echo /dev/mapper/cr_root; }
 	kernel_cmdline() { echo "quiet resume=/dev/mapper/cr_swap"; }
-	dps_root_problem() { echo "$t_problem"; }
 
-	UKI_CMDLINE=yes t_problem="not DPS"
-	is "options, not DPS" "quiet resume=/dev/mapper/cr_swap root=/dev/mapper/cr_root rootflags=subvol=@/.snapshots/5/snapshot" \
-		"$(uki_addon_cmdline @/.snapshots/5/snapshot)"
-	UKI_CMDLINE=no
-	is "no options, not DPS" "root=/dev/mapper/cr_root rootflags=subvol=@/.snapshots/5/snapshot" \
-		"$(uki_addon_cmdline @/.snapshots/5/snapshot)"
-	t_problem=""
-	is "no options, DPS" "rootflags=subvol=@/.snapshots/5/snapshot" "$(uki_addon_cmdline @/.snapshots/5/snapshot)"
-	is "no options, DPS, no snapshots" "" "$(uki_addon_cmdline "")"
 	UKI_CMDLINE=yes
-	is "options, DPS" "quiet resume=/dev/mapper/cr_swap rootflags=subvol=@/.snapshots/5/snapshot" \
+	is "options" "quiet resume=/dev/mapper/cr_swap rootflags=subvol=@/.snapshots/5/snapshot" \
 		"$(uki_addon_cmdline @/.snapshots/5/snapshot)"
+	is "options, no snapshots" "quiet resume=/dev/mapper/cr_swap" "$(uki_addon_cmdline "")"
+	UKI_CMDLINE=no
+	is "no options" "rootflags=subvol=@/.snapshots/5/snapshot" "$(uki_addon_cmdline @/.snapshots/5/snapshot)"
+	is "no options, no snapshots" "" "$(uki_addon_cmdline "")"
 	return 0
 }
 
@@ -3105,6 +3181,9 @@ done <<-'EOF'
 	t_uki                       build_uki makes a signed UKI whose PCR 11 signature matches its sections
 	t_addon_name                the name of the addon changes with the command line and with the key
 	t_uki_addon_cmdline         the command line of the addon of a UKI entry, with and without DPS
+	t_link_uki_addon            link_uki links the addon of the snapshot, without an initrd
+	t_update_dps_addon          the addon of the root follows the discovery, the crypttab and the UKIs
+	t_stage_initrd_uki          the initrd of a UKI has no crypttab nor command line of the disks
 	t_install_local_uki_kept    the UKI that reusable_uki finds is linked again, as a copy
 	t_entries_linked            the entries of a snapshot include the ones made by bootctl link
 	t_find_conf_file            find_conf_file finds an entry by its name, with a boot counter too

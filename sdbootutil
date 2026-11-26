@@ -221,6 +221,9 @@ cleanup()
 	# trap that would skip the rest of this function without even
 	# removing $tmpdir
 	if [ -n "$rebuild" ]; then
+		# The addon of the root is written once per run, and the
+		# run may have written it for the failed mode
+		dps_addon_done=
 		( install_all_kernels "$root_snapshot" ) || \
 			warn "The boot entries still carry the failed enrollment"
 	fi
@@ -927,8 +930,8 @@ build_addon()
 # The lines of /etc/crypttab that dracut puts in a host-only initrd:
 # the ones with "x-initrd.attach" or "force", and the devices that the
 # system needs (root, resume...), the ones that `dracut --print-cmdline`
-# names in "rd.luks.uuid=".  For an initrd that is not made for this
-# system, as the one of a UKI of the packages
+# names in "rd.luks.uuid=".  For the initrd of a UKI, that knows nothing
+# of the disks (see `update_dps_addon`)
 dracut_crypttab()
 {
 	local param uuids="" line name device _ opts uuid
@@ -958,8 +961,8 @@ dracut_crypttab()
 }
 
 # A cpio archive in OUT with the crypttab of `dracut_crypttab`.  The
-# same lines give the same bytes, as the addon that carries it is named
-# after its content
+# same lines give the same bytes, so the addon that carries it is only
+# written again when they change
 crypttab_cpio()
 {
 	local out="${1:?}" dir="$tmpdir/crypttab-cpio"
@@ -2713,23 +2716,72 @@ create_boot_options()
 }
 
 # The command line of the addon of a UKI entry of SUBVOL, the same for
-# every kind of UKI: "root=" when the UKI cannot find the root itself
-# (see `dps_root_problem`), the "rootflags=" of the snapshot, and the
-# options of the kernel command line of the system with UKI_CMDLINE
+# every kind of UKI: the "rootflags=" of the snapshot, and the options
+# of the kernel command line of the system with UKI_CMDLINE.  "root="
+# is in the addon of the root, when it is needed (see `update_dps_addon`)
 uki_addon_cmdline()
 {
-	local subvol="$1" options param params=() dps=""
+	local subvol="$1" param params=()
 	if [ "$UKI_CMDLINE" = "no" ]; then
-		options="$(echo | sedrootflags "$subvol")"
-	else
-		options="$(create_boot_options "$subvol")"
+		[ -z "$subvol" ] || echo "rootflags=subvol=$subvol"
+		return 0
 	fi
-	[ -n "$(dps_root_problem)" ] || dps=1
 	while read -r param; do
-		[ -z "$dps" ] || [[ "$param" != root=* ]] || continue
+		[[ "$param" != root=* ]] || continue
 		params+=("$param")
-	done < <(cmdline_params "$options")
+	done < <(cmdline_params "$(create_boot_options "$subvol")")
 	echo "${params[*]}"
+}
+
+# The addon of the root for every UKI, in the directory where
+# systemd-stub loads it for any UKI that it starts
+dps_addon_path()
+{
+	echo "${boot_root}/loader/addons/${entry_token}-dps.addon.efi"
+}
+
+# The addon of the root, when the discovery does not find it (see
+# `dps_root_problem`): "root=" and an initrd with the crypttab that
+# dracut would use.  It is the same for every UKI, local or of the
+# packages, and for every snapshot, so there is only one, rewritten when
+# its content changes, as after adding an encrypted device.  It goes
+# away when there are no UKIs, or when the discovery finds the root.
+# Once per run
+dps_addon_done=
+update_dps_addon()
+{
+	[ -z "$dps_addon_done" ] || return 0
+	dps_addon_done=1
+	local out cmdline
+	out="$(dps_addon_path)"
+	if ! uki_selected || [ -z "$(dps_root_problem)" ]; then
+		[ -e "$out" ] || return 0
+		info "Removing $out"
+		rm -f "$out"
+		update_predictions=1
+		return 0
+	fi
+
+	uki_keys
+	cmdline="root=$(get_rootfs)"
+	crypttab_cpio "$tmpdir/dps.cpio"
+	if [ -e "$out" ]; then
+		objcopy -O binary --only-section=.cmdline "$out" "$tmpdir/dps.cmdline" 2> /dev/null || :
+		objcopy -O binary --only-section=.initrd "$out" "$tmpdir/dps.initrd" 2> /dev/null || :
+		if [ "$(cat "$tmpdir/dps.cmdline" 2> /dev/null)" = "$cmdline" ] && cmp -s "$tmpdir/dps.initrd" "$tmpdir/dps.cpio"; then
+			rm -f "$tmpdir"/dps.*
+			return 0
+		fi
+	fi
+	info "Writing $out"
+	build_addon "$cmdline" "$tmpdir/dps.addon.efi" "$tmpdir/dps.cpio"
+	# Not on the list of `install_with_rollback`: that one belongs to
+	# the install of a kernel, and the addon is for every kernel
+	mkdir -p "${out%/*}"
+	install -p -m 0644 -o root -g root "$tmpdir/dps.addon.efi" "$out" || err "Cannot write $out"
+	record_esp_file "$out"
+	rm -f "$tmpdir"/dps.*
+	update_predictions=1
 }
 
 # The name of the entry that "bootctl link" makes for the kernel
@@ -2847,20 +2899,11 @@ install_local_uki()
 		cp "${boot_root}$uki" "$tmpdir/${uki##*/}"
 		uki="$tmpdir/${uki##*/}"
 	else
-		stage_initrd "$snapshot" "$subvol" "$kernel_version" "${src%/*}/initrd"
-		# A reused entry can have more than one initrd: the UKI has
-		# one section, so they go in it one after the other
-		local initrds=("$tmpdir/initrd-0") initrd
-		[ "${#dstinitrd[@]}" -eq 0 ] || initrds=("${dstinitrd[@]/#/$boot_root}")
-		initrd="${initrds[0]}"
-		if [ "${#initrds[@]}" -gt 1 ]; then
-			initrd="$tmpdir/uki-initrd"
-			cat "${initrds[@]}" > "$initrd"
-		fi
-		build_uki "$src" "$initrd" "$boot_options" "${subvol#"${subvol_prefix}"}/usr/lib/os-release" \
+		stage_initrd "$snapshot" "$subvol" "$kernel_version" "${src%/*}/initrd" uki
+		build_uki "$src" "$tmpdir/initrd-0" "$boot_options" "${subvol#"${subvol_prefix}"}/usr/lib/os-release" \
 			"$kernel_version" "$tmpdir/uki-signed.efi"
 		uki="$(stage_hashed "$tmpdir/uki-signed.efi" "$kernel_version" .efi)"
-		rm -f "$tmpdir/uki-initrd" "$tmpdir/initrd-0"
+		rm -f "$tmpdir/initrd-0"
 	fi
 
 	link_uki "$snapshot" "$subvol" "$kernel_version" "$uki" "" ""
@@ -2879,23 +2922,16 @@ stage_hashed()
 }
 
 # The UKIs of the kernel VERSION of SNAPSHOT (in SUBVOL) from the
-# packages, one entry per variant with its addons.  They have no
-# "root=", so they need the discovery of the root (DPS).  Without it, or
-# without a UKI, it fails and the caller makes the entry of the kernel
-# and the initrd.  Nothing is built here, so nothing is rebuilt either
+# packages, one entry per variant with its addons.  Without a UKI it
+# fails, and the caller makes the entry of the kernel and the initrd.
+# Nothing is built here, so nothing is rebuilt either
 install_distro_ukis()
 {
 	local snapshot="$1" subvol="$2" kernel_version="$3"
-	local ukis=() problem
+	local ukis=()
 	ukis=("${subvol#"${subvol_prefix}"}/usr/lib/modules/$kernel_version"/vmlinuz-*.efi)
 	[ -e "${ukis[0]}" ] || {
 		warn "Kernel $kernel_version has no UKI, using the kernel and the initrd.  Install a kernel-${kernel_version##*-}-uki-<variant> package"
-		return 1
-	}
-	problem="$(dps_root_problem)"
-	[ -z "$problem" ] || {
-		warn "The UKI of $kernel_version cannot find the root file system: $problem"
-		warn "Using the kernel and the initrd. UKI=\"local\" works with any root file system"
 		return 1
 	}
 
@@ -2926,7 +2962,8 @@ addon_name()
 
 # The entry of the UKI of the kernel VERSION of SNAPSHOT (in SUBVOL),
 # made with "bootctl link": the UKI, the addons EXTRA..., and the addon
-# of the entry (see `uki_addon_cmdline`).  VARIANT is in the id of the entry,
+# of the snapshot (see `uki_addon_cmdline`).  The addon of the root is
+# not linked (see `update_dps_addon`).  VARIANT is in the id of the entry,
 # and in the title when SEVERAL variants are installed
 link_uki()
 {
@@ -3015,14 +3052,18 @@ link_uki()
 # The initrd of the kernel VERSION of SNAPSHOT (in SUBVOL), staged for a
 # boot entry: the one of the package (INITRD), the one of an entry that
 # can be reused (in "dstinitrd", see `reuse_initrd`), or a new one made
-# by dracut.  The first and the last end in "$tmpdir/initrd-0"
+# by dracut.  The first and the last end in "$tmpdir/initrd-0".  For a
+# UKI (UKI not empty) it is a new one that knows nothing of the disks,
+# as the one of a UKI of the packages: no crypttab and no command line.
+# The addon of the root has them, when they are needed (see
+# `update_dps_addon`)
 stage_initrd()
 {
-	local snapshot="$1" subvol="$2" kernel_version="$3" initrd="$4"
+	local snapshot="$1" subvol="$2" kernel_version="$3" initrd="$4" uki="${5:-}"
 
 	if [ -e "$initrd" ]; then
 		ln -sf "$initrd" "$tmpdir/initrd-0"
-	elif ! reuse_initrd "$snapshot" "$subvol" "$kernel_version"; then
+	elif [ -n "$uki" ] || ! reuse_initrd "$snapshot" "$subvol" "$kernel_version"; then
 		local dracut_args=(
 			'--reproducible'
 			'--force'
@@ -3030,6 +3071,13 @@ stage_initrd()
 		)
 		if [ "${verbose:-0}" -le 1 ]; then
 			dracut_args+=('--quiet')
+		fi
+		# A directory, as "--include" does not replace a file that a
+		# module installed, but copies the content of a directory
+		if [ -n "$uki" ]; then
+			mkdir -p "$tmpdir/uki-etc"
+			: > "$tmpdir/uki-etc/crypttab"
+			dracut_args+=('--no-hostonly-cmdline' '--include' "$tmpdir/uki-etc" '/etc')
 		fi
 
 		info "Generating new initrd"
@@ -3100,6 +3148,8 @@ install_kernel()
 	}
 
 	settle_entry_token "${snapshot}"
+
+	update_dps_addon
 
 	# A UKI entry only when the UKI can boot: with Secure Boot, its
 	# certificate has to be in MOK first.  Until then, the entry of
