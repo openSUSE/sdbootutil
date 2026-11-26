@@ -2830,6 +2830,22 @@ t_pcrlock_addons_initrd()
 	return 0
 }
 
+# uki_cmdline_text: with UKI_CMDLINE="no", the options of the kernel
+# command line that the UKI does not have, one by one
+# shellcheck disable=SC2034,SC2329  # read and called by the sourced library
+t_uki_cmdline_text()
+{
+	load
+	local UKI=local UKI_CMDLINE=yes
+	kernel_cmdline() { echo "root=/dev/mapper/cr_root quiet resume=/dev/mapper/cr_swap"; }
+	is "yes" "yes, in the addon of each entry" "$(uki_cmdline_text)"
+	UKI_CMDLINE=no
+	is "local" "no, not used: quiet resume=/dev/mapper/cr_swap" "$(uki_cmdline_text)"
+	kernel_cmdline() { echo "root=/dev/mapper/cr_root ro"; }
+	is "nothing lost" "no" "$(uki_cmdline_text)"
+	return 0
+}
+
 # remove_pcr and policy_missing_pcrs work on the comma lists of PCRs
 # shellcheck disable=SC2034  # read by the sourced library
 t_pcr_lists()
@@ -3241,6 +3257,7 @@ done <<-'EOF'
 	t_p15_status                status_pcr15 reports the measurements of this boot
 	t_uki_config                assert_uki_config accepts empty, no, yes or local; grub2-bls falls back to no UKI
 	t_uki_status                uki_mode_text and uki_missing_kernels report the UKI mode and the kernels without a UKI
+	t_uki_cmdline_text          the status of UKI_CMDLINE, with the options that the UKIs do not use
 	t_uki_keys                  uki_keys makes the keys of UKI=local, stored only encrypted
 	t_mok                       mok_enroll imports the UKI certificate once, and again after a failed boot
 	t_addon                     build_addon makes a signed addon with the exact command line, and the initrd when given
