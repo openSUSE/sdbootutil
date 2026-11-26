@@ -2263,6 +2263,10 @@ t_addon()
 	private_key() { cat "$workdir/sb.key"; }
 
 	build_addon "rootflags=subvol=@/.snapshots/42/snapshot" "$addon" || fail "build_addon failed"
+	# Signed again, the same file: the measurement does not change
+	sleep 1
+	build_addon "rootflags=subvol=@/.snapshots/42/snapshot" "$workdir/again.addon.efi" || fail "build_addon failed"
+	cmp -s "$addon" "$workdir/again.addon.efi" || fail "the same addon signed again is another file"
 	is "command line" "rootflags=subvol=@/.snapshots/42/snapshot" \
 	   "$(pe_section_text "$addon" .cmdline)"
 	says "sbat" "$(pe_section_text "$addon" .sbat)" "uki-addon,1"
@@ -2391,31 +2395,34 @@ t_link_uki_addon()
 }
 
 # The addon of the root has "root=" and the crypttab when the discovery
-# does not find the root, is written again only when they change, and
-# goes away with the discovery or without UKIs
+# does not find the root.  It is written again only when it changes:
+# a new disk, or a new key.  It goes away with the discovery, or
+# without UKIs
 # shellcheck disable=SC2034,SC2329  # read and called by the sourced library
 t_update_dps_addon()
 {
 	load
-	local boot_root="$workdir/esp" entry_token=t tmpdir="$workdir/tmp" UKI=yes t_problem="not DPS" t_ct="cr_root"
+	local boot_root="$workdir/esp" entry_token=t tmpdir="$workdir/tmp" UKI=yes t_problem="not DPS" t_ct="cr_root" t_key=key1
 	local out="$workdir/esp/loader/addons/t-dps.addon.efi"
 	mkdir -p "$boot_root" "$tmpdir"
 	uki_keys() { :; }
 	dps_root_problem() { echo "$t_problem"; }
 	get_rootfs() { echo /dev/mapper/cr_root; }
 	crypttab_cpio() { echo "$t_ct" > "$1"; }
-	# The addon is the two sections, one after the other
-	build_addon() { { echo "$1"; cat "$3"; } > "$2"; echo built >> "$workdir/dps-built"; }
-	objcopy() { case "$3" in *.cmdline) head -n 1 "$4" | tr -d '\n' > "$5" ;; *.initrd) tail -n +2 "$4" > "$5" ;; esac; }
-	record_esp_file() { :; }
+	# The addon is the command line, the initrd and the key
+	build_addon() { { echo "$1"; cat "$3"; echo "$t_key"; } > "$2"; }
+	record_esp_file() { echo written >> "$workdir/dps-written"; }
 
 	dps_addon_done='' update_dps_addon > /dev/null 2>&1
-	is "made" "$(printf 'root=/dev/mapper/cr_root\ncr_root')" "$(cat "$out" 2> /dev/null)"
+	is "made" "$(printf 'root=/dev/mapper/cr_root\ncr_root\nkey1')" "$(cat "$out" 2> /dev/null)"
 	dps_addon_done='' update_dps_addon > /dev/null 2>&1
-	is "not written again" 1 "$(wc -l < "$workdir/dps-built")"
+	is "not written again" 1 "$(wc -l < "$workdir/dps-written")"
 	t_ct="cr_root cr_new"
 	dps_addon_done='' update_dps_addon > /dev/null 2>&1
-	is "a new disk" "$(printf 'root=/dev/mapper/cr_root\ncr_root cr_new')" "$(cat "$out" 2> /dev/null)"
+	is "a new disk" "$(printf 'root=/dev/mapper/cr_root\ncr_root cr_new\nkey1')" "$(cat "$out" 2> /dev/null)"
+	t_key=key2
+	dps_addon_done='' update_dps_addon > /dev/null 2>&1
+	is "a new key" "$(printf 'root=/dev/mapper/cr_root\ncr_root cr_new\nkey2')" "$(cat "$out" 2> /dev/null)"
 	t_problem=""
 	dps_addon_done='' update_dps_addon > /dev/null 2>&1
 	[ -e "$out" ] && fail "the addon stays with DPS"
@@ -2428,19 +2435,22 @@ t_update_dps_addon()
 }
 
 # The initrd of a UKI is made new, without the crypttab and the command
-# line of the disks
+# line of the disks, and from a fixed path and time, as dracut keeps them
 # shellcheck disable=SC2034,SC2329  # read and called by the sourced library
 t_stage_initrd_uki()
 {
 	load
 	local tmpdir="$workdir/tmp" have_snapshots='' verbose=''
-	mkdir -p "$tmpdir"
+	mkdir -p "$tmpdir" /var/lib/sdbootutil
+	scratch_dir /var/lib/sdbootutil
+	signing_epoch() { echo 1700000000; }
 	reuse_initrd() { echo reused >> "$workdir/stage-log"; return 0; }
 	dracut() { echo "$*" >> "$workdir/stage-log"; }
 	stage_initrd 1 "" 7.3.5-1-default /nonexistent uki
-	says "dracut" "$(cat "$workdir/stage-log")" "--no-hostonly-cmdline --include $tmpdir/uki-etc /etc"
+	says "dracut" "$(cat "$workdir/stage-log")" "--no-hostonly-cmdline --include /var/lib/sdbootutil/uki-etc /etc"
 	says_not "not reused" "$(cat "$workdir/stage-log")" "reused"
-	[ -e "$tmpdir/uki-etc/crypttab" ] && [ ! -s "$tmpdir/uki-etc/crypttab" ] || fail "no empty crypttab"
+	[ -e /var/lib/sdbootutil/uki-etc/crypttab ] && [ ! -s /var/lib/sdbootutil/uki-etc/crypttab ] || fail "no empty crypttab"
+	is "fixed time" 1700000000 "$(stat -c %Y /var/lib/sdbootutil/uki-etc/crypttab)"
 	return 0
 }
 
@@ -3342,7 +3352,7 @@ done <<-'EOF'
 	t_addon_name                the name of the addon changes with the command line and with the key
 	t_uki_addon_cmdline         the command line of the addon of a UKI entry, with and without DPS
 	t_link_uki_addon            link_uki links the addon of the snapshot, without an initrd
-	t_update_dps_addon          the addon of the root follows the discovery, the crypttab and the UKIs
+	t_update_dps_addon          the addon of the root follows the discovery, the crypttab, the key and the UKIs
 	t_stage_initrd_uki          the initrd of a UKI has no crypttab nor command line of the disks
 	t_install_local_uki_kept    the UKI that reusable_uki finds is linked again, as a copy
 	t_entries_linked            the entries of a snapshot include the ones made by bootctl link

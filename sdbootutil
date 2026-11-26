@@ -932,12 +932,24 @@ pe_add_sections()
 	objcopy "${args[@]}" "$in" "$out"
 }
 
+# The time written in the UKIs and the addons: the start of the
+# certificate, so a file built again with the same content is the same
+# file, and its measurement does not change.  objcopy (the time of the
+# PE header) and systemd-sbsign (the signing time) read it from
+# SOURCE_DATE_EPOCH
+signing_epoch()
+{
+	date -d "$(openssl x509 -in "$secureboot_certificate" -noout -startdate | cut -d= -f2)" +%s
+}
+
 # A signed addon in OUT, that adds CMDLINE to the kernel command line,
 # and the initrd INITRD if there is one.  Without .uname, it works with
 # any kernel
 build_addon()
 {
 	local cmdline="$1" out="$2" initrd="${3:-}"
+	local -x SOURCE_DATE_EPOCH
+	SOURCE_DATE_EPOCH="$(signing_epoch)"
 	echo -n "$cmdline" > "$tmpdir/addon.cmdline"
 	cat > "$tmpdir/addon.sbat" <<-EOF
 	sbat,1,SBAT Version,sbat,1,https://github.com/rhboot/shim/blob/main/SBAT.md
@@ -1009,6 +1021,8 @@ crypttab_cpio()
 build_uki()
 {
 	local linux="$1" initrd="$2" cmdline="$3" osrel="$4" uname="$5" out="$6"
+	local -x SOURCE_DATE_EPOCH
+	SOURCE_DATE_EPOCH="$(signing_epoch)"
 	local stub="/usr/lib/systemd/boot/efi/linux$firmware_arch.efi.stub"
 	echo -n "$cmdline" > "$tmpdir/uki.cmdline"
 	echo -n "$uname" > "$tmpdir/uki.uname"
@@ -2791,16 +2805,16 @@ update_dps_addon()
 	uki_keys
 	cmdline="root=$(get_rootfs)"
 	crypttab_cpio "$tmpdir/dps.cpio"
-	if [ -e "$out" ]; then
-		objcopy -O binary --only-section=.cmdline "$out" "$tmpdir/dps.cmdline" 2> /dev/null || :
-		objcopy -O binary --only-section=.initrd "$out" "$tmpdir/dps.initrd" 2> /dev/null || :
-		if [ "$(cat "$tmpdir/dps.cmdline" 2> /dev/null)" = "$cmdline" ] && cmp -s "$tmpdir/dps.initrd" "$tmpdir/dps.cpio"; then
-			rm -f "$tmpdir"/dps.*
-			return 0
-		fi
+	# The same content and the same key make the same file.  So when
+	# the new addon is the same as the one in the ESP, there is nothing
+	# to do.  When the crypttab, the root, the key or the stub change,
+	# the file changes, and it is written again
+	build_addon "$cmdline" "$tmpdir/dps.addon.efi" "$tmpdir/dps.cpio"
+	if cmp -s "$tmpdir/dps.addon.efi" "$out"; then
+		rm -f "$tmpdir"/dps.*
+		return 0
 	fi
 	info "Writing $out"
-	build_addon "$cmdline" "$tmpdir/dps.addon.efi" "$tmpdir/dps.cpio"
 	# Not on the list of `install_with_rollback`: that one belongs to
 	# the install of a kernel, and the addon is for every kernel
 	mkdir -p "${out%/*}"
@@ -3124,11 +3138,14 @@ stage_initrd()
 			dracut_args+=('--quiet')
 		fi
 		# A directory, as "--include" does not replace a file that a
-		# module installed, but copies the content of a directory
+		# module installed, but copies the content of a directory.
+		# With a fixed path and time, as dracut keeps both in the
+		# initrd: the same initrd for the same content
 		if [ -n "$uki" ]; then
-			mkdir -p "$tmpdir/uki-etc"
-			: > "$tmpdir/uki-etc/crypttab"
-			dracut_args+=('--no-hostonly-cmdline' '--include' "$tmpdir/uki-etc" '/etc')
+			mkdir -p /var/lib/sdbootutil/uki-etc
+			: > /var/lib/sdbootutil/uki-etc/crypttab
+			touch -d "@$(signing_epoch)" /var/lib/sdbootutil/uki-etc/crypttab
+			dracut_args+=('--no-hostonly-cmdline' '--include' /var/lib/sdbootutil/uki-etc '/etc')
 		fi
 
 		info "Generating new initrd"
