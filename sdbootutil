@@ -2781,6 +2781,16 @@ dps_addon_path()
 	echo "${boot_root}/loader/addons/${entry_token}-dps.addon.efi"
 }
 
+# The UKIs in the ESP that are not of this system: the ones in
+# /EFI/Linux, and the entries of UKIs of another entry token.  The addon
+# of the root changes their boot too, as systemd-stub loads it for every
+# UKI
+dps_addon_others()
+{
+	bootctl_entries list --json=short 2> /dev/null | \
+		jq -r --arg token "$entry_token-" '.[] | select(.type == "type2" or (.uki and (.id | startswith($token) | not))) | .id'
+}
+
 # The addon of the root, when the discovery does not find it (see
 # `dps_root_problem`): "root=" and an initrd with the crypttab that
 # dracut would use.  It is the same for every UKI, local or of the
@@ -9119,6 +9129,11 @@ status_boot()
 		local problem
 		problem="$(dps_root_problem)"
 		status_row "Root discovery" "${problem:-yes}${problem:+, so $(dps_addon_path) has \"root=\" and the crypttab}"
+		if [ -e "$(dps_addon_path)" ]; then
+			local others
+			others="$(dps_addon_others | paste -sd ' ')"
+			[ -z "$others" ] || echo "  The addon changes the boot of the UKIs of other systems too: $others"
+		fi
 		status_row "Command line" "$(uki_cmdline_text)"
 		status_row "UKI key" "$([ -e "$credstore/secureboot-private-key.pem" ] && echo "$secureboot_certificate" || echo "not made yet")"
 		[ "$UKI" != "local" ] || ! grep -qs "^[^#]*tpm2-device" /etc/crypttab || \

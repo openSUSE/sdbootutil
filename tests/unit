@@ -2462,6 +2462,26 @@ t_update_dps_addon()
 	return 0
 }
 
+# The UKIs in the ESP that the addon of the root reaches and that are
+# not of this system: /EFI/Linux, and other entry tokens
+# shellcheck disable=SC2034,SC2329  # read and called by the sourced library
+t_dps_addon_others()
+{
+	load
+	local entry_token=t
+	bootctl_entries()
+	{
+		echo '[{"type": "type1", "id": "t-commit_5.5.7.3.5-1-default.conf", "uki": "/t/u.efi"},
+		       {"type": "type1", "id": "t-7.3.5-1-default-5.conf", "linux": "/t/linux"},
+		       {"type": "type1", "id": "fedora-commit_1.6.17.conf", "uki": "/fedora/u.efi"},
+		       {"type": "type1", "id": "fedora-6.17.conf", "linux": "/fedora/linux"},
+		       {"type": "type2", "id": "arch.efi"},
+		       {"type": "type1", "id": "tt-commit_1.1.6.0.conf", "uki": "/tt/u.efi"}]'
+	}
+	is "others" "fedora-commit_1.6.17.conf arch.efi tt-commit_1.1.6.0.conf" "$(dps_addon_others | paste -sd ' ')"
+	return 0
+}
+
 # The initrd of a UKI is made new, without the crypttab and the command
 # line of the disks, and from a fixed path and time, as dracut keeps them
 # shellcheck disable=SC2034,SC2329  # read and called by the sourced library
@@ -3382,6 +3402,7 @@ done <<-'EOF'
 	t_uki_addon_cmdline         the command line of the addon of a UKI entry, with and without DPS
 	t_link_uki_addon            link_uki links the addon of the snapshot, without an initrd
 	t_update_dps_addon          the addon of the root follows the discovery, the crypttab, the key and the UKIs
+	t_dps_addon_others          the UKIs of other systems that the addon of the root reaches
 	t_stage_initrd_uki          the initrd of a UKI has no crypttab nor command line of the disks
 	t_install_local_uki_kept    the UKI that reusable_uki finds is linked again, as a copy
 	t_entries_linked            the entries of a snapshot include the ones made by bootctl link
