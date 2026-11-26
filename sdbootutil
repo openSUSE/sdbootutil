@@ -7132,15 +7132,39 @@ in_initrd_crypttab()
 	return 1
 }
 
+# The crypttab in the initrd of the addons FILE... of an entry, the one
+# of the addon of the root (see `update_dps_addon`)
+addons_crypttab()
+{
+	local file
+	for file; do
+		objcopy -O binary --only-section=.initrd "$boot_root$file" "$tmpdir/addon-initrd" 2> /dev/null || continue
+		[ ! -s "$tmpdir/addon-initrd" ] || cpio --quiet -i --to-stdout etc/crypttab < "$tmpdir/addon-initrd" 2> /dev/null
+	done
+	rm -f "$tmpdir/addon-initrd"
+}
+
+# The jq of the files of an entry with an initrd: the initrd (or the
+# UKI, lsinitrd reads the initrd inside), and the addons, in one line
+# shellcheck disable=SC2016  # jq
+jq_initrd_files='[.initrd[0] // .uki // empty] + [.addons[]? | .globalAddon // .localAddon] | join("\t")'
+
 initrd_crypttab()
 {
-	local id initrd
+	local id files=()
 	update_entries_for_this_system
 	id="$(get_default_entry)"
-	# lsinitrd reads the initrd inside a UKI too
-	initrd="$(jq -r --arg id "$id" '.[] | select(.id == $id or .id == $id + ".conf") | .initrd[0] // .uki // empty' < "$entryfile" | head -n 1)"
-	[ -n "$initrd" ] && [ -e "$boot_root$initrd" ] || return 1
-	lsinitrd -f etc/crypttab "$boot_root$initrd" 2> /dev/null
+	IFS=$'\t' read -r -a files < <(jq -r --arg id "$id" '.[] | select(.id == $id or .id == $id + ".conf") | '"$jq_initrd_files" < "$entryfile" | head -n 1)
+	[ -n "${files[0]:-}" ] && [ -e "$boot_root${files[0]}" ] || return 1
+	# The initrd of an addon goes after the one of the entry, so its
+	# crypttab is the one in effect
+	local crypttab
+	crypttab="$(addons_crypttab "${files[@]:1}")"
+	if [ -n "$crypttab" ]; then
+		echo "$crypttab"
+	else
+		lsinitrd -f etc/crypttab "$boot_root${files[0]}" 2> /dev/null
+	fi
 }
 
 # The value of PCR 15 that the TPM2 slot of "$1" is bound to, with the
@@ -7233,37 +7257,48 @@ crypttab_names()
 # Until then a rollback needs the unbound slots
 entries_bind_pcr15()
 {
-	local anchor="${1:?}" initrd dir name _ opts expected names measuring
+	local anchor="${1:?}" initrd dir name _ opts expected names measuring files=() crypttab
+	local -A unpacked=()
 
 	read_initrd_crypttab
 	expected="$(crypttab_names <<<"$initrd_crypttab_cache")"
 	update_entries_for_this_system
-	while read -r initrd; do
-		[ -e "$boot_root$initrd" ] || return 1
-		# One decompression per initrd.  Listing it with `lsinitrd`
-		# takes seconds, as every entry is printed
-		dir="$(mktemp -d -p "$tmpdir")"
-		(cd "$dir" && lsinitrd --unpack "$boot_root$initrd" \
-			etc/crypttab \
-			usr/lib/systemd/system-generators/measure-pcr-generator \
-			usr/lib/systemd/system/measure-pcr-boundary.service) &> /dev/null || :
-		[ -e "$dir/usr/lib/systemd/system/measure-pcr-boundary.service" ] || return 1
-		# The line that orders the other devices after the anchor
-		# shellcheck disable=SC2016  # literal
-		grep -qsF 'After=systemd-cryptsetup@$anchor.service' \
-			"$dir/usr/lib/systemd/system-generators/measure-pcr-generator" || return 1
+	while IFS=$'\t' read -r -a files; do
+		initrd="${files[0]:-}"
+		[ -n "$initrd" ] && [ -e "$boot_root$initrd" ] || return 1
+		# One decompression per initrd, the entries of the snapshots
+		# share it.  Listing it with `lsinitrd` takes seconds, as
+		# every entry is printed
+		if [ -z "${unpacked["$initrd"]:-}" ]; then
+			dir="$(mktemp -d -p "$tmpdir")"
+			(cd "$dir" && lsinitrd --unpack "$boot_root$initrd" \
+				etc/crypttab \
+				usr/lib/systemd/system-generators/measure-pcr-generator \
+				usr/lib/systemd/system/measure-pcr-boundary.service) &> /dev/null || :
+			[ -e "$dir/usr/lib/systemd/system/measure-pcr-boundary.service" ] || return 1
+			# The line that orders the other devices after the anchor
+			# shellcheck disable=SC2016  # literal
+			grep -qsF 'After=systemd-cryptsetup@$anchor.service' \
+				"$dir/usr/lib/systemd/system-generators/measure-pcr-generator" || return 1
+			unpacked["$initrd"]="$dir"
+		fi
+		dir="${unpacked["$initrd"]}"
+		# The one of the addons, that go after the initrd, or the one
+		# of the initrd
+		crypttab="$(addons_crypttab "${files[@]:1}")"
+		[ -n "$crypttab" ] || [ ! -e "$dir/etc/crypttab" ] || crypttab="$(< "$dir/etc/crypttab")"
 		names=""
-		[ ! -e "$dir/etc/crypttab" ] || names="$(crypttab_names < "$dir/etc/crypttab")"
+		[ -z "$crypttab" ] || names="$(crypttab_names <<<"$crypttab")"
 		[ "$names" = "$expected" ] || return 1
 		# Only the anchor measures
-		[ -e "$dir/etc/crypttab" ] || continue
+		[ -n "$crypttab" ] || continue
 		measuring=""
 		while read -r name _ _ opts; do
 			[[ "$name" != \#* ]] || continue
 			[[ "$opts" != *"tpm2-measure-pcr=yes"* ]] || measuring+="$name "
-		done < "$dir/etc/crypttab"
+		done <<<"$crypttab"
 		[ "$measuring" = "$anchor " ] || return 1
-	done < <(jq -r '.[] | select(.type == "type1") | .initrd[0] // .uki // empty' < "$entryfile" | sort -u)
+	done < <(jq -r '.[] | select(.type == "type1") | '"$jq_initrd_files" < "$entryfile" | sort -u)
 }
 
 # The keyslots of the pcrlock TPM2 slots of "$1" that are not bound to

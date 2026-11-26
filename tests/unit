@@ -1932,6 +1932,7 @@ t_shift_limit()
 # entries_bind_pcr15 needs every initrd to measure the anchor alone,
 # order the rest after it, measure the end of the initrd, and unlock
 # the same devices as the initrd of the default entry
+# shellcheck disable=SC2329  # the stubs are called by the sourced library
 t_entries_bind()
 {
 	load
@@ -1970,6 +1971,40 @@ swap UUID=2 none tpm2-device=auto"
 	entries_bind_pcr15 root && fail "a generator without the anchor ordering was accepted"
 	generator='After=systemd-cryptsetup@$anchor.service' boundary=
 	entries_bind_pcr15 root && fail "an initrd without the boundary was accepted"
+
+	# A UKI of the packages: no crypttab in its initrd, the one of
+	# its addon counts
+	boundary=1 ct_a=""
+	touch "$boot_root/u.efi"
+	update_entries_for_this_system() { echo '[{"type":"type1","uki":"/u.efi","addons":[{"localAddon":"/c.addon.efi"}]}]' > "$entryfile"; }
+	addons_crypttab() { [ "$*" != /c.addon.efi ] || echo "$ct_default"; }
+	lsinitrd()
+	{
+		mkdir -p usr/lib/systemd/system-generators usr/lib/systemd/system
+		[ -z "$ct_a" ] || { mkdir -p etc; echo "$ct_a" > etc/crypttab; }
+		echo "$generator" > usr/lib/systemd/system-generators/measure-pcr-generator
+		touch usr/lib/systemd/system/measure-pcr-boundary.service
+	}
+	entries_bind_pcr15 root || fail "the crypttab of the addon was not read"
+	addons_crypttab() { :; }
+	entries_bind_pcr15 root && fail "a UKI without a crypttab was accepted"
+	return 0
+}
+
+# addons_crypttab reads the crypttab in the initrd of the addons, and
+# skips the addons without one
+# shellcheck disable=SC2034,SC2329  # read and called by the sourced library
+t_addons_crypttab()
+{
+	command -v cpio > /dev/null || skip "cpio is not installed"
+	load
+	local boot_root="$workdir/esp" tmpdir="$workdir/tmp"
+	mkdir -p "$boot_root" "$tmpdir"
+	dracut_crypttab() { echo "cr_root UUID=1111 none x-initrd.attach,tpm2-measure-pcr=yes"; }
+	crypttab_cpio "$boot_root/c.addon.efi.initrd"
+	objcopy() { if [ -e "$4.initrd" ]; then cp "$4.initrd" "$5"; else : > "$5"; fi; }
+	is "crypttab" "cr_root UUID=1111 none x-initrd.attach,tpm2-measure-pcr=yes" "$(addons_crypttab /r.addon.efi /c.addon.efi)"
+	is "none" "" "$(addons_crypttab /r.addon.efi)"
 	return 0
 }
 
@@ -3202,6 +3237,7 @@ done <<-'EOF'
 	t_shift                     shift_component and restore_shifts keep the current boot only when it differs
 	t_shift_limit               restore_shifts makes room for the current boot in a full component
 	t_entries_bind              entries_bind_pcr15 checks the measurement layout and the devices of every initrd
+	t_addons_crypttab           the crypttab in the initrd of the addons of an entry
 	t_p15_status                status_pcr15 reports the measurements of this boot
 	t_uki_config                assert_uki_config accepts empty, no, yes or local; grub2-bls falls back to no UKI
 	t_uki_status                uki_mode_text and uki_missing_kernels report the UKI mode and the kernels without a UKI
