@@ -11,7 +11,7 @@ ENTRY_DIR_ABS="${3:?}"
 # shellcheck disable=SC2034
 KERNEL_IMAGE="$4"
 
-[ "$KERNEL_INSTALL_LAYOUT" = "bls" ] || exit 0
+[ "$KERNEL_INSTALL_LAYOUT" = "sdbootutil" ] || exit 0
 
 MACHINE_ID="${KERNEL_INSTALL_MACHINE_ID:?}"
 

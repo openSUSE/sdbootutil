@@ -112,13 +112,14 @@ Plugin scripts for tukit to handle BLS config files
 %package kernel-install
 Summary:        Hook script for kernel-install
 Requires:       %{name} = %{version}
-# While kernel-install is in udev
-Requires:       udev
+# kernel-install is in udev, install.conf.d needs 256
+Requires:       udev >= 256
 BuildArch:      noarch
 
 %description kernel-install
-Plugin script for kernel-install. Note: installation of this
-package may disable other plugin scripts that are incompatible.
+Plugin script for kernel-install. It sets a kernel-install layout
+and initrd generator of its own, so the plugin scripts of systemd
+and dracut that write boot entries and initrds skip.
 
 %package enroll
 Summary:        Full disk encryption enrollment
@@ -209,6 +210,7 @@ install -D -m 644 10-%{name}.tukit.conf %{buildroot}%{_prefix}%{_sysconfdir}/tuk
 
 # kernel-install
 install -D -m 755 50-%{name}.install %{buildroot}%{_prefix}/lib/kernel/install.d/50-%{name}.install
+install -D -m 644 40-%{name}.install.conf %{buildroot}%{_prefix}/lib/kernel/install.conf.d/40-%{name}.conf
 
 # Bash completions
 install -D -m 644 completions/bash_sdbootutil %{buildroot}%{_datadir}/bash-completion/completions/sdbootutil
@@ -221,7 +223,6 @@ install -D -m 644 measure-pcr-pcrextend.conf %{buildroot}/%{_prefix}/lib/dracut/
 
 # tmpfiles
 install -Dpm 0644 %{name}.conf %{buildroot}%{_tmpfilesdir}/%{name}.conf
-install -Dpm 0644 kernel-install-%{name}.conf %{buildroot}%{_tmpfilesdir}/kernel-install-%{name}.conf
 
 # tmpfiles_create macro is a noop, and the directories in /var/lib
 # will be present in the next reboot.  The problem is that when the
@@ -272,9 +273,6 @@ install -d -m 755 %{buildroot}%{_prefix}/lib/%{name}/entries.d
 
 %post enroll
 %service_add_post %{name}-enroll.service
-
-%post kernel-install
-%tmpfiles_create kernel-install-%{name}.conf
 
 %post dracut-measure-pcr
 %{?regenerate_initrd_post}
@@ -327,7 +325,8 @@ install -d -m 755 %{buildroot}%{_prefix}/lib/%{name}/entries.d
 %dir %{_prefix}/lib/kernel
 %dir %{_prefix}/lib/kernel/install.d
 %{_prefix}/lib/kernel/install.d/*
-%{_tmpfilesdir}/kernel-install-%{name}.conf
+%dir %{_prefix}/lib/kernel/install.conf.d
+%{_prefix}/lib/kernel/install.conf.d/40-%{name}.conf
 
 %files enroll
 %{_bindir}/%{name}-enroll

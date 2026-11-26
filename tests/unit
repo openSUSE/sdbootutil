@@ -7,7 +7,7 @@
 # which warnings are printed -- the entry names the boot loaders spell
 # differently, the versions the status report compares, `grubenv`, the
 # entries that may be removed to make room in the ESP, and the files of
-# the ESP that may reach a TPM2 policy.
+# the ESP that may reach a TPM2 policy, plus the kernel-install plugin.
 #
 # These are decisions the tool takes *before* it writes anything to the
 # TPM2, so they do not need one, and they do not need a guest either: a
@@ -1615,6 +1615,101 @@ t_pcrlock_unlockable()
 	done
 }
 
+# The kernel-install plugin: kernel-install with only this plugin, on a
+# scratch ESP and a scratch /usr/lib/kernel with the files of the
+# package.  A stub records the arguments instead of sdbootutil
+KIP_VERSION="1.2.3-1-default"
+KIP_PLUGIN="/usr/lib/kernel/install.d/50-sdbootutil.install"
+KIP_STUB="/usr/lib/kernel/sdbootutil-stub"
+
+kip_setup()
+{
+	local layout="${1:-sdbootutil}"
+	command -v kernel-install > /dev/null || skip "kernel-install is not installed"
+	local systemd
+	systemd="$(kernel-install --version | sed -n '1s/^systemd \([0-9]*\).*/\1/p')"
+	[ "${systemd:-0}" -ge 256 ] || skip "kernel-install reads no install.conf.d (systemd < 256)"
+	[ -d /usr/lib/kernel ] || skip "/usr/lib/kernel is needed as a mount point"
+
+	# A tmpfs: the plugin and the stub run also when /tmp is noexec
+	scratch_dir /usr/lib/kernel
+	mkdir /usr/lib/kernel/install.d /usr/lib/kernel/install.conf.d
+	echo unit > /usr/lib/kernel/entry-token
+	[ "$layout" != sdbootutil ] || \
+		cp "$top/40-sdbootutil.install.conf" /usr/lib/kernel/install.conf.d/40-sdbootutil.conf
+	sed "s|/usr/bin/sdbootutil|$KIP_STUB|" "$top/50-sdbootutil.install" > "$KIP_PLUGIN"
+	grep -qF "$KIP_STUB" "$KIP_PLUGIN" || die "the plugin does not call /usr/bin/sdbootutil, the stub cannot replace it"
+	# shellcheck disable=SC2016  # $* is for the stub
+	printf '#!/bin/sh\necho "$*" >> "%s"\n' "$workdir/stub-args" > "$KIP_STUB"
+	chmod +x "$KIP_PLUGIN" "$KIP_STUB"
+	: > "$workdir/stub-args"
+
+	kip_esp="$workdir/esp"
+	rm -rf "$kip_esp"
+	mkdir -p "$kip_esp/loader" "$kip_esp/unit/$KIP_VERSION"
+	# As on a real ESP: kernel-install detects "bls" from entries.srel
+	echo type1 > "$kip_esp/loader/entries.srel"
+	touch "$kip_esp/unit/$KIP_VERSION/linux-1" "$kip_esp/unit/$KIP_VERSION/initrd-1"
+}
+
+# Nothing of the host: no machine-info, no bypass for image builders
+kip()
+{
+	BOOT_ROOT="$kip_esp" KERNEL_INSTALL_CONF_ROOT=/usr/lib/kernel \
+		 KERNEL_INSTALL_PLUGINS="$KIP_PLUGIN" \
+		 KERNEL_INSTALL_READ_MACHINE_INFO=0 KERNEL_INSTALL_BYPASS=0 \
+		 kernel-install "$@"
+}
+
+t_kip_layout()
+{
+	kip_setup
+	: > "$workdir/vmlinuz"
+	local out
+	# Without a kernel, inspect takes the running one
+	out="$(kip inspect "$KIP_VERSION" "$workdir/vmlinuz" 2>&1)"
+	says "layout" "$out" "Layout: sdbootutil"
+	says "initrd generator" "$out" "Initrd Generator: sdbootutil"
+}
+
+t_kip_add()
+{
+	local version="2.3.4-1-default"
+	[ -d /usr/lib/modules ] || skip "/usr/lib/modules is needed as a mount point"
+	kip_setup
+	# The plugin takes only a kernel in /usr/lib/modules/<version>
+	scratch_dir /usr/lib/modules
+	mkdir "/usr/lib/modules/$version"
+	: > "/usr/lib/modules/$version/vmlinuz"
+
+	kip add "$version" "/usr/lib/modules/$version/vmlinuz" &> "$workdir/kip.log" || \
+		fail "kernel-install add failed: $(cat "$workdir/kip.log")"
+	says "plugin" "$(cat "$workdir/stub-args")" "add-kernel $version"
+	[ ! -e "$kip_esp/unit/$version" ] || fail "kernel-install made the kernel directory"
+}
+
+t_kip_remove()
+{
+	kip_setup
+	kip remove "$KIP_VERSION" &> "$workdir/kip.log" || \
+		fail "kernel-install remove failed: $(cat "$workdir/kip.log")"
+	says "plugin" "$(cat "$workdir/stub-args")" "remove-kernel $KIP_VERSION"
+	[ -e "$kip_esp/unit/$KIP_VERSION/linux-1" ] || \
+		fail "kernel-install removed the kernel directory of the snapshots"
+}
+
+# Negative control: without the configuration (layout "bls")
+# kernel-install removes the directory
+t_kip_bls()
+{
+	kip_setup bls
+	kip remove "$KIP_VERSION" &> "$workdir/kip.log" || \
+		fail "kernel-install remove failed: $(cat "$workdir/kip.log")"
+	is "plugin" "" "$(cat "$workdir/stub-args")"
+	[ ! -e "$kip_esp/unit/$KIP_VERSION" ] || \
+		fail "kernel-install kept the kernel directory, the other cases prove nothing"
+}
+
 ####### the runner #######
 
 run_case()
@@ -1729,6 +1824,10 @@ done <<-'EOF'
 	t_entries_bind              entries_bind_pcr15 checks the measurement layout and the devices of every initrd
 	t_p15_status                status_pcr15 reports the measurements of this boot
 	t_pcrlock_unlockable        pcrlock_unlockable names every category that systemd-pcrlock removes via varlink
+	t_kip_layout                the kernel-install configuration of the plugin sets its layout and initrd generator
+	t_kip_add                   kernel-install add calls the plugin and makes no kernel directory
+	t_kip_remove                kernel-install remove calls the plugin and keeps the kernel directory
+	t_kip_bls                   negative control: with the layout bls the plugin does nothing and the directory goes
 EOF
 
 echo
