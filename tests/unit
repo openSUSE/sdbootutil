@@ -2243,8 +2243,8 @@ t_uki()
 		--private-key="$workdir/pcr.key" --public-key="$pcr_public_key" --json=short > "$x/resign" 2> /dev/null
 	is "signature of the sections" "$(jq -c . "$x/resign")" "$(jq -c . "$x/pcrsig")"
 
-	# A new snapshot reuses the UKI of its parent only with the same
-	# command line and the same kernel
+	# A new snapshot reuses the UKI of its parent, and an entry its own
+	# UKI, only with the same command line and the same kernel
 	local boot_root="$workdir/esp" entry_token=t
 	mkdir -p "$boot_root/t" "$boot_root/loader/entries"
 	cp "$uki" "$boot_root/t/uki.efi"
@@ -2252,58 +2252,85 @@ t_uki()
 	# shellcheck disable=SC2034,SC2329  # read by the sourced library
 	detect_parent() { parent_snapshot=5; }
 	is "reused" "$boot_root/loader/entries/t-commit_5.5.7.3.4-1-default.conf" \
-		"$(reusable_uki @/.snapshots/6/snapshot 7.3.4-1-default "root=UUID=1 quiet" "$workdir/linux")"
-	reusable_uki @/.snapshots/6/snapshot 7.3.4-1-default "root=UUID=2 quiet" "$workdir/linux" && \
+		"$(reusable_uki 6 @/.snapshots/6/snapshot 7.3.4-1-default "root=UUID=1 quiet" "$workdir/linux")"
+	reusable_uki 6 @/.snapshots/6/snapshot 7.3.4-1-default "root=UUID=2 quiet" "$workdir/linux" && \
 		fail "reused with another command line"
 	head -c 4096 /dev/urandom > "$workdir/linux2"
-	reusable_uki @/.snapshots/6/snapshot 7.3.4-1-default "root=UUID=1 quiet" "$workdir/linux2" && \
+	reusable_uki 6 @/.snapshots/6/snapshot 7.3.4-1-default "root=UUID=1 quiet" "$workdir/linux2" && \
 		fail "reused with another kernel"
+	detect_parent() { parent_snapshot=""; }
+	is "its own" "$boot_root/loader/entries/t-commit_5.5.7.3.4-1-default.conf" \
+		"$(reusable_uki 5 @/.snapshots/5/snapshot 7.3.4-1-default "root=UUID=1 quiet" "$workdir/linux")"
 	return 0
 }
 
-# The addon of a snapshot is built again for a new signing key: the
-# name in the ESP decides if it is there already
+# The addon of an entry is built again for another command line or a
+# new signing key: the name in the ESP decides if it is there already
 # shellcheck disable=SC2034  # read by the sourced library
-t_rootflags_addon_name()
+t_addon_name()
 {
 	load
 	local secureboot_certificate="$workdir/cert.pem" a b
 	echo "key 1" > "$secureboot_certificate"
-	a="$(rootflags_addon_name @/.snapshots/5/snapshot)"
-	is "same" "$a" "$(rootflags_addon_name @/.snapshots/5/snapshot)"
-	[ "$a" != "$(rootflags_addon_name @/.snapshots/6/snapshot)" ] || fail "the same name for another snapshot"
+	a="$(addon_name "rootflags=subvol=@/.snapshots/5/snapshot")"
+	is "same" "$a" "$(addon_name "rootflags=subvol=@/.snapshots/5/snapshot")"
+	[ "$a" != "$(addon_name "rootflags=subvol=@/.snapshots/6/snapshot")" ] || fail "the same name for another command line"
 	echo "key 2" > "$secureboot_certificate"
-	b="$(rootflags_addon_name @/.snapshots/5/snapshot)"
+	b="$(addon_name "rootflags=subvol=@/.snapshots/5/snapshot")"
 	[ "$a" != "$b" ] || fail "the same name for another key"
-	[[ "$b" == rootflags-*.addon.efi ]] || fail "unexpected name $b"
+	[[ "$b" == cmdline-*.addon.efi ]] || fail "unexpected name $b"
 	return 0
 }
 
-# An entry of a UKI built here is kept only while its files are in the
-# ESP and the UKI has the kernel and the command line of now
+# The command line of the addon of a UKI entry: "root=" only when the
+# root is not found by the discovery, the "rootflags=" of the snapshot,
+# and the options of the system only with UKI_CMDLINE="yes"
+# shellcheck disable=SC2034,SC2329  # read and called by the sourced library
+t_uki_addon_cmdline()
+{
+	load
+	local UKI_CMDLINE t_problem
+	get_rootfs() { echo /dev/mapper/cr_root; }
+	kernel_cmdline() { echo "quiet resume=/dev/mapper/cr_swap"; }
+	dps_root_problem() { echo "$t_problem"; }
+
+	UKI_CMDLINE=yes t_problem="not DPS"
+	is "options, not DPS" "quiet resume=/dev/mapper/cr_swap root=/dev/mapper/cr_root rootflags=subvol=@/.snapshots/5/snapshot" \
+		"$(uki_addon_cmdline @/.snapshots/5/snapshot)"
+	UKI_CMDLINE=no
+	is "no options, not DPS" "root=/dev/mapper/cr_root rootflags=subvol=@/.snapshots/5/snapshot" \
+		"$(uki_addon_cmdline @/.snapshots/5/snapshot)"
+	t_problem=""
+	is "no options, DPS" "rootflags=subvol=@/.snapshots/5/snapshot" "$(uki_addon_cmdline @/.snapshots/5/snapshot)"
+	is "no options, DPS, no snapshots" "" "$(uki_addon_cmdline "")"
+	UKI_CMDLINE=yes
+	is "options, DPS" "quiet resume=/dev/mapper/cr_swap rootflags=subvol=@/.snapshots/5/snapshot" \
+		"$(uki_addon_cmdline @/.snapshots/5/snapshot)"
+	return 0
+}
+
+# The UKI of an entry built here is used again when `reusable_uki`
+# finds it, and the entry is linked again anyway, as its addon can
+# change without the UKI (see `link_uki`)
 # shellcheck disable=SC2034,SC2329  # read and called by the sourced library
 t_install_local_uki_kept()
 {
 	load
-	local boot_root="$workdir/esp" entry_token=t tmpdir="$workdir/tmp" arg_force='' arg_no_reuse_initrd='' matches
+	local boot_root="$workdir/esp" entry_token=t tmpdir="$workdir/tmp" arg_force='' arg_no_reuse_initrd='' t_reused
 	mkdir -p "$boot_root/t" "$boot_root/loader/entries" "$tmpdir"
 	echo "uki /t/uki.efi" > "$boot_root/loader/entries/t-commit_5.5.7.3.4-1-default.conf"
 	touch "$boot_root/t/uki.efi"
-	common_boot_options() { echo "root=UUID=1"; }
-	uki_matches() { [ -n "$matches" ]; }
-	unlink_replaced_entry() { :; }
-	reusable_uki() { return 1; }
+	reusable_uki() { [ -n "$t_reused" ] && echo "$boot_root/loader/entries/t-commit_5.5.7.3.4-1-default.conf"; }
 	stage_initrd() { :; }
 	build_uki() { :; }
-	stage_hashed() { echo "$tmpdir/u.efi"; }
-	link_uki() { echo "link"; }
-	matches=1
-	is "same" "" "$(install_local_uki 5 @/.snapshots/5/snapshot 7.3.4-1-default "$workdir/vmlinuz" 2> /dev/null)"
-	matches=
-	is "another kernel or command line" "link" "$(install_local_uki 5 @/.snapshots/5/snapshot 7.3.4-1-default "$workdir/vmlinuz" 2> /dev/null)"
-	matches=1
-	rm "$boot_root/t/uki.efi"
-	is "no UKI" "link" "$(install_local_uki 5 @/.snapshots/5/snapshot 7.3.4-1-default "$workdir/vmlinuz" 2> /dev/null)"
+	stage_hashed() { touch "$tmpdir/u.efi"; echo "$tmpdir/u.efi"; }
+	link_uki() { [ -e "$4" ] && echo "link $4"; }
+	t_reused=1
+	is "reused" "link $tmpdir/uki.efi" "$(install_local_uki 5 @/.snapshots/5/snapshot 7.3.4-1-default "$workdir/vmlinuz" 2> /dev/null)"
+	t_reused=
+	is "new" "link $tmpdir/u.efi" "$(install_local_uki 5 @/.snapshots/5/snapshot 7.3.4-1-default "$workdir/vmlinuz" 2> /dev/null)"
+	t_reused=1 arg_force=1
+	is "forced" "link $tmpdir/u.efi" "$(install_local_uki 5 @/.snapshots/5/snapshot 7.3.4-1-default "$workdir/vmlinuz" 2> /dev/null)"
 	return 0
 }
 
@@ -2447,35 +2474,6 @@ t_linked_entry_ids()
 	return 0
 }
 
-# The UKIs of the packages have their own command line: the options of
-# /etc/kernel/cmdline that are not in the UKI nor in its addons are
-# reported as lost
-# shellcheck disable=SC2034,SC2329  # read and called by the sourced library
-t_distro_uki_lost_options()
-{
-	load
-	local subvol_prefix='' tmpdir="$workdir/tmp" kv=7.3.5-1-default
-	local m="$workdir/root/usr/lib/modules/$kv" out
-	mkdir -p "$m/vmlinuz-virt.efi.extra.d" "$tmpdir"
-	touch "$m/vmlinuz-virt.efi" "$m/vmlinuz-virt.efi.extra.d/gpu.addon.efi"
-	objcopy()
-	{
-		case "$4" in
-			*.addon.efi) echo "nomodeset" > "$5" ;;
-			*) echo "quiet splash=silent" > "$5" ;;
-		esac
-	}
-	dps_root_problem() { :; }
-	common_boot_options() { echo "root=UUID=1 quiet splash=silent nomodeset console=ttyS0 resume=/dev/vda3"; }
-	stage_hashed() { echo "$1"; }
-	link_uki() { :; }
-	out="$(install_distro_ukis 5 "$workdir/root" "$kv" 2>&1)"
-	says "lost" "$out" "does not have these options of the kernel command line: console=ttyS0 resume=/dev/vda3"
-	common_boot_options() { echo "root=UUID=1 quiet nomodeset"; }
-	out="$(install_distro_ukis 5 "$workdir/root" "$kv" 2>&1)"
-	says_not "nothing lost" "$out" "does not have these options"
-	return 0
-}
 
 # The entries of "bootctl link" take part in the prediction: their
 # snapshot is in the id, and their version is "<commit>.<snapshot>.<kernel>"
@@ -3105,8 +3103,9 @@ done <<-'EOF'
 	t_dracut_crypttab           the lines of /etc/crypttab that dracut puts in a host-only initrd
 	t_crypttab_cpio             the same crypttab gives the same cpio archive
 	t_uki                       build_uki makes a signed UKI whose PCR 11 signature matches its sections
-	t_rootflags_addon_name      the name of the rootflags addon changes with the snapshot and with the key
-	t_install_local_uki_kept    the entry of a local UKI is kept only while it is in the ESP and current
+	t_addon_name                the name of the addon changes with the command line and with the key
+	t_uki_addon_cmdline         the command line of the addon of a UKI entry, with and without DPS
+	t_install_local_uki_kept    the UKI that reusable_uki finds is linked again, as a copy
 	t_entries_linked            the entries of a snapshot include the ones made by bootctl link
 	t_find_conf_file            find_conf_file finds an entry by its name, with a boot counter too
 	t_update_entries_for_snapshot the entries of a snapshot, or of this system without one
@@ -3125,7 +3124,6 @@ done <<-'EOF'
 	t_pcrlock_addons_cmdline    the command lines of the addons go to PCR 12 joined, as one event
 	t_pcrlock_addons_limit      the command lines of the addons stay inside the PolicyOR limit
 	t_linked_entry_ids          the entries of the UKIs of a kernel, one per variant
-	t_distro_uki_lost_options   the options of the kernel command line that a UKI of the packages loses are reported
 	t_settle_uki_mode           the TPM2 slots decide the UKI mode in effect
 	t_rebind_uki                rebind_tpm2_slots makes the slot that enroll would make
 	t_enroll_secret             enroll_secret takes the secret of the method from its sources

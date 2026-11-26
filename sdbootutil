@@ -561,6 +561,7 @@ set_default_config_values()
 
 	ESP_FREE_SPACE="${arg_esp_free_space:-10}"
 	DEVICETREE_SOURCE="${arg_devicetree_source:-}"
+	UKI_CMDLINE="yes"
 }
 
 create_default_config_file()
@@ -590,6 +591,10 @@ create_default_config_file()
 	# otherwise kernel installation aborts. Currently supported only with
 	# Secure Boot disabled.
 	DEVICETREE_SOURCE="$DEVICETREE_SOURCE"
+
+	# "yes" adds the kernel command line of the system (/etc/kernel/cmdline
+	# and cmdline.d) to the UKIs, in the addon of each boot entry
+	UKI_CMDLINE="$UKI_CMDLINE"
 	EOF
 }
 
@@ -2707,13 +2712,24 @@ create_boot_options()
 	echo "${boot_options# }"
 }
 
-# The options of SUBVOL that every snapshot shares: the ones above,
-# without the "rootflags=subvol=" of a snapshot
-common_boot_options()
+# The command line of the addon of a UKI entry of SUBVOL, the same for
+# every kind of UKI: "root=" when the UKI cannot find the root itself
+# (see `dps_root_problem`), the "rootflags=" of the snapshot, and the
+# options of the kernel command line of the system with UKI_CMDLINE
+uki_addon_cmdline()
 {
-	local subvol="$1" boot_options
-	boot_options="$(kernel_cmdline "$subvol" | sedrootflags "" | sed 's/ \?\<rootflags=subvol=[^ ]*//')"
-	echo "${boot_options# }"
+	local subvol="$1" options param params=() dps=""
+	if [ "$UKI_CMDLINE" = "no" ]; then
+		options="$(echo | sedrootflags "$subvol")"
+	else
+		options="$(create_boot_options "$subvol")"
+	fi
+	[ -n "$(dps_root_problem)" ] || dps=1
+	while read -r param; do
+		[ -z "$dps" ] || [[ "$param" != root=* ]] || continue
+		params+=("$param")
+	done < <(cmdline_params "$options")
+	echo "${params[*]}"
 }
 
 # The name of the entry that "bootctl link" makes for the kernel
@@ -2766,18 +2782,22 @@ unlink_replaced_entry()
 	[ "$(entry_key "$id")" != "$(entry_key "$default")" ] || set_default_entry "$3"
 }
 
-# The entry of the parent of SUBVOL for the kernel VERSION, if its UKI
-# has the command line OPTIONS and the kernel LINUX: a new snapshot of
-# the same system can use it, like `reuse_initrd` does with the initrd
+# The entry of SNAPSHOT (in SUBVOL), or of its parent, for the kernel
+# VERSION, if its UKI has the command line OPTIONS and the kernel LINUX.
+# The entry of the snapshot keeps its UKI when only its addon changes,
+# and a new snapshot uses the one of its parent, like `reuse_initrd`
+# does with the initrd
 reusable_uki()
 {
-	local subvol="$1" kernel_version="$2" cmdline="$3" linux="$4"
-	local parent_subvol parent_snapshot entry
+	local snapshot="$1" subvol="$2" kernel_version="$3" cmdline="$4" linux="$5"
+	local parent_subvol parent_snapshot entry snap
 	detect_parent "$subvol"
-	[ -n "$parent_snapshot" ] || return 1
-	entry="$(entry_file "$(linked_entry_id "$kernel_version" "$parent_snapshot")")" || return 1
-	uki_matches "$entry" "$cmdline" "$linux" || return 1
-	echo "$entry"
+	for snap in "$snapshot" "$parent_snapshot"; do
+		[ -n "$snap" ] || continue
+		entry="$(entry_file "$(linked_entry_id "$kernel_version" "$snap")")" || continue
+		! uki_matches "$entry" "$cmdline" "$linux" || { echo "$entry"; return 0; }
+	done
+	return 1
 }
 
 # Whether the UKI of the entry ENTRY is in the ESP, with the command
@@ -2803,31 +2823,29 @@ uki_matches()
 install_local_uki()
 {
 	local snapshot="$1" subvol="$2" kernel_version="$3" src="$4"
-	local dstinitrd=() reused_entry=
-	local id entry
-	id="$(linked_entry_id "$kernel_version" "$snapshot")"
+	local reused_entry=
 
-	# The command line of the UKI is the one of every snapshot, and
-	# the addon adds the snapshot
-	local boot_options
-	boot_options="$(common_boot_options "$subvol")"
+	# The command line of the UKI is fixed, and the addon of the entry
+	# has the rest (see `uki_addon_cmdline`).  Not empty: with Secure
+	# Boot systemd-stub ignores the command line of the boot loader only
+	# when the UKI has one.  "ro" is what systemd does with "root="
+	local boot_options="ro"
 
-	if [ -z "$arg_no_reuse_initrd$arg_force" ] && entry="$(entry_file "$id")" && \
-	   [ -z "$(entry_missing_files "$entry")" ] && uki_matches "$entry" "$boot_options" "$src"; then
-		info "UKI of $kernel_version already in the ESP"
-		unlink_replaced_entry "$kernel_version" "$snapshot" "$id"
-		return 0
-	fi
-
-	# The UKI of the parent snapshot, or a new one.  Its name has
-	# the hash of its content, so "link" shares it between entries
+	# The UKI of the entry, the one of the parent snapshot, or a new
+	# one.  Its name has the hash of its content, so "link" shares it
+	# between entries.  The addon of the entry can change without the
+	# UKI, so `link_uki` decides if there is something to do
 	local uki=""
 	[ -n "$arg_no_reuse_initrd$arg_force" ] || \
-		reused_entry="$(reusable_uki "$subvol" "$kernel_version" "$boot_options" "$src")" || reused_entry=""
+		reused_entry="$(reusable_uki "$snapshot" "$subvol" "$kernel_version" "$boot_options" "$src")" || reused_entry=""
 	if [ -n "$reused_entry" ]; then
-		# Freeing space must not remove the entry, and its UKI
-		uki="${boot_root}$(entry_field "$reused_entry" uki)"
-		info "Reusing $uki"
+		# Freeing space must not remove the entry, and its UKI.
+		# "link" gets a copy: the one in the ESP goes when `link_uki`
+		# unlinks the entry of this kernel to link it again
+		uki="$(entry_field "$reused_entry" uki)"
+		info "Reusing ${boot_root}$uki"
+		cp "${boot_root}$uki" "$tmpdir/${uki##*/}"
+		uki="$tmpdir/${uki##*/}"
 	else
 		stage_initrd "$snapshot" "$subvol" "$kernel_version" "${src%/*}/initrd"
 		# A reused entry can have more than one initrd: the UKI has
@@ -2881,22 +2899,6 @@ install_distro_ukis()
 		return 1
 	}
 
-	# The packages decide the command line, in the UKI and in its
-	# addons.  The options of the files of the kernel command line
-	# that are not there are lost
-	local f known=" " param lost=()
-	for f in "${ukis[0]}" "${ukis[0]}.extra.d"/*.addon.efi; do
-		[ -e "$f" ] || continue
-		objcopy -O binary --only-section=.cmdline "$f" "$tmpdir/uki-cmdline" 2> /dev/null || continue
-		known+="$(< "$tmpdir/uki-cmdline") "
-	done
-	rm -f "$tmpdir/uki-cmdline"
-	while read -r param; do
-		[[ "$param" == root=* ]] || [[ "$known" == *" $param "* ]] || lost+=("$param")
-	done < <(cmdline_params "$(common_boot_options "$subvol")")
-	[ "${#lost[@]}" -eq 0 ] || \
-		warn "The UKI of $kernel_version does not have these options of the kernel command line: ${lost[*]}"
-
 	local uki variant addon extras several=""
 	[ "${#ukis[@]}" -eq 1 ] || several=1
 	for uki in "${ukis[@]}"; do
@@ -2912,19 +2914,19 @@ install_distro_ukis()
 	done
 }
 
-# The name of the addon with the rootflags of SUBVOL.  It changes with
+# The name of the addon with the command line CMDLINE.  It changes with
 # the command line and with the key that signs it, as "link" keeps the
 # file whose name is in the ESP already
-rootflags_addon_name()
+addon_name()
 {
 	local sum
-	read -r sum _ < <({ echo -n "rootflags=subvol=$1"; cat "$secureboot_certificate"; } | sha256sum)
-	echo "rootflags-${sum:0:16}.addon.efi"
+	read -r sum _ < <({ echo -n "$1"; cat "$secureboot_certificate"; } | sha256sum)
+	echo "cmdline-${sum:0:16}.addon.efi"
 }
 
 # The entry of the UKI of the kernel VERSION of SNAPSHOT (in SUBVOL),
 # made with "bootctl link": the UKI, the addons EXTRA..., and the addon
-# with the rootflags of the snapshot.  VARIANT is in the id of the entry,
+# of the entry (see `uki_addon_cmdline`).  VARIANT is in the id of the entry,
 # and in the title when SEVERAL variants are installed
 link_uki()
 {
@@ -2937,17 +2939,18 @@ link_uki()
 	entry_title_and_sort_key title sort_key "$snapshot" "$subvol" "$kernel_version"
 	[ -z "$several" ] || title="$title ($variant)"
 
-	# The addon of a snapshot is built once and serves every kernel
-	# (see `rootflags_addon_name`).  "link" gets a copy: the one in the
-	# ESP can go with the entry unlinked below, or with the space that
-	# is freed
-	local addon
-	if [ -n "$subvol" ]; then
-		addon="$tmpdir/$(rootflags_addon_name "$subvol")"
+	# The addon of the entry is built once and serves every kernel of
+	# the snapshot (see `addon_name`).  "link" gets a copy: the one in
+	# the ESP can go with the entry unlinked below, or with the space
+	# that is freed
+	local addon cmdline
+	cmdline="$(uki_addon_cmdline "$subvol")"
+	if [ -n "$cmdline" ]; then
+		addon="$tmpdir/$(addon_name "$cmdline")"
 		if [ -e "${boot_root}/$entry_token/${addon##*/}" ]; then
 			cp "${boot_root}/$entry_token/${addon##*/}" "$addon"
 		else
-			build_addon "rootflags=subvol=$subvol" "$addon"
+			build_addon "$cmdline" "$addon"
 		fi
 		set -- "$@" "$addon"
 	fi
@@ -8865,6 +8868,7 @@ status_config()
 		SECURE_BOOT - "yes" installs the shim, whatever the firmware does
 		UPDATE_NVRAM - "no" keeps sdbootutil out of the EFI variables
 		UKI - "yes" (distribution) or "local" UKIs instead of Type #1 entries
+		UKI_CMDLINE - "yes" adds the kernel command line of the system to the UKIs
 		LAST_WORKING_SNAPSHOTS - extra snapshots to keep in the prediction
 	EOF
 }
