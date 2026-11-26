@@ -5092,7 +5092,7 @@ select_entries_for_prediction()
 	# initrd.  They are left out: they still boot, but ask for the
 	# password.  Until there is an entry of a UKI they stay, or the
 	# next boot would have no prediction at all
-	if uki_selected && jq -e 'any(.[]; .uki)' "$entryfile" > /dev/null; then
+	if next_boot_uki; then
 		jq 'map(select(.uki))' < "$entryfile" > "${entryfile}.uki"
 		mv "${entryfile}.uki" "$entryfile"
 	fi
@@ -6599,6 +6599,50 @@ sync_pcrlock_policy()
 	info "Published the pcrlock policy made by systemd-pcrlock${unlocked[*]:+, without ${unlocked[*]} until the next boot}"
 }
 
+# Whether the next boot is the boot of a UKI: the UKIs are selected, and
+# there are entries of UKIs to predict (see `select_entries_for_prediction`)
+next_boot_uki()
+{
+	uki_selected && jq -e 'any(.[]; .uki)' "$entryfile" > /dev/null
+}
+
+# Whether the next boot is of another kind than this one: the boot of a
+# UKI, started by systemd-stub ("measured-os"), or of a kernel and an
+# initrd
+boot_kind_changes()
+{
+	local next="" this=""
+	if next_boot_uki; then
+		next=1
+	fi
+	if systemd-analyze condition 'ConditionSecurity=measured-os' &> /dev/null; then
+		this=1
+	fi
+	[ "$next" != "$this" ]
+}
+
+# systemd measures "os-separator" into PCRs 0-7, 9 and 12-14 when
+# systemd-stub starts the kernel ("measured-os"), so on the boots of a
+# UKI only, and before the devices are unlocked.  When the next boot is
+# of another kind than this one, its component gets a second variation,
+# empty, next to the one of the system: the policy accepts this boot and
+# the next one.  pcrlock joins the file of the system and this directory
+# in one component
+os_separator_variations()
+{
+	local dir=/var/lib/pcrlock.d/750-os-separator.pcrlock.d
+	local mask=/var/lib/pcrlock.d/750-os-separator.pcrlock
+	# From an earlier run of this boot.  `mask_unmatched_components`
+	# masks it again when the event log does not have it
+	rm -rf "$dir"
+	[ ! -e "$mask" ] || [ -s "$mask" ] || rm -f "$mask"
+	boot_kind_changes || return 0
+	info "The next boot is of another kind than this one (a UKI or not), predicting it with and without the os-separator"
+	mkdir -p "$dir"
+	# Named to go after the others, see systemd#36436
+	echo '{"records": []}' > "$dir/zz-none.pcrlock"
+}
+
 generate_tpm2_predictions_pcrlock()
 {
 	local pcrs="$FDE_SEAL_PCR_LIST"
@@ -6617,7 +6661,7 @@ generate_tpm2_predictions_pcrlock()
 	# the UKI instead.  As in `select_entries_for_prediction`: while
 	# the UKIs are selected and there are UKI entries to predict.  When
 	# the UKIs are no longer selected, PCR 9 is back in the policy
-	if [[ ",$pcrs," == *",9,"* ]] && uki_selected && jq -e 'any(.[]; .uki)' "$entryfile" > /dev/null; then
+	if [[ ",$pcrs," == *",9,"* ]] && next_boot_uki; then
 		info "The UKIs are selected, PCR 9 is left out of the policy"
 		pcrs="$(remove_pcr "$pcrs" 9)"
 		[ -z "$arg_strict" ] || \
@@ -6628,6 +6672,7 @@ generate_tpm2_predictions_pcrlock()
 	rm -rf "$tmpdir/pcrlock.d"
 	[ ! -d /var/lib/pcrlock.d ] || cp -R /var/lib/pcrlock.d "$tmpdir/pcrlock.d"
 	clean_pcrlock_d
+	os_separator_variations
 	rm -f "$tmpdir/esp-files"
 
 	# A component that fwupd unlocked before a firmware update (see

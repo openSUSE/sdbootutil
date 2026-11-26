@@ -2978,6 +2978,50 @@ t_pcrlock_addons_order()
 	return 0
 }
 
+# The kind of the next boot (a UKI or not) against the kind of this one:
+# systemd measures os-separator only on the boots of a UKI
+# shellcheck disable=SC2034,SC2329  # read and called by the sourced library
+t_boot_kind_changes()
+{
+	load
+	local entryfile="$workdir/kind-entries.json" UKI t_measured
+	systemd-analyze() { [ -n "$t_measured" ]; }
+	echo '[{"id": "t-commit_5.5.7.3.5-1-default.conf", "uki": "/t/u.efi"}]' > "$entryfile"
+
+	UKI=local t_measured=""
+	boot_kind_changes || fail "kernel and initrd, then a UKI: no change"
+	UKI=local t_measured=1
+	boot_kind_changes && fail "a UKI, then a UKI: a change"
+	UKI="" t_measured=1
+	echo '[{"id": "t-7.3.5-1-default-5.conf", "linux": "/t/linux"}]' > "$entryfile"
+	boot_kind_changes || fail "a UKI, then kernel and initrd: no change"
+	UKI="" t_measured=""
+	boot_kind_changes && fail "kernel and initrd, then kernel and initrd: a change"
+	return 0
+}
+
+# At a change of the kind of boot the os-separator gets an empty
+# variation, next to the one of the system, and a mask of an earlier
+# run goes.  Without a change, nothing of it is left
+# shellcheck disable=SC2034,SC2329  # read and called by the sourced library
+t_os_separator_variations()
+{
+	load
+	local d=/var/lib/pcrlock.d t_change=1
+	mkdir -p "$d"
+	scratch_dir "$d"
+	boot_kind_changes() { [ -n "$t_change" ]; }
+	: > "$d/750-os-separator.pcrlock"
+	os_separator_variations > /dev/null 2>&1
+	is "variation" "zz-none.pcrlock" "$(cd "$d/750-os-separator.pcrlock.d" && echo *)"
+	is "empty" '{"records": []}' "$(cat "$d/750-os-separator.pcrlock.d/zz-none.pcrlock")"
+	[ -e "$d/750-os-separator.pcrlock" ] && fail "the mask of an earlier run stays"
+	t_change=""
+	os_separator_variations > /dev/null 2>&1
+	[ -e "$d/750-os-separator.pcrlock.d" ] && fail "the variation stays"
+	return 0
+}
+
 # remove_pcr and policy_missing_pcrs work on the comma lists of PCRs
 # shellcheck disable=SC2034  # read by the sourced library
 t_pcr_lists()
@@ -3424,6 +3468,8 @@ done <<-'EOF'
 	t_pcrlock_addons_limit      the command lines of the addons stay inside the PolicyOR limit
 	t_pcrlock_addons_initrd     the initrd of an addon goes to PCR 12 after the command lines
 	t_pcrlock_addons_order      the addons are predicted in the order that systemd-stub loads them
+	t_boot_kind_changes         the next boot is of another kind (a UKI or not) than this one
+	t_os_separator_variations   at a change of the kind of boot, the os-separator gets an empty variation
 	t_linked_entry_ids          the entries of the UKIs of a kernel, one per variant
 	t_settle_uki_mode           the TPM2 slots decide the UKI mode in effect
 	t_rebind_uki                rebind_tpm2_slots makes the slot that enroll would make
