@@ -622,6 +622,51 @@ t_remove_kernel_default()
 	return 0
 }
 
+# unlink_replaced_entry removes the entries of the kernel of another
+# kind than the new one, but not the booted one, and moves the default
+# to the new one
+# shellcheck disable=SC2034,SC2329  # read and called by the sourced library
+t_unlink_replaced_entry()
+{
+	load
+	local boot_root="$workdir/esp" entry_token=t t_default t_selected
+	local e="$boot_root/loader/entries" k=7.3.5-1-default
+	local type1 local_uki generic virt
+	mkdir -p "$e"
+	type1="$(entry_conf_file "$k" 5)"
+	local_uki="t-commit_5.5.$k.conf" generic="t-commit_5.5.$k.generic.conf" virt="t-commit_5.5.$k.virt.conf"
+	get_default_entry() { echo "$t_default"; }
+	bli_efi_var_get() { echo "$t_selected"; }
+	bootctl_entries() { [ "$1" != unlink ] || rm -f "$e/$2"; }
+	set_default_entry() { echo "default $1" >> "$workdir/unlink-log"; }
+	t_entries() { touch "$e/$type1" "$e/$local_uki" "$e/$generic" "$e/$virt"; }
+	t_left() { (cd "$e" && printf '%s\n' * | sort | paste -sd ' '); }
+
+	t_entries; t_default="" t_selected=""
+	unlink_replaced_entry "$k" 5 "$type1"
+	is "kernel and initrd" "$type1" "$(t_left)"
+	t_entries
+	unlink_replaced_entry "$k" 5 "$local_uki"
+	is "local UKI" "$local_uki" "$(t_left)"
+	t_entries
+	unlink_replaced_entry "$k" 5 "$generic"
+	is "UKIs of the packages" "$generic $virt" "$(t_left)"
+
+	# The booted one stays, the default moves
+	t_entries; t_selected="$local_uki" t_default="$type1"
+	unlink_replaced_entry "$k" 5 "$generic"
+	is "booted" "$local_uki $generic $virt" "$(t_left)"
+	is "default" "default $generic" "$(cat "$workdir/unlink-log")"
+
+	# Also when the default is the booted one, that stays
+	rm -f "$workdir/unlink-log"
+	t_entries; t_selected="$type1" t_default="$type1"
+	unlink_replaced_entry "$k" 5 "$local_uki"
+	is "booted default" "$type1 $local_uki" "$(t_left)"
+	is "default of the booted" "default $local_uki" "$(cat "$workdir/unlink-log" 2> /dev/null)"
+	return 0
+}
+
 # entry_key: the spellings a boot loader can leave in
 # "LoaderEntrySelected", all reduced to the ID that `bootctl` reports.
 # systemd-boot writes that ID as it is; grub2-bls drops the ".conf"
@@ -3212,6 +3257,7 @@ done <<-'EOF'
 	t_entry_snapshot_id         entry_snapshot finds the entry without .conf or with a boot counter
 	t_update_entry_conf         update_entry_conf writes the options once, as they are
 	t_remove_kernel_default     remove_kernel changes the default entry only when it removed it
+	t_unlink_replaced_entry     the entries of another kind go, but the booted one, and the default moves
 	t_enroll_anchor             enroll: the anchor measures, and its slot is bound to PCR 15 at zero
 	t_enroll_after_anchor       enroll: a device of the initrd is bound to PCR 15 after the anchor
 	t_enroll_after_initrd       enroll: a device out of the initrd is bound to PCR 15 after the initrd
