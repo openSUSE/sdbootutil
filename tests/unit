@@ -2627,21 +2627,26 @@ t_pcrlock_addons_cmdline()
 }
 
 # The command lines of the addons go to PCR 12 for as many entries as
-# fit in the PolicyOR limit, like PCR 9 for the kernel entries
+# fit in the PolicyOR limit, like PCR 9 for the kernel entries.  An
+# entry with a missing addon is skipped, and the addons that are read
+# are tracked
 # shellcheck disable=SC2034,SC2329  # read and called by the sourced library
 t_pcrlock_addons_limit()
 {
 	load
-	local boot_root="$workdir/esp" esp_root="$workdir/esp" tmpdir="$workdir/tmp" entryfile="$workdir/entries"
+	local boot_root="$workdir/esp-limit" esp_root="$workdir/esp-limit" tmpdir="$workdir/tmp" entryfile="$workdir/entries"
 	mkdir -p "$boot_root" "$tmpdir"
+	touch "$boot_root/r.addon.efi"
 	scratch_dir /var/lib/pcrlock.d
-	jq -n '[range(6) | {uki: "/u\(.).efi", addons: [{localAddon: "/r.addon.efi", options: "rootflags=\(.)"}]}]' > "$entryfile"
+	jq -n '[{uki: "/u.efi", addons: [{localAddon: "/gone.addon.efi", options: "rootflags=gone"}]}]
+	       + [range(6) | {uki: "/u\(.).efi", addons: [{localAddon: "/r.addon.efi", options: "rootflags=\(.)"}]}]' > "$entryfile"
 	shift_component() { :; }
-	track_esp_file() { :; }
+	track_esp_file() { echo "${1##*/}" >> "$workdir/limit-tracked"; }
 	pcrlock_file() { :; }
 	pcrlock_addons_cmdline() { echo "$1" >> "$workdir/addons"; }
 	pcrlock_sdboot > /dev/null 2>&1
 	is "variations" "1 2 3 4" "$(paste -sd ' ' "$workdir/addons")"
+	grep -qx r.addon.efi "$workdir/limit-tracked" || fail "the addon is not tracked"
 	return 0
 }
 
@@ -2760,6 +2765,33 @@ t_crypttab_cpio()
 	dracut_crypttab() { echo "cr_root UUID=1111 none"; }
 	crypttab_cpio "$workdir/c.cpio"
 	cmp -s "$workdir/a.cpio" "$workdir/c.cpio" && fail "two crypttabs give the same archive"
+	return 0
+}
+
+# The initrd of an addon goes to PCR 12 after the command lines of the
+# addons, as the stub measures it, and an addon without one adds nothing
+# shellcheck disable=SC2034,SC2329  # read and called by the sourced library
+t_pcrlock_addons_initrd()
+{
+	load
+	local tmpdir="$workdir/tmp" d=/var/lib/pcrlock.d/710-kernel-cmdline-boot-loader.pcrlock.d
+	local pcrlock_cache="$workdir/addons-initrd-cache"
+	mkdir -p "$tmpdir"
+	scratch_dir /var/lib/pcrlock.d
+	mkdir -p "$d"
+	echo '{"records": [{"pcr": 12, "t": "cmdline"}]}' > "$d/addons-1.pcrlock"
+	echo "crypttab" > "$workdir/a.addon.efi.initrd"
+	objcopy() { if [ -e "$4.initrd" ]; then cp "$4.initrd" "$5"; else : > "$5"; fi; }
+	pcrlock() { local a o; for a; do [[ "$a" != --pcrlock=* ]] || o="${a#--pcrlock=}"; done; echo "{\"records\": [{\"pcr\": 12, \"t\": \"$(cat "${*: -1}")\"}]}" > "$o"; }
+	pcrlock_addons_initrd 1 "$workdir/a.addon.efi" "$workdir/b.addon.efi"
+	is "records" "12 cmdline|12 crypttab" "$(jq -r '.records[] | "\(.pcr) \(.t)"' "$d/addons-1.pcrlock" | paste -sd '|')"
+	pcrlock_addons_initrd 2 "$workdir/b.addon.efi"
+	[ -e "$d/addons-2.pcrlock" ] && fail "a variation for addons without an initrd"
+	# The same initrd again comes from the cache
+	pcrlock() { echo called >> "$workdir/addons-initrd-pcrlock"; return 1; }
+	pcrlock_addons_initrd 3 "$workdir/a.addon.efi"
+	is "cached" "12 crypttab" "$(jq -r '.records[] | "\(.pcr) \(.t)"' "$d/addons-3.pcrlock" | paste -sd '|')"
+	[ ! -e "$workdir/addons-initrd-pcrlock" ] || fail "measured again"
 	return 0
 }
 
@@ -3202,6 +3234,7 @@ done <<-'EOF'
 	t_pcrlock_uki_addons        the UKI is predicted with its addons, not the other extras
 	t_pcrlock_addons_cmdline    the command lines of the addons go to PCR 12 joined, as one event
 	t_pcrlock_addons_limit      the command lines of the addons stay inside the PolicyOR limit
+	t_pcrlock_addons_initrd     the initrd of an addon goes to PCR 12 after the command lines
 	t_linked_entry_ids          the entries of the UKIs of a kernel, one per variant
 	t_settle_uki_mode           the TPM2 slots decide the UKI mode in effect
 	t_rebind_uki                rebind_tpm2_slots makes the slot that enroll would make
