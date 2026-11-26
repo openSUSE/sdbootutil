@@ -1418,12 +1418,40 @@ t_vef_seed()
 	record_esp_file "$workdir/esp/token/7.2.3/linux-1"
 	[ ! -e "$esp_files" ] || fail "a writer created the record before the first prediction"
 
+
 	esp_track
 	echo "changed" > "$workdir/esp/token/7.2.3/initrd-1"
 	( verify_esp_files ) &> /dev/null || fail "the first prediction was refused"
 	is "seeded files" 3 "$(wc -l < "$esp_files")"
 	is "seeded as found" "$(sha256sum < "$workdir/esp/token/7.2.3/initrd-1" | cut -d' ' -f1)" \
 	   "$(esp_file_digest "$workdir/esp/token/7.2.3/initrd-1")"
+}
+
+# The first record has the UKI and the addons of an entry too, or the
+# next prediction refuses them as foreign files
+# shellcheck disable=SC2329  # called by the sourced library
+t_vef_seed_uki()
+{
+	esp_setup
+	mkdir -p "$workdir/esp/loader/addons"
+	echo "uki" > "$workdir/esp/token/u.efi"
+	echo "addon" > "$workdir/esp/token/cmdline-1.addon.efi"
+	echo "dps" > "$workdir/esp/loader/addons/t-dps.addon.efi"
+	echo "uki /token/u.efi" > "$workdir/esp/loader/entries/t-commit_5.5.7.2.3.conf"
+	bootctl_entries()
+	{
+		jq -n --arg path "$workdir/esp/loader/entries/t-commit_5.5.7.2.3.conf" \
+		   '[{"type": "type1", "path": $path, "uki": "/token/u.efi",
+		      "addons": [{"globalAddon": "/loader/addons/t-dps.addon.efi"}, {"localAddon": "/token/cmdline-1.addon.efi"}]}]'
+	}
+	rm -f "$tmpdir/esp-files"
+	track_esp_file "$workdir/esp/token/u.efi"
+	( verify_esp_files ) &> /dev/null || fail "the first prediction was refused"
+	local f
+	for f in token/u.efi token/cmdline-1.addon.efi loader/addons/t-dps.addon.efi; do
+		[ -n "$(esp_file_digest "$workdir/esp/$f")" ] || fail "$f is not in the record"
+	done
+	return 0
 }
 
 t_vef_unchanged()
@@ -3319,6 +3347,7 @@ done <<-'EOF'
 	t_iee_update                install_extra_entries copies only the files that changed
 	t_efk_counter               esp_file_key drops the boot counter of an entry, and nothing else
 	t_vef_seed                  verify_esp_files records the ESP on the first prediction
+	t_vef_seed_uki              the first record has the UKIs and the addons too
 	t_vef_unchanged             verify_esp_files accepts recorded files, also after a boot counter rename
 	t_vef_modified              verify_esp_files refuses an entry changed outside sdbootutil
 	t_vef_new_file              verify_esp_files refuses a file that sdbootutil did not install

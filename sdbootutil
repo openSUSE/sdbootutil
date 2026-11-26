@@ -2007,7 +2007,8 @@ seed_esp_files()
 		echo "${esp_root}/loader/loader.conf"
 		echo "${esp_root}${esp_dst}/grubenv"
 		bootctl_entries list --json=short | \
-			jq -r --arg root "$boot_root" '.[] | select(.type == "type1") | .path, ($root + (.linux // "")), ($root + .initrd[]?), ($root + (.devicetree // ""))'
+			jq -r --arg root "$boot_root" '.[] | select(.type == "type1") | .path, ($root + (.linux // "")), ($root + .initrd[]?), ($root + (.devicetree // "")),
+					($root + (.uki // "")), (.addons[]? | $root + (.globalAddon // .localAddon))'
 	)
 }
 
