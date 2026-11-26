@@ -5290,6 +5290,30 @@ pcrlock_addons_cmdline()
 	pcrlock_loader_cmdline "$*" "$dir/addons-$suffix.pcrlock"
 }
 
+# The initrds of the addons FILE... of a UKI entry, in PCR 12 after the
+# command lines, as the stub measures them: added to the variation
+# SUFFIX of `pcrlock_addons_cmdline`
+pcrlock_addons_initrd()
+{
+	local suffix="$1"
+	shift
+	local out=/var/lib/pcrlock.d/710-kernel-cmdline-boot-loader.pcrlock.d/addons-$suffix.pcrlock
+	local file locks=() i=0
+	for file in "$@"; do
+		objcopy -O binary --only-section=.initrd "$file" "$tmpdir/addon-initrd" 2> /dev/null || continue
+		[ -s "$tmpdir/addon-initrd" ] || continue
+		i=$((i+1))
+		pcrlock_file lock-raw "$tmpdir/addon-initrd-$i.pcrlock" "$tmpdir/addon-initrd" --pcr=12
+		locks+=("$tmpdir/addon-initrd-$i.pcrlock")
+	done
+	rm -f "$tmpdir/addon-initrd"
+	[ "$i" -gt 0 ] || return 0
+	[ -e "$out" ] || echo '{"records": []}' > "$out"
+	jq --slurp '{"records": ([.[].records[]])}' "$out" "${locks[@]}" > "$out.new"
+	mv "$out.new" "$out"
+	rm "${locks[@]}"
+}
+
 pcrlock_grub2_bls_kernel_initrd_cmdline_initrd()
 {
 	local linux="$1"
@@ -5513,8 +5537,22 @@ pcrlock_sdboot()
 	# each addon into PCR 12 instead, and nothing without addons.
 	# PCR 9 cannot be predicted for a UKI (see
 	# `generate_tpm2_predictions_pcrlock`)
-	local addons=()
-	while IFS=$'\t' read -r -a addons; do
+	# The initrds of the addons go after their command lines
+	local addons=() files=()
+	while IFS=$'\t' read -r -a addons && IFS=$'\t' read -r -a files; do
+		# Like the UKIs above: the addons must be in the ESP, and are
+		# tracked, as their content goes in the policy
+		missing=
+		for file in "${files[@]}"; do
+			[ -f "${boot_root}$file" ] || missing="$file"
+		done
+		[ -z "$missing" ] || {
+			info "Missing ${boot_root}$missing, ignoring entry for prediction"
+			continue
+		}
+		for file in "${files[@]}"; do
+			track_esp_file "${boot_root}$file"
+		done
 		n=$((n+1))
 		# Like PCR 9 above, but for PCR 12
 		[ "$n" -le "${variation_limit[710-kernel-cmdline-boot-loader]}" ] || {
@@ -5522,7 +5560,9 @@ pcrlock_sdboot()
 			continue
 		}
 		pcrlock_addons_cmdline "$n" "${addons[@]}"
-	done < <(jq --raw-output '.[] | select(.uki) | [.addons[]?.options // empty] | join("\t")' "$entryfile")
+		pcrlock_addons_initrd "$n" "${files[@]/#/$boot_root}"
+	done < <(jq --raw-output '.[] | select(.uki) | ([.addons[]?.options // empty] | join("\t")),
+						([.addons[]? | .globalAddon // .localAddon] | join("\t"))' "$entryfile")
 
 	# Generate variation for 710-kernel-cmdline-initrd-entry
 	# component that contains the current cmdline and the current
