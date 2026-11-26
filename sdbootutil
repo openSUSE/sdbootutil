@@ -944,9 +944,9 @@ dracut_crypttab()
 			fi
 			case "$device" in
 				UUID=*) uuid="${device#UUID=}" ;;
-				*) uuid="$(cryptsetup luksUUID "$device" 2> /dev/null)" || continue ;;
+				*) uuid="$(cryptsetup luksUUID "$(device_path "$device")" 2> /dev/null)" ;;
 			esac
-			[[ "$uuids" == *" $uuid "* ]] || continue
+			[ -n "$uuid" ] && [[ "$uuids" == *" $uuid "* ]] || continue
 		fi
 		echo "$line"
 	done < /etc/crypttab
@@ -7421,25 +7421,33 @@ in_lockout()
 	TPM2TOOLS_TCTI="device:/dev/tpmrm0" tpm2_getcap properties-variable | grep -q 'inLockout: *1'
 }
 
-# The device number of "$1" into the variable named "$2", empty when
-# it is not a block device.  The specifications are the four that
-# systemd-cryptsetup-generator resolves (crypttab(5) documents only
-# "UUID="), and like it UUID and PARTUUID go through /dev/disk/by-*.
-# Remembered for the run, as /etc/crypttab is matched against every
-# tracked device
+# The path of the device "$1" of /etc/crypttab.  The specifications are
+# the four that systemd-cryptsetup-generator resolves (crypttab(5)
+# documents only "UUID="), and like it UUID and PARTUUID go through
+# /dev/disk/by-*
+device_path()
+{
+	local dev="$1"
+	case "$dev" in
+		UUID=*) dev="/dev/disk/by-uuid/${dev#UUID=}" ;;
+		PARTUUID=*) dev="/dev/disk/by-partuuid/${dev#PARTUUID=}" ;;
+		LABEL=*|PARTLABEL=*) dev="$(blkid --list-one --output device --match-token "$dev")" ;;
+	esac
+	echo "$dev"
+}
+
+# The device number of "$1" (see `device_path`) into the variable named
+# "$2", empty when it is not a block device.  Remembered for the run, as
+# /etc/crypttab is matched against every tracked device
 declare -gA device_numbers
 device_number()
 {
 	local name="$1"
 	local -n dn_number="${2:?}"
-	local dev="$name"
+	local dev
 
 	if [ -z "${device_numbers["$name"]+set}" ]; then
-		case "$dev" in
-			UUID=*) dev="/dev/disk/by-uuid/${dev#UUID=}" ;;
-			PARTUUID=*) dev="/dev/disk/by-partuuid/${dev#PARTUUID=}" ;;
-			LABEL=*|PARTLABEL=*) dev="$(blkid --list-one --output device --match-token "$dev")" ;;
-		esac
+		dev="$(device_path "$name")"
 		# A name that does not resolve into a block device is not
 		# the same device as anything else.  Without this any two
 		# of them would match, with an empty device number, or

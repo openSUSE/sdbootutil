@@ -2640,10 +2640,15 @@ t_dracut_crypttab()
 	cr_late UUID=3333 none tpm2-device=auto
 
 	cr_byuuid UUID=$luks_uuid none
+	cr_bylabel LABEL=data none
+	cr_otherlabel LABEL=other none
 	EOF
 	mountpoint -q /etc/crypttab || mount --bind "$workdir/crypttab" /etc/crypttab
 	dracut() { echo "rd.driver.pre=btrfs rd.luks.uuid=luks-$luks_uuid root=UUID=4444"; }
-	is "lines" "cr_swap $dev none tpm2-device=auto|cr_root UUID=1111 none x-initrd.attach,tpm2-device=auto|cr_force UUID=2222 none force|cr_byuuid UUID=$luks_uuid none" \
+	# Not $dev in the stub: `device_path` has a local of that name
+	local t_loop="$dev"
+	blkid() { [ "${*: -1}" != LABEL=data ] || echo "$t_loop"; }
+	is "lines" "cr_swap $dev none tpm2-device=auto|cr_root UUID=1111 none x-initrd.attach,tpm2-device=auto|cr_force UUID=2222 none force|cr_byuuid UUID=$luks_uuid none|cr_bylabel LABEL=data none" \
 		"$(dracut_crypttab | paste -sd '|')"
 
 	# dracut is asked only for a line without "x-initrd.attach" or
