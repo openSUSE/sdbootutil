@@ -772,6 +772,32 @@ uki_mode_text()
 	esac
 }
 
+# UKI_CMDLINE, in words.  With "no", the options of the kernel command
+# line that the UKIs do not have.  One by one, as the order and the
+# values that override others cannot be known here
+uki_cmdline_text()
+{
+	[ "$UKI_CMDLINE" = "no" ] || {
+		echo "yes, in the addon of each entry"
+		return 0
+	}
+	local known=" ro " uki f param lost=()
+	if [ "$UKI" = "yes" ]; then
+		known=" "
+		uki="$(compgen -G "/usr/lib/modules/$(uname -r)/vmlinuz-*.efi" | head -n 1)"
+		for f in ${uki:+"$uki" "$uki".extra.d/*.addon.efi}; do
+			[ -e "$f" ] || continue
+			objcopy -O binary --only-section=.cmdline "$f" "$tmpdir/uki-cmdline" 2> /dev/null || continue
+			known+="$(< "$tmpdir/uki-cmdline") "
+		done
+		rm -f "$tmpdir/uki-cmdline"
+	fi
+	while read -r param; do
+		[[ "$param" == root=* ]] || [[ "$param" == rootflags=* ]] || [[ "$known" == *" $param "* ]] || lost+=("$param")
+	done < <(cmdline_params "$(kernel_cmdline "")")
+	echo "no${lost[*]:+, not used: ${lost[*]}}"
+}
+
 # With UKI="yes" each kernel needs its UKI from the distribution,
 # /usr/lib/modules/<version>/vmlinuz-<variant>.efi.  sdbootutil cannot
 # install the package, so it prints the kernels that have none.  The
@@ -9032,13 +9058,14 @@ status_boot()
 		local missing
 		missing="$(uki_missing_kernels | paste -sd ' ')"
 		status_row "UKI files" "${missing:+missing for }${missing:-present for every kernel}"
+	fi
+	# The addon of each entry, signed with the local key, has the rest
+	# (see `uki_addon_cmdline`)
+	if uki_selected; then
 		local problem
 		problem="$(dps_root_problem)"
-		status_row "Root discovery" "${problem:+no, }${problem:-yes}"
-		[ -z "$problem" ] || echo "  The kernels use the kernel and the initrd: the UKIs have no \"root=\""
-	fi
-	# With UKI="yes" the local key signs the addon of the snapshot
-	if uki_selected; then
+		status_row "Root discovery" "${problem:-yes}${problem:+, so $(dps_addon_path) has \"root=\" and the crypttab}"
+		status_row "Command line" "$(uki_cmdline_text)"
 		status_row "UKI key" "$([ -e "$credstore/secureboot-private-key.pem" ] && echo "$secureboot_certificate" || echo "not made yet")"
 		[ "$UKI" != "local" ] || ! grep -qs "^[^#]*tpm2-device" /etc/crypttab || \
 			status_row "PCR 11 key" "$([ -e "$credstore/tpm2-pcr-initrd-private-key.pem" ] && echo "$pcr_public_key" || echo "not made yet")"
