@@ -213,7 +213,7 @@ _/etc/sysconfig/bootloader_::
 *LOADER_TYPE*:::: *systemd-boot* or *grub2-bls*.
 *SECURE_BOOT*:::: *yes* installs shim.
 *UPDATE_NVRAM*:::: *no* keeps sdbootutil out of the EFI variables.
-*UKI*:::: *yes* boots the UKIs of the distribution, *local* builds them in this system, and *no* boots a kernel and an initrd.  Only for systemd-boot.
+*UKI*:::: *yes* boots the UKIs of the distribution, *local* builds them in this system, and *no* boots a kernel and an initrd (see *Unified kernel images*).
 
 _/etc/default/sdbootutil_::
 sdbootutil makes this file the first time it installs the boot loader.
@@ -224,6 +224,7 @@ _/etc/default/fde-tools_ and _/etc/sysconfig/fde-tools_.
 *ESP_FREE_SPACE*:::: Free space to keep in the ESP, in percent (default 10).
 *DEVICETREE_SOURCE*:::: Device tree file to add to the entries.
 *LAST_WORKING_SNAPSHOTS*:::: Extra snapshots to keep in the TPM2 predictions.
+*UKI_CMDLINE*:::: *yes* (the default) adds the kernel command line of the system to the UKIs.  *no* adds only the snapshot.
 
 _/etc/crypttab_::
 The encrypted devices.  A device with the option *x-sdbootutil.ignore*
@@ -260,6 +261,48 @@ one with the same name in _/usr/lib_, and an empty one disables it.
 *sdbootutil-enroll.service*:: Enrolls the encrypted devices at the first boot, with the secrets that the installer left.
 *systemd-pcrlock@.service*:: Calls *sync-pcrlock-policy* after fwupd changed the policy.
 
+== Unified kernel images
+
+A unified kernel image (UKI) is one EFI file with the kernel, the
+initrd and the command line.  *UKI* in _/etc/sysconfig/bootloader_
+selects them.  With *yes*, sdbootutil boots the UKIs of the kernel
+packages.  With *local*, it builds them in this system with dracut,
+and signs them with its own key.  Only systemd-boot can boot them.
+With grub2-bls, sdbootutil warns and boots a kernel and an initrd.
+
+A UKI knows nothing about the disks.  So one UKI can boot every
+snapshot, and the disks are named in addons.  An addon is a small
+signed EFI file that adds options to the command line.  systemd-boot
+loads it with the UKI.  There are two kinds:
+
+* Each boot entry has its own addon.  It has the snapshot
+  (*rootflags=*), and with *UKI_CMDLINE=yes* also the options of
+  _/etc/kernel/cmdline_.
+* The boot can find the root by itself when the root partition has
+  the type of the Discoverable Partitions Specification (DPS).  When
+  it does not, one more addon is shared by all the UKIs:
+  _/loader/addons/<entry token>-dps.addon.efi_ in the ESP.  It has
+  *root=*, and an initrd with the lines of _/etc/crypttab_ that the
+  boot needs.
+
+sdbootutil writes the addons again when their content changes.  This
+happens when you run *update-all-entries*, *add-kernel*, *mkinitrd*
+or *enroll*.
+
+When the TPM2 is enrolled, a change of *UKI* takes effect when you
+enroll the TPM2 again, with *enroll --method tpm2* (or *tpm2+pin*).
+The TPM2 slots are made for one kind of boot entry, and *enroll* makes
+them again for the new one.  It changes the entries of the snapshot
+that is running.  The entries of the other snapshots keep their old
+kind.  They still boot, but the TPM2 does not open the disks for them,
+so they ask for the password.  To change them, run *add-all-kernels*
+with the number of the snapshot.
+
+With Secure Boot, shim must know the key that signs the UKIs and the
+addons.  The UKIs of the packages are signed by the distribution.
+With *UKI=local*, sdbootutil imports its certificate in MOK (see
+*Troubleshooting*).
+
 == Examples
 
 Show the boot status:
@@ -282,11 +325,21 @@ Boot snapshot 42 next time:
 sdbootutil set-default-snapshot 42
 ----
 
-Change the kernel command line of all entries:
+Change the kernel command line of all entries.  For the UKIs, this
+writes the addons of their entries again:
 
 ----
 echo "quiet splash" >> /etc/kernel/cmdline
 sdbootutil update-all-entries
+----
+
+After a change in _/etc/crypttab_, for example a new encrypted device,
+build the initrds again.  The initrd must know the devices that it
+opens.  For the UKIs, this also writes the addon of the root again,
+when there is one:
+
+----
+sdbootutil mkinitrd
 ----
 
 Open the disks with the TPM2 and a PIN.  sdbootutil asks for the PIN
@@ -439,7 +492,9 @@ https://github.com/openSUSE/sdbootutil/issues.
 _/var/lib/sdbootutil/_:: State: the files installed in the ESP and the hashes of the last TPM2 policy.
 _/var/lib/pcrlock.d/_:: The TPM2 measurements that *systemd-pcrlock* uses.
 _/var/lib/systemd/pcrlock.json_:: The TPM2 policy.  A copy goes to the ESP.
-_/etc/kernel/secureboot-certificate.pem_:: The certificate that signs the UKIs.
+_/etc/kernel/secureboot-certificate.pem_:: The certificate that signs the UKIs and the addons.
+_<ESP>/loader/addons/<entry token>-dps.addon.efi_:: The addon of the root, shared by all the UKIs, when the boot cannot find the root by itself.
+_/var/lib/sdbootutil/uki-etc/_:: The empty _/etc/crypttab_ that goes in the initrd of a local UKI.
 _/etc/systemd/tpm2-pcr-initrd-public-key.pem_:: The public key of the PCR 11 policy.
 _/etc/credstore.encrypted/_:: The private keys, encrypted.
 _/run/sdbootutil/_:: Lock file and state of the running boot.
