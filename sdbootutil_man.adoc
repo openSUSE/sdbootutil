@@ -278,12 +278,14 @@ loads it with the UKI.  There are two kinds:
 * Each boot entry has its own addon.  It has the snapshot
   (*rootflags=*), and with *UKI_CMDLINE=yes* also the options of
   _/etc/kernel/cmdline_.
-* The boot can find the root by itself when the root partition has
-  the type of the Discoverable Partitions Specification (DPS).  When
-  it does not, one more addon is shared by all the UKIs:
-  _/loader/addons/<entry token>-dps.addon.efi_ in the ESP.  It has
-  *root=*, and an initrd with the lines of _/etc/crypttab_ that the
-  boot needs.
+* One more addon is shared by all the UKIs:
+  _/loader/addons/<entry token>-dps.addon.efi_ in the ESP.  It has an
+  initrd with the lines of _/etc/crypttab_ that the boot needs, as the
+  initrd of a UKI has none.  The boot can find the root by itself when
+  the root partition has the type of the Discoverable Partitions
+  Specification (DPS).  When it does not, the addon also has *root=*.
+  With a DPS root, the addon is only there when the initrd must open
+  other devices too.
 
 sdbootutil writes the addons again when their content changes.  This
 happens when you run *update-all-entries*, *add-kernel*, *mkinitrd*
@@ -335,8 +337,7 @@ sdbootutil update-all-entries
 
 After a change in _/etc/crypttab_, for example a new encrypted device,
 build the initrds again.  The initrd must know the devices that it
-opens.  For the UKIs, this also writes the addon of the root again,
-when there is one:
+opens.  For the UKIs, this also writes the shared addon again:
 
 ----
 sdbootutil mkinitrd
@@ -493,7 +494,7 @@ _/var/lib/sdbootutil/_:: State: the files installed in the ESP and the hashes of
 _/var/lib/pcrlock.d/_:: The TPM2 measurements that *systemd-pcrlock* uses.
 _/var/lib/systemd/pcrlock.json_:: The TPM2 policy.  A copy goes to the ESP.
 _/etc/kernel/secureboot-certificate.pem_:: The certificate that signs the UKIs and the addons.
-_<ESP>/loader/addons/<entry token>-dps.addon.efi_:: The addon of the root, shared by all the UKIs, when the boot cannot find the root by itself.
+_<ESP>/loader/addons/<entry token>-dps.addon.efi_:: The addon shared by all the UKIs, with the crypttab of the initrd, and *root=* when the boot cannot find the root by itself.
 _/var/lib/sdbootutil/uki-etc/_:: The empty _/etc/crypttab_ that goes in the initrd of a local UKI.
 _/etc/systemd/tpm2-pcr-initrd-public-key.pem_:: The public key of the PCR 11 policy.
 _/etc/credstore.encrypted/_:: The private keys, encrypted.
