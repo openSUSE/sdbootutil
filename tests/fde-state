@@ -4,41 +4,42 @@
 #
 # Capture and check the boot and FDE state of a running system.
 #
-# Two properties decide whether a machine still comes up and still
-# opens its disks.  Neither is visible from a single command, and both
-# break silently -- the report arrives at the firmware prompt, one
-# reboot too late:
+# Two properties decide if a machine still boots and still opens its
+# disks.  No single command shows them.  Both break without any
+# message.  The user only sees the failure at the firmware prompt, one
+# reboot too late.  The two properties are:
 #
-#   I1  ESP consistency.  Every registered entry points at a kernel and
-#       an initrd, or a UKI and its addons, that are present, no
-#       snapshot that must boot has lost its entry, nothing is left
-#       behind in the ESP that no entry refers to, and the reserve of
-#       free space is respected.
+#   I1  ESP consistency.  Every entry points at files that are present:
+#       a kernel and an initrd, or a UKI and its addons.  Every snapshot
+#       that must boot still has its entry.  The ESP has no file left
+#       that no entry refers to.  The ESP keeps its reserve of free
+#       space.
 #
-#   I2  Unlock continuity.  Every device that the TPM2 is supposed to
-#       open is still covered by a policy that matches the PCRs as they
-#       are now, and the devices that the initrd unlocks are bound to
-#       PCR 15, so their slots do not open once the initrd is gone.
+#   I2  Unlock continuity.  Every device that the TPM2 must open is
+#       still covered by a policy.  This policy matches the current
+#       PCRs.  The devices that the initrd opens are bound to PCR 15.
+#       So their slots do not open after the initrd is gone.
 #
-# It deliberately does NOT use sdbootutil.  A harness written in terms
-# of the tool under test cannot detect that tool regressing: whatever
-# the tool believes about the system it would report back unchanged.
-# The state is read from the system itself -- bootctl, cryptsetup,
-# snapper, systemd-pcrlock's on-disk policy, sysfs and /etc/crypttab.
+# This script does NOT use sdbootutil, on purpose.  A test that uses
+# the tool under test cannot find a regression in that tool.  It would
+# only repeat what the tool believes about the system.  So the state is
+# read from the system itself: bootctl, cryptsetup, snapper, the policy
+# file of systemd-pcrlock, sysfs and /etc/crypttab.
 #
-# It prints no secret: LUKS tokens contribute their structure (type,
-# keyslots, bound PCRs, the public policy digest) and never the sealed
-# blob, so a capture is safe to attach to a bug report.
+# It prints no secret.  For a LUKS token it prints only the structure:
+# the type, the keyslots, the bound PCRs and the public policy digest.
+# It never prints the sealed blob.  So a capture is safe to attach to a
+# bug report.
 #
 # Usage:
 #   fde-state capture           Print the normalized state, one key per line
 #   fde-state check             Verify I1 and I2, exit 1 on any failure
 #   fde-state diff OLD NEW      Compare two captures, ignoring volatile keys
 #
-# A capture is sorted "key=value" text so that plain diff(1) is the
-# report.  Keys under "vol/" hold values that legitimately change on
-# every boot or every write (PCR contents, free space); `diff` drops
-# them, they are captured only to make a report self-contained.
+# A capture is sorted "key=value" text, so plain diff(1) is the report.
+# Keys under "vol/" have values that change on every boot or every
+# write, like the PCR values or the free space.  `diff` ignores them.
+# They are captured only to make a report complete.
 
 set -euo pipefail
 export LC_ALL=C
@@ -66,15 +67,15 @@ init()
 	[ ! -d /.snapshots ] || ! command -v snapper > /dev/null || have_snapshots=1
 }
 
-# The Boot Loader Interface variables, read straight from sysfs rather
-# than through bootctl, so that a bootloader which reports them wrongly
-# is visible here instead of being normalized away
+# Read a Boot Loader Interface variable directly from sysfs, not with
+# bootctl.  bootctl can hide a value that the boot loader reports
+# wrongly.  Here the wrong value stays visible
 efi_var()
 {
 	local f="/sys/firmware/efi/efivars/${1:?}-4a67b082-0a4c-41cf-b6c7-440b29bb8c4f"
 	[ -r "$f" ] || return 0
-	# The first four bytes are the variable attributes, the rest is
-	# UTF-16LE
+	# The first four bytes are the attributes of the variable.  The
+	# rest is the value in UTF-16LE
 	dd "if=$f" bs=2 skip=2 status=none | tr -d '\0'
 }
 
@@ -96,7 +97,7 @@ capture_esp()
 	local f rel sum
 	while IFS= read -r -d '' f; do
 		rel="${f#"$esp"}"
-		# Rewritten by the boot loader on every boot by design
+		# The boot loader rewrites this file on every boot, by design
 		[ "$rel" != "/loader/random-seed" ] || continue
 		read -r sum _ < <(sha256sum "$f")
 		emit "esp/file$rel" "$sum"
@@ -105,11 +106,11 @@ capture_esp()
 
 capture_entries()
 {
-	# "isSelected" is not captured here: bootctl builds it by
-	# matching the entry ID against LoaderEntrySelected, and
-	# grub2-bls writes that variable without the ".conf" suffix, so
-	# it is always false there.  It goes under vol/ instead, and
-	# becomes a real key once grub2-bls is fixed
+	# "isSelected" is not captured here.  bootctl sets it when the
+	# entry ID matches LoaderEntrySelected.  grub2-bls writes that
+	# variable without the ".conf" suffix, so with grub2-bls it is
+	# always false.  So LoaderEntrySelected goes under vol/ instead.
+	# It can become a real key once grub2-bls is fixed
 	entries_json | jq -r '
 		.[] | select(.type == "type1") |
 		"entry/\(.id)/title=\(.showTitle // .title // "")",
@@ -132,9 +133,9 @@ capture_loader()
 	emit "loader/LoaderConfigTimeout" "$(efi_var LoaderConfigTimeout)"
 	emit "loader/LoaderConfigTimeoutOneShot" "$(efi_var LoaderConfigTimeoutOneShot)"
 
-	# The two on-disk fallbacks.  systemd-boot reads loader.conf,
-	# grub2-bls reads grubenv instead; capturing both is how a move
-	# from one to the other shows up in a diff
+	# The two configuration files on disk.  systemd-boot reads
+	# loader.conf.  grub2-bls reads grubenv instead.  Both are
+	# captured, so a move from one to the other shows in a diff
 	local key value
 	if [ -r "$esp/loader/loader.conf" ]; then
 		while read -r key value; do
@@ -161,8 +162,8 @@ capture_kernels()
 	for d in /usr/lib/modules/*/; do
 		v="${d%/}"
 		v="${v##*/}"
-		# A modules directory without a kernel image is not a
-		# kernel that anything can boot
+		# A modules directory without a kernel image cannot boot,
+		# so it is not counted as a kernel
 		[ -e "$d/vmlinuz" ] || continue
 		emit "kernel/$v" "present"
 	done
@@ -172,9 +173,9 @@ capture_snapshots()
 {
 	[ -n "$have_snapshots" ] || return 0
 
-	# --no-dbus so that a capture works while snapperd is busy, and
-	# --disable-used-space because the figure is expensive and
-	# changes on its own
+	# --no-dbus makes the capture work while snapperd is busy.
+	# --disable-used-space skips the used space.  It is slow to
+	# compute, and it changes on its own
 	snapper --jsonout --no-dbus list --disable-used-space 2> /dev/null | jq -r '
 		.root[] |
 		"snapshot/\(.number)/type=\(.type // "")",
@@ -193,15 +194,15 @@ capture_crypttab()
 		[[ "$name" = \#* ]] && continue
 		emit "crypt/$name/device" "$dev"
 		emit "crypt/$name/keyfile" "$key"
-		# Sorted, so that rewriting crypttab with the same
-		# options in another order is not reported as a change
+		# The options are sorted.  So the same options in another
+		# order are not reported as a change
 		emit "crypt/$name/options" \
 			"$(tr ',' '\n' <<<"${opts:-}" | sed '/^$/d' | sort | paste -sd, -)"
 	done < /etc/crypttab
 }
 
-# Every LUKS2 device named by /etc/crypttab, keyed by UUID so that the
-# key survives a device rename
+# Every LUKS2 device in /etc/crypttab.  The key is the UUID, so it
+# stays the same when the device is renamed
 capture_luks()
 {
 	[ -e /etc/crypttab ] || return 0
@@ -220,11 +221,11 @@ capture_luks()
 		fi
 		[ -n "$uuid" ] && [ -b "$dev" ] || continue
 
-		# Structure only.  "tpm2-blob", "tpm2_srk" and
-		# "tpm2_pcrlock_nv" are deliberately left out: they are
-		# sealed material, and this output is meant to be
-		# shareable.  "tpm2-policy-hash" is a public digest and
-		# is precisely what changes when the policy is rewritten
+		# Only the structure is captured.  "tpm2-blob", "tpm2_srk"
+		# and "tpm2_pcrlock_nv" are left out on purpose.  They are
+		# sealed material, and this output must be safe to share.
+		# "tpm2-policy-hash" is a public digest.  It is kept
+		# because it changes when the policy is rewritten
 		cryptsetup luksDump --dump-json-metadata "$dev" 2> /dev/null | jq -r --arg u "$uuid" '
 			"luks/\($u)/keyslots=\(.keyslots | keys | join(" "))",
 			(.tokens // {} | to_entries[] |
@@ -237,12 +238,12 @@ capture_luks()
 	done < /etc/crypttab
 }
 
-# A pcrlock component is either "X.pcrlock" or a directory
-# "X.pcrlock.d" of variations, and either form can live in any of the
-# five search directories.  What matters for a diff is which PCRs it
-# claims, how many variations it has, and a fingerprint of its digests
-# -- the same three things that decide whether the policy has to be
-# rebuilt
+# A pcrlock component is a file "X.pcrlock", or a directory
+# "X.pcrlock.d" with one file per variation.  Both forms can be in any
+# of the five search directories.  For each component, the capture has
+# three things: its PCRs, its number of variations, and a fingerprint
+# of its digests.  These are the same three things that decide if the
+# policy must be rebuilt
 capture_pcrlock()
 {
 	local d name f sum
@@ -265,7 +266,7 @@ capture_pcrlock()
 				files=("$f")
 			else
 				# An empty file is a mask, not a
-				# component, and jq cannot read it
+				# component.  jq cannot read it
 				emit "pcrlock/$name/mask" "$d"
 				continue
 			fi
@@ -353,17 +354,15 @@ skip()
 	echo "SKIP $*"
 }
 
-# Reported, but not counted as a failure.  For states that are wrong to
-# ignore and also wrong to gate on, because they resolve by themselves
+# Report a check, but do not count it as a failure.  This is for states
+# that must not be ignored.  But they must not fail the test either,
+# because they resolve by themselves
 warn_check()
 {
 	checks=$((checks + 1))
 	echo "WARN $*"
 }
 
-# I1.1 -- every entry points at files that are there.  An entry whose
-# kernel or initrd is missing is an entry that drops the machine into
-# the firmware
 # The files of an entry.  An entry has a kernel and initrds, or a UKI.
 # It can also have addons.  bootctl lists all the addons in "extras":
 # the ones of the entry and the shared ones
@@ -375,6 +374,9 @@ jq_entry_files='def entry_files:
 # that bootctl builds from its addons
 jq_entry_cmdline='def entry_cmdline: .options // .cmdline // "";'
 
+# I1.1 -- every entry points at files that are present.  When the
+# kernel or the initrd of an entry is missing, that entry stops the
+# boot at the firmware
 check_entry_files()
 {
 	local id path missing n=0
@@ -396,9 +398,10 @@ check_entry_files()
 	fi
 }
 
-# I1.2 -- nothing is left behind.  Files under an entry token directory
-# that no entry refers to are what a broken refcount looks like: they
-# consume the ESP and `bootctl cleanup` no longer knows about them
+# I1.2 -- no file is left behind.  This checks the files under an entry
+# token directory.  A file that no entry refers to is the sign of a
+# broken reference count.  Such files take space in the ESP, and
+# `bootctl cleanup` does not know about them anymore
 check_no_orphans()
 {
 	local -A referenced=()
@@ -444,10 +447,9 @@ check_no_orphans()
 	fi
 }
 
-# I1.3 -- the snapshots that have to boot still can.  Checked through
-# the rootflags in the options rather than by parsing the entry name,
-# because the name format is exactly the kind of thing a migration
-# changes
+# I1.3 -- the snapshots that must boot still can boot.  The check looks
+# at the rootflags in the options, not at the entry name.  This is
+# because a migration can change the format of the name
 check_snapshot_coverage()
 {
 	if [ -z "$have_snapshots" ]; then
@@ -465,9 +467,9 @@ check_snapshot_coverage()
 	options="$(entries_json | jq -r "$jq_entry_cmdline"'.[] | select(.type == "type1") | entry_cmdline')"
 
 	local n missing="" checked=0
-	# The default snapshot is what the next boot picks, the active
-	# one is what is running.  Losing either is unrecoverable
-	# without a rescue medium
+	# The next boot picks the default snapshot.  The active snapshot
+	# is the one running now.  If the entry of either one is lost,
+	# only a rescue medium can recover the system
 	while read -r n; do
 		[ -n "$n" ] || continue
 		checked=$((checked + 1))
@@ -484,12 +486,12 @@ check_snapshot_coverage()
 	fi
 }
 
-# I1.5 -- one entry per bootable thing.  Two entries for the same kernel
-# in the same subvolume are not harmless redundancy: they mean a naming
-# change was not adopted, so the ESP grows a second parallel set on
-# every update and the menu offers the same system twice.  I1.1 and
-# I1.2 both pass in that state, because each set is internally
-# consistent, which is why this needs its own check
+# I1.5 -- one entry for each bootable system.  Two entries for the same
+# kernel in the same subvolume are not harmless.  They mean that a
+# change of the entry names was not adopted.  Then every update adds a
+# second set of files to the ESP, and the menu shows the same system
+# twice.  I1.1 and I1.2 both pass in this state, because each set is
+# consistent on its own.  So this needs its own check
 check_duplicate_entries()
 {
 	local dups
@@ -506,10 +508,11 @@ check_duplicate_entries()
 	fi
 }
 
-# I1.6 -- the configured default names an entry that exists.  A dangling
-# default is not fatal on its own (the boot loader falls back to its own
-# ordering) but it means the machine no longer boots what it was told to,
-# which on a transactional system is the snapshot that was just applied
+# I1.6 -- the configured default names an entry that exists.  A default
+# that names no entry does not stop the boot.  The boot loader then
+# uses its own order.  But the machine does not boot what it was told
+# to boot.  On a transactional system, this is the snapshot that was
+# just applied
 check_default_resolves()
 {
 	local want=""
@@ -534,8 +537,8 @@ check_default_resolves()
 		skip "I1.6 no default entry is configured"
 		return
 	fi
-	# A wildcard default is a pattern for the boot loader to resolve,
-	# not a name
+	# A default with a wildcard is not a name.  It is a pattern, and
+	# the boot loader resolves it
 	case "$want" in *[\*\?]*) skip "I1.6 the default is the pattern '$want'"; return ;; esac
 
 	local ids
@@ -545,32 +548,33 @@ check_default_resolves()
 		pass "I1.6 the default entry '$want' exists (${sources[0]})"
 	elif grep -qxF "$want.conf" <<<"$ids"; then
 		# grub2-bls drops the suffix when it writes the variable.
-		# The entry is there and the machine boots it, so this is
-		# a conformance gap and not a broken ESP -- see the note
-		# on isSelected in capture_entries()
+		# The entry is there and the machine boots it.  So this
+		# is a gap in the conformance of grub2-bls, not a broken
+		# ESP.  See the note on isSelected in `capture_entries`
 		warn_check "I1.6 the default '$want' is written without the '.conf' suffix (${sources[0]})"
 	else
 		fail "I1.6 the default entry '$want' (${sources[0]}) is not among the installed entries"
 	fi
 }
 
-# I1.7 -- every kernel that is installed can be booted.  This is the
-# silent no-op: add-kernel returns success, writes nothing, and the
-# machine keeps booting the previous kernel with the previous initrd
-# until somebody looks at the menu
+# I1.7 -- every installed kernel can boot.  This finds the silent
+# no-op.  In that case add-kernel returns success but writes nothing.
+# The machine keeps booting the old kernel with the old initrd.  Nobody
+# notices until somebody looks at the menu
 check_kernel_coverage()
 {
 	local subvol=""
 	if [ -n "$have_snapshots" ]; then
-		# findmnt prints the subvolume with a leading slash and the
-		# rootflags in the entry do not, so compare without it
+		# findmnt prints the subvolume with a leading slash.  The
+		# rootflags in the entry have no leading slash.  So the
+		# slash is removed before the comparison
 		subvol="$(findmnt --noheadings -o FSROOT --target / | head -n1)"
 		subvol="${subvol#/}"
 	fi
 
 	local versions
-	# Only entries for the running system are relevant: another
-	# snapshot legitimately carries other kernels
+	# Only the entries of the running system count.  Another
+	# snapshot can have other kernels, and that is correct
 	if [ -n "$subvol" ]; then
 		versions="$(entries_json | jq -r --arg s "$subvol" "$jq_entry_cmdline"'
 			.[] | select(.type == "type1") |
@@ -598,8 +602,8 @@ check_kernel_coverage()
 	fi
 }
 
-# I1.4 -- the reserve that install_kernel() relies on to be able to add
-# the next kernel
+# I1.4 -- the ESP keeps its reserve of free space.  `install_kernel`
+# needs this reserve to add the next kernel
 check_free_space()
 {
 	local reserve=10 f
@@ -622,7 +626,7 @@ check_free_space()
 	fi
 }
 
-# The devices that the TPM2 is expected to open, as UUIDs
+# Print the UUIDs of the devices that the TPM2 must open
 tpm2_devices()
 {
 	[ -e /etc/crypttab ] || return 0
@@ -650,9 +654,9 @@ tpm2_devices()
 	done < /etc/crypttab
 }
 
-# I2.1 -- a device that crypttab says the TPM2 opens really does carry a
-# TPM2 token, and where that token defers to pcrlock there is a policy
-# for it to defer to
+# I2.1 -- crypttab says that the TPM2 opens a device.  That device must
+# have a TPM2 token.  When the token uses pcrlock, the pcrlock policy
+# must exist
 check_tpm2_tokens()
 {
 	local -a devices
@@ -685,9 +689,10 @@ check_tpm2_tokens()
 	fi
 }
 
-# I2.2 -- the policy still matches reality.  This is the same question
-# the TPM2 asks when make-policy has to re-authorize the NVIndex, and
-# getting "no" here is the state that issue 250 could not recover from
+# I2.2 -- the policy still matches the current PCRs.  The TPM2 checks
+# the same thing when make-policy must authorize the NV index again.
+# When the answer is "no", the system is in the state of issue 250.
+# That issue could not recover from it
 check_policy_fresh()
 {
 	if [ ! -e /var/lib/systemd/pcrlock.json ]; then
@@ -702,7 +707,7 @@ check_policy_fresh()
 	while read -r i; do
 		[ -r "/sys/class/tpm/tpm0/pcr-$bank/$i" ] || continue
 		checked=$((checked + 1))
-		# sysfs prints upper case, the policy stores lower case
+		# sysfs prints upper case.  The policy stores lower case
 		current="$(tr '[:upper:]' '[:lower:]' < "/sys/class/tpm/tpm0/pcr-$bank/$i")"
 		jq -e --arg c "$current" --argjson p "$i" \
 			'.pcrValues[] | select(.pcr == $p) | .values | index($c)' \
@@ -719,17 +724,17 @@ check_policy_fresh()
 	fi
 }
 
-# I2.3 -- the requested PCRs are actually bound.  A policy that silently
-# dropped a PCR still unlocks, so this has to be reported rather than
-# noticed by accident.
+# I2.3 -- the requested PCRs are really bound.  A policy can drop a PCR
+# without any message, and it still unlocks.  So this check must
+# report it.  Otherwise nobody notices.
 #
-# It warns instead of failing, and that is deliberate.  Dropping a PCR
-# that cannot be predicted right now is designed behaviour: the
-# statement is about the current event log, and the boot service adds
-# the PCR back on the next boot.  Gating on it would make the harness
-# red on a system that is behaving correctly.  The regression that does
-# matter -- a PCR that was bound before and is not bound now -- is a
-# removed "pcrlock/policy/pcr/N/..." line, and `diff` catches it
+# It warns and does not fail, on purpose.  A PCR that cannot be
+# predicted now is dropped by design.  This is about the current event
+# log.  The boot service adds the PCR back on the next boot.  A failure
+# here would make the test fail on a system that works correctly.  The
+# real regression is a PCR that was bound before and is not bound now.
+# This shows as a removed "pcrlock/policy/pcr/N/..." line, and `diff`
+# finds it
 check_policy_binds()
 {
 	if [ ! -e /var/lib/systemd/pcrlock.json ]; then
@@ -769,8 +774,8 @@ check_policy_binds()
 # I2.4 -- the devices that the initrd opens are bound to PCR 15.  These
 # are the device with "tpm2-measure-pcr=yes" and the devices with
 # "x-initrd.attach".  Each one needs a TPM2 token that uses PCR 15.
-# Without it, the slot would still open after the initrd is gone.  The
-# other devices may use PCR 15 or not, so they are not checked
+# Without it, the slot still opens after the initrd is gone.  The other
+# devices can use PCR 15 or not, so they are not checked
 check_pcr15_binding()
 {
 	local -a devices
