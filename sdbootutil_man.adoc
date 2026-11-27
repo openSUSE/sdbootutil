@@ -102,10 +102,12 @@ Show the fields of the entry of one kernel.
 
 *update-entry* _VERSION_ [_SNAPSHOT_]::
 Write the kernel command line of _/etc/kernel/cmdline_ into one entry.
+For a UKI, build the addon of its entry again.
 
 *update-all-entries* [_SNAPSHOT_]::
 Write the kernel command line of _/etc/kernel/cmdline_ into all the
-entries of the snapshot.
+entries of the snapshot.  For the UKIs, build the addons of their
+entries again.
 
 *set-default-snapshot* [_SNAPSHOT_]::
 Boot this snapshot next time, and add its kernels if they are missing.
