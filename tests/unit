@@ -2127,6 +2127,16 @@ swap UUID=2 none tpm2-device=auto"
 	entries_bind_pcr15 root || fail "the crypttab of the addon was not read"
 	addons_crypttab() { :; }
 	entries_bind_pcr15 root && fail "a UKI without a crypttab was accepted"
+
+	# With DPS the addon has only the other devices: the discovery
+	# opens the anchor and measures it
+	# shellcheck disable=SC2034  # read by the sourced library
+	ct_default="swap UUID=2 none tpm2-device=auto" initrd_crypttab_read=
+	addons_crypttab() { [ "$*" != /c.addon.efi ] || echo "$ct_default"; }
+	entries_bind_pcr15 root || fail "a DPS root with another device was refused"
+	# shellcheck disable=SC2034  # read by the sourced library
+	ct_default="swap UUID=2 none tpm2-device=auto,tpm2-measure-pcr=yes" initrd_crypttab_read=
+	entries_bind_pcr15 root && fail "a DPS root where another device measures was accepted"
 	return 0
 }
 
@@ -2139,8 +2149,7 @@ t_addons_crypttab()
 	load
 	local boot_root="$workdir/esp" tmpdir="$workdir/tmp"
 	mkdir -p "$boot_root" "$tmpdir"
-	dracut_crypttab() { echo "cr_root UUID=1111 none x-initrd.attach,tpm2-measure-pcr=yes"; }
-	crypttab_cpio "$boot_root/c.addon.efi.initrd"
+	crypttab_cpio "$boot_root/c.addon.efi.initrd" "cr_root UUID=1111 none x-initrd.attach,tpm2-measure-pcr=yes"
 	objcopy() { if [ -e "$4.initrd" ]; then cp "$4.initrd" "$5"; else : > "$5"; fi; }
 	is "crypttab" "cr_root UUID=1111 none x-initrd.attach,tpm2-measure-pcr=yes" "$(addons_crypttab /r.addon.efi /c.addon.efi)"
 	is "none" "" "$(addons_crypttab /r.addon.efi)"
@@ -2493,39 +2502,46 @@ t_link_uki_addon()
 }
 
 # The addon of the root has "root=" and the crypttab when the discovery
-# does not find the root.  It is written again only when it changes:
-# a new disk, or a new key.  It goes away with the discovery, or
-# without UKIs
+# does not find the root.  With DPS it has only the crypttab, without
+# the root, and only when the initrd opens other devices.  It is
+# written again only when it changes: a new disk, or a new key.  It
+# goes away without UKIs
 # shellcheck disable=SC2034,SC2329  # read and called by the sourced library
 t_update_dps_addon()
 {
 	load
-	local boot_root="$workdir/esp" entry_token=t tmpdir="$workdir/tmp" UKI=yes t_problem="not DPS" t_ct="cr_root" t_key=key1
+	local boot_root="$workdir/esp" entry_token=t tmpdir="$workdir/tmp" UKI=yes t_problem="not DPS" t_key=key1
+	local t_ct="cr_root UUID=1 none x-initrd.attach"
 	local out="$workdir/esp/loader/addons/t-dps.addon.efi"
 	mkdir -p "$boot_root" "$tmpdir"
 	uki_keys() { :; }
 	dps_root_problem() { echo "$t_problem"; }
 	get_rootfs() { echo /dev/mapper/cr_root; }
-	crypttab_cpio() { echo "$t_ct" > "$1"; }
+	dracut_crypttab() { echo "$t_ct"; }
+	crypttab_cpio() { echo "$2" > "$1"; }
 	# The addon is the command line, the initrd and the key
 	build_addon() { { echo "$1"; cat "$3"; echo "$t_key"; } > "$2"; }
 	record_esp_file() { echo written >> "$workdir/dps-written"; }
 
 	dps_addon_done='' update_dps_addon > /dev/null 2>&1
-	is "made" "$(printf 'root=/dev/mapper/cr_root\ncr_root\nkey1')" "$(cat "$out" 2> /dev/null)"
+	is "made" "$(printf 'root=/dev/mapper/cr_root\ncr_root UUID=1 none x-initrd.attach\nkey1')" "$(cat "$out" 2> /dev/null)"
 	dps_addon_done='' update_dps_addon > /dev/null 2>&1
 	is "not written again" 1 "$(wc -l < "$workdir/dps-written")"
-	t_ct="cr_root cr_new"
+	t_ct="$(printf 'cr_root UUID=1 none x-initrd.attach\ncr_new UUID=2 none x-initrd.attach')"
 	dps_addon_done='' update_dps_addon > /dev/null 2>&1
-	is "a new disk" "$(printf 'root=/dev/mapper/cr_root\ncr_root cr_new\nkey1')" "$(cat "$out" 2> /dev/null)"
+	is "a new disk" "$(printf 'root=/dev/mapper/cr_root\n%s\nkey1' "$t_ct")" "$(cat "$out" 2> /dev/null)"
 	t_key=key2
 	dps_addon_done='' update_dps_addon > /dev/null 2>&1
-	is "a new key" "$(printf 'root=/dev/mapper/cr_root\ncr_root cr_new\nkey2')" "$(cat "$out" 2> /dev/null)"
-	t_problem=""
+	is "a new key" "$(printf 'root=/dev/mapper/cr_root\n%s\nkey2' "$t_ct")" "$(cat "$out" 2> /dev/null)"
+
+	# With DPS the discovery opens "root" and "usr"
+	t_problem="" t_ct="$(printf 'root UUID=1 none x-initrd.attach\nusr UUID=3 none x-initrd.attach')"
 	dps_addon_done='' update_dps_addon > /dev/null 2>&1
-	[ -e "$out" ] && fail "the addon stays with DPS"
-	t_problem="not DPS"
+	[ -e "$out" ] && fail "the addon stays with DPS and no other device"
+	t_ct="$(printf 'root UUID=1 none x-initrd.attach\ncr_swap UUID=4 none x-initrd.attach')"
 	dps_addon_done='' update_dps_addon > /dev/null 2>&1
+	is "DPS and another device" "$(printf '\ncr_swap UUID=4 none x-initrd.attach\nkey2')" "$(cat "$out" 2> /dev/null)"
+
 	UKI=""
 	dps_addon_done='' update_dps_addon > /dev/null 2>&1
 	[ -e "$out" ] && fail "the addon stays without UKIs"
@@ -2553,24 +2569,30 @@ t_dps_addon_others()
 }
 
 # The addon of the root is current while its initrd has the crypttab
-# that it would get now
+# that it would get now.  With DPS and no other device, it is current
+# when there is no addon
 # shellcheck disable=SC2034,SC2329  # read and called by the sourced library
 t_dps_addon_crypttab()
 {
 	load
-	local boot_root="$workdir/esp" entry_token=t tmpdir="$workdir/tmp" t_ct="cr_root"
+	local boot_root="$workdir/esp" entry_token=t tmpdir="$workdir/tmp" t_ct="cr_root UUID=1 none"
 	local out="$boot_root/loader/addons/t-dps.addon.efi"
 	mkdir -p "${out%/*}" "$tmpdir"
-	crypttab_cpio() { echo "$t_ct" > "$1"; }
-	# The addon is its initrd here
-	objcopy() { [ -e "$4" ] && cp "$4" "$5"; }
+	rm -f "$out"
+	dracut_crypttab() { echo "$t_ct"; }
+	# The addon is its crypttab here
+	addons_crypttab() { cat "$boot_root$1"; }
 
-	dps_addon_crypttab_current && fail "current without the addon"
-	echo "cr_root" > "$out"
-	dps_addon_crypttab_current || fail "not current with the same crypttab"
-	t_ct="cr_root cr_new"
-	dps_addon_crypttab_current && fail "current after a new device"
-	[ ! -e "$tmpdir/crypttab-now.cpio" ] && [ ! -e "$tmpdir/crypttab-addon.cpio" ] || fail "files left in $tmpdir"
+	dps_addon_crypttab_current "" && fail "current without the addon"
+	echo "cr_root UUID=1 none" > "$out"
+	dps_addon_crypttab_current "" || fail "not current with the same crypttab"
+	t_ct="$(printf 'cr_root UUID=1 none\ncr_new UUID=2 none')"
+	dps_addon_crypttab_current "" && fail "current after a new device"
+
+	t_ct="root UUID=1 none"
+	dps_addon_crypttab_current 1 && fail "DPS, current with an addon that is not needed"
+	rm "$out"
+	dps_addon_crypttab_current 1 || fail "DPS, not current without the addon"
 	return 0
 }
 
@@ -2988,14 +3010,12 @@ t_crypttab_cpio()
 	load
 	local tmpdir="$workdir/tmp"
 	mkdir -p "$tmpdir"
-	dracut_crypttab() { echo "cr_root UUID=1111 none x-initrd.attach"; }
-	crypttab_cpio "$workdir/a.cpio"
+	crypttab_cpio "$workdir/a.cpio" "cr_root UUID=1111 none x-initrd.attach"
 	sleep 1
-	crypttab_cpio "$workdir/b.cpio"
+	crypttab_cpio "$workdir/b.cpio" "cr_root UUID=1111 none x-initrd.attach"
 	cmp -s "$workdir/a.cpio" "$workdir/b.cpio" || fail "two archives of the same crypttab differ"
 	is "content" "cr_root UUID=1111 none x-initrd.attach" "$(cpio --quiet -i --to-stdout etc/crypttab < "$workdir/a.cpio")"
-	dracut_crypttab() { echo "cr_root UUID=1111 none"; }
-	crypttab_cpio "$workdir/c.cpio"
+	crypttab_cpio "$workdir/c.cpio" "cr_root UUID=1111 none"
 	cmp -s "$workdir/a.cpio" "$workdir/c.cpio" && fail "two crypttabs give the same archive"
 	return 0
 }

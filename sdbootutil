@@ -963,7 +963,7 @@ build_addon()
 	uki-addon,1,UKI Addon,addon,1,https://www.freedesktop.org/software/systemd/man/latest/systemd-stub.html
 	EOF
 	pe_add_sections "/usr/lib/systemd/boot/efi/addon$firmware_arch.efi.stub" "$tmpdir/addon.efi" \
-		.cmdline "$tmpdir/addon.cmdline" \
+		${cmdline:+.cmdline "$tmpdir/addon.cmdline"} \
 		.sbat "$tmpdir/addon.sbat" \
 		${initrd:+.initrd "$initrd"}
 	SYSTEMD_LOG_LEVEL=warning "$systemd_sbsign" sign --private-key=<(private_key secureboot-private-key.pem) \
@@ -1005,15 +1005,31 @@ dracut_crypttab()
 	done < /etc/crypttab
 }
 
-# A cpio archive in OUT with the crypttab of `dracut_crypttab`.  The
-# same lines give the same bytes, so the addon that carries it is only
+# The lines of `dracut_crypttab` for the addon of the root.  With DPS
+# (DPS not empty) the discovery opens the root and /usr by itself, as
+# "root" and "usr", so their lines stay out
+addon_crypttab()
+{
+	local dps="$1" line name
+	while IFS= read -r line; do
+		read -r name _ <<<"$line"
+		if [ -n "$dps" ] && { [ "$name" = "root" ] || [ "$name" = "usr" ]; }; then
+			continue
+		fi
+		echo "$line"
+	done < <(dracut_crypttab)
+}
+
+# A cpio archive in OUT with a crypttab with the lines LINES.  The same
+# lines give the same bytes, so the addon that carries it is only
 # written again when they change
 crypttab_cpio()
 {
-	local out="${1:?}" dir="$tmpdir/crypttab-cpio"
+	local out="${1:?}" lines="$2" dir="$tmpdir/crypttab-cpio"
 	rm -rf "$dir"
 	mkdir -p "$dir/etc"
-	dracut_crypttab > "$dir/etc/crypttab"
+	: > "$dir/etc/crypttab"
+	[ -z "$lines" ] || echo "$lines" > "$dir/etc/crypttab"
 	chmod 755 "$dir" "$dir/etc"
 	chmod 644 "$dir/etc/crypttab"
 	touch -h -d @0 "$dir/etc/crypttab" "$dir/etc" "$dir"
@@ -2801,34 +2817,43 @@ dps_addon_others()
 		jq -r --arg token "$entry_token-" '.[] | select(.type == "type2" or (.uki and (.id | startswith($token) | not))) | .id'
 }
 
-# Whether the addon of the root has the crypttab that it would get now.
-# A new encrypted device in /etc/crypttab changes it, and then the
-# addon must be written again
+# Whether the addon of the root has the crypttab that it would get now
+# (DPS as in `addon_crypttab`).  A new encrypted device in /etc/crypttab
+# changes it, and then the addon must be written again
 dps_addon_crypttab_current()
 {
-	local now="$tmpdir/crypttab-now.cpio" addon="$tmpdir/crypttab-addon.cpio" ret=0
-	crypttab_cpio "$now"
-	objcopy -O binary --only-section=.initrd "$(dps_addon_path)" "$addon" 2> /dev/null || ret=1
-	[ "$ret" -ne 0 ] || cmp -s "$now" "$addon" || ret=1
-	rm -f "$now" "$addon"
-	return "$ret"
+	local dps="$1" lines addon
+	lines="$(addon_crypttab "$dps")"
+	addon="$(dps_addon_path)"
+	# With DPS and no other device for the initrd, there is no addon
+	if [ -n "$dps" ] && [ -z "$lines" ]; then
+		[ ! -e "$addon" ]
+		return
+	fi
+	[ -e "$addon" ] && [ "$(addons_crypttab "${addon#"$boot_root"}")" = "$lines" ]
 }
 
-# The addon of the root, when the discovery does not find it (see
-# `dps_root_problem`): "root=" and an initrd with the crypttab that
-# dracut would use.  It is the same for every UKI, local or of the
+# The addon of the root, for every UKI.  It has an initrd with the
+# crypttab that dracut would use, as the initrd of a UKI has none.  When
+# the discovery does not find the root (see `dps_root_problem`), it
+# also has "root=".  When the discovery finds the root, it opens the
+# root by itself, and the addon is needed only when the initrd must open
+# other devices too.  It is the same for every UKI, local or of the
 # packages, and for every snapshot, so there is only one, rewritten when
 # its content changes, as after adding an encrypted device.  It goes
-# away when there are no UKIs, or when the discovery finds the root.
-# Once per run
+# away when there are no UKIs.  Once per run
 dps_addon_done=
 update_dps_addon()
 {
 	[ -z "$dps_addon_done" ] || return 0
 	dps_addon_done=1
-	local out cmdline
+	local out cmdline="" dps="" lines=""
 	out="$(dps_addon_path)"
-	if ! uki_selected || [ -z "$(dps_root_problem)" ]; then
+	if uki_selected; then
+		[ -n "$(dps_root_problem)" ] || dps=1
+		lines="$(addon_crypttab "$dps")"
+	fi
+	if ! uki_selected || { [ -n "$dps" ] && [ -z "$lines" ]; }; then
 		[ -e "$out" ] || return 0
 		info "Removing $out"
 		rm -f "$out"
@@ -2837,8 +2862,8 @@ update_dps_addon()
 	fi
 
 	uki_keys
-	cmdline="root=$(get_rootfs)"
-	crypttab_cpio "$tmpdir/dps.cpio"
+	[ -n "$dps" ] || cmdline="root=$(get_rootfs)"
+	crypttab_cpio "$tmpdir/dps.cpio" "$lines"
 	# The same content and the same key make the same file.  So when
 	# the new addon is the same as the one in the ESP, there is nothing
 	# to do.  When the crypttab, the root, the key or the stub change,
@@ -7458,7 +7483,7 @@ crypttab_names()
 # Until then a rollback needs the unbound slots
 entries_bind_pcr15()
 {
-	local anchor="${1:?}" initrd dir name _ opts expected names measuring files=() crypttab
+	local anchor="${1:?}" initrd dir name _ opts expected names files=() crypttab
 	local -A unpacked=()
 
 	read_initrd_crypttab
@@ -7491,14 +7516,17 @@ entries_bind_pcr15()
 		names=""
 		[ -z "$crypttab" ] || names="$(crypttab_names <<<"$crypttab")"
 		[ "$names" = "$expected" ] || return 1
-		# Only the anchor measures
+		# The anchor measures, and no other device does.  With DPS the
+		# anchor has no line: the discovery opens it and measures it
 		[ -n "$crypttab" ] || continue
-		measuring=""
 		while read -r name _ _ opts; do
 			[[ "$name" != \#* ]] || continue
-			[[ "$opts" != *"tpm2-measure-pcr=yes"* ]] || measuring+="$name "
+			if [ "$name" = "$anchor" ]; then
+				[[ "$opts" == *"tpm2-measure-pcr=yes"* ]] || return 1
+			else
+				[[ "$opts" != *"tpm2-measure-pcr=yes"* ]] || return 1
+			fi
 		done <<<"$crypttab"
-		[ "$measuring" = "$anchor " ] || return 1
 	done < <(jq -r '.[] | select(.type == "type1") | '"$jq_initrd_files" < "$entryfile" | sort -u)
 }
 
@@ -9244,8 +9272,16 @@ status_boot()
 	if uki_selected; then
 		local problem
 		problem="$(dps_root_problem)"
-		status_row "Root discovery" "${problem:-yes}${problem:+, so $(dps_addon_path) has \"root=\" and the crypttab}"
-		[ -z "$problem" ] || dps_addon_crypttab_current || \
+		if [ -n "$problem" ]; then
+			status_row "Root discovery" "$problem, so $(dps_addon_path) has \"root=\" and the crypttab"
+		elif [ -e "$(dps_addon_path)" ]; then
+			status_row "Root discovery" "yes, and $(dps_addon_path) has the crypttab of the other devices of the initrd"
+		else
+			status_row "Root discovery" "yes"
+		fi
+		local dps=""
+		[ -n "$problem" ] || dps=1
+		dps_addon_crypttab_current "$dps" || \
 			echo "  The crypttab in the addon of the root is not the one of /etc/crypttab: run 'sdbootutil mkinitrd'"
 		if [ -e "$(dps_addon_path)" ]; then
 			local others
