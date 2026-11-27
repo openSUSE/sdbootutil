@@ -120,7 +120,7 @@ or kernel keys and call `sdbootutil` to complete the enrollment.
         ┌──────────────────────────────────────────────────────────────────┐
         │  ONGOING SYSTEM LIFECYCLE                                        │
         │  kernel update / snapshot create-default / bootloader update     │
-        │   → sdbootutil (via 50-sdbootutil.install, 10-sdbootutil.snapper,│
+        │   → sdbootutil (via kernel scriptlets, 10-sdbootutil.snapper,    │
         │      10-sdbootutil.tukit) sets update_predictions=1              │
         │   → sdbootutil update-predictions (or sdbootutil-update-         │
         │      predictions.service) regenerates systemd-pcrlock policy and │
@@ -237,7 +237,6 @@ PCR-prediction logic.  The FDE-relevant pieces:
 | `measure-pcr-generator.sh` | systemd generator: uses `SYSTEMD_FORCE_MEASURE` to enable volume key measurement in PCR15 and order devices |
 | `measure-pcr-boundary.service` | Initrd unit: extends PCR15 with `leave-initrd` before switching root |
 | `sdbootutil-update-predictions.service` | Regenerates `systemd-pcrlock` policy prediction after system changes         |
-| `kernel-install-sdbootutil.conf` | tmpfiles drop-in disabling stock `kernel-install` scripts that would otherwise bypass sdbootutil's prediction updates |
 | `snapper-override.conf`, `10-sdbootutil.tukit(.conf)` | Ensure snapshot/transactional-update operations can regenerate predictions correctly |
 
 ### 2.4 `combustion`
@@ -479,13 +478,13 @@ into PCR 15, and `measure-pcr-boundary.service` extends it when the
 initrd ends, so the slots bound to PCR 15 do not unseal afterwards -
 see §6.
 
-**Stage 4 - ongoing lifecycle.** Kernel installs
-(`50-sdbootutil.install` via `kernel-install`), snapshot
-create/delete/set-default (`10-sdbootutil.snapper`), and
-transactional-update transactions (`10-sdbootutil.tukit`) all funnel
-back into `sdbootutil`, which sets an internal `update_predictions=1`
-flag whenever the boot chain changes.  At the end of the run - or
-explicitly via `sdbootutil update-predictions` /
+**Stage 4 - ongoing lifecycle.** Kernel installs (the kernel
+scriptlets of suse-module-tools), snapshot create/delete/set-default
+(`10-sdbootutil.snapper`), and transactional-update transactions
+(`10-sdbootutil.tukit`) all funnel back into `sdbootutil`, which sets
+an internal `update_predictions=1` flag whenever the boot chain
+changes.  At the end of the run - or explicitly via
+`sdbootutil update-predictions` /
 `sdbootutil-update-predictions.service` - the `systemd-pcrlock` policy
 and the PCR15 prediction are regenerated so the new
 kernel/initrd/entry still unlocks.

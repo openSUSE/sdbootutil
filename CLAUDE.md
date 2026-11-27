@@ -26,7 +26,6 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 2. **Integration Scripts:**
    - `10-sdbootutil.snapper` - Snapper plugin for snapshot lifecycle hooks
    - `10-sdbootutil.tukit` - Tukit plugin for transactional systems
-   - `50-sdbootutil.install` - kernel-install plugin script
 
 3. **FDE/TPM Components:**
    - `measure-pcr-generator.sh` - Enables and orders the PCR 15 volume key measurements
@@ -56,13 +55,9 @@ Unlike standard systemd-boot which assumes one OS instance per kernel version, s
 - `delete-snapshot-post`: Cleans up the entries left for the deleted snapshot
 - `set-default-snapshot-post`: Sets bootloader default, adds entries (transactional systems only)
 
-**Kernel package install/remove** (`50-sdbootutil.install`, run by `kernel-install`):
-- Does nothing unless `KERNEL_INSTALL_LAYOUT` is `bls`
-- Calls `sdbootutil add-kernel` / `remove-kernel`, passing `--esp-path` and
-  `--entry-token` from the `kernel-install` environment
-- `add` refuses an image outside `/usr/lib/modules/{version}`, so legacy
-  `/boot/vmlinuz-*` locations are rejected rather than silently handled
-- This replaced an rpm file trigger; file triggers were unreliable with zypper
+**Kernel package install/remove** (the kernel scriptlets of suse-module-tools):
+- Call `sdbootutil add-kernel` / `remove-kernel` directly
+- This replaced an rpm file trigger: file triggers were unreliable with zypper
   and cannot make an rpm transaction fail
 
 **`kernelhooks.lua`** - the old rpm file trigger. Still in the tree, but **not

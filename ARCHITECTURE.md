@@ -185,9 +185,7 @@ to manage entires on snapshot creation and removal, as well as when
 the default subvolume is set.
 
 Kernel package installation and removal also trigger calls to
-`sdbootutil`, through the [kernel-install
-plugin](https://github.com/lnussel/sdbootutil/blob/main/50-sdbootutil.install)
-that `kernel-install` runs when the layout is `bls`.
+`sdbootutil`, from the kernel scriptlets of suse-module-tools.
 
 This replaced an earlier [rpm file
 trigger](https://github.com/lnussel/sdbootutil/blob/main/kernelhooks.lua),

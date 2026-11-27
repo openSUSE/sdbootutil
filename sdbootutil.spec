@@ -81,6 +81,8 @@ Requires:       libtss2-tcti-device0
 Requires:       udev
 Supplements:    ((grub2-x86_64-efi-bls and shim) unless (grub2-x86_64-efi or grub2-arm64-efi or grub2-riscv64-efi))
 Supplements:    ((systemd-boot and shim) unless (grub2-x86_64-efi or grub2-arm64-efi or grub2-riscv64-efi))
+# Removes the dropped kernel-install plugin from installed systems
+Obsoletes:      %{name}-kernel-install < %{version}-%{release}
 BuildArch:      noarch
 ExclusiveArch:  aarch64 %{arm} riscv64 x86_64
 %{?systemd_requires}
@@ -108,17 +110,6 @@ BuildArch:      noarch
 
 %description tukit
 Plugin scripts for tukit to handle BLS config files
-
-%package kernel-install
-Summary:        Hook script for kernel-install
-Requires:       %{name} = %{version}
-# While kernel-install is in udev
-Requires:       udev
-BuildArch:      noarch
-
-%description kernel-install
-Plugin script for kernel-install. Note: installation of this
-package may disable other plugin scripts that are incompatible.
 
 %package enroll
 Summary:        Full disk encryption enrollment
@@ -207,9 +198,6 @@ done
 install -D -m 755 10-%{name}.tukit %{buildroot}%{_prefix}/lib/tukit/plugins/10-%{name}.tukit
 install -D -m 644 10-%{name}.tukit.conf %{buildroot}%{_prefix}%{_sysconfdir}/tukit.conf.d/10-%{name}.conf
 
-# kernel-install
-install -D -m 755 50-%{name}.install %{buildroot}%{_prefix}/lib/kernel/install.d/50-%{name}.install
-
 # Bash completions
 install -D -m 644 completions/bash_sdbootutil %{buildroot}%{_datadir}/bash-completion/completions/sdbootutil
 
@@ -221,7 +209,6 @@ install -D -m 644 measure-pcr-pcrextend.conf %{buildroot}/%{_prefix}/lib/dracut/
 
 # tmpfiles
 install -Dpm 0644 %{name}.conf %{buildroot}%{_tmpfilesdir}/%{name}.conf
-install -Dpm 0644 kernel-install-%{name}.conf %{buildroot}%{_tmpfilesdir}/kernel-install-%{name}.conf
 
 # tmpfiles_create macro is a noop, and the directories in /var/lib
 # will be present in the next reboot.  The problem is that when the
@@ -273,9 +260,6 @@ install -d -m 755 %{buildroot}%{_prefix}/lib/%{name}/entries.d
 %post enroll
 %service_add_post %{name}-enroll.service
 
-%post kernel-install
-%tmpfiles_create kernel-install-%{name}.conf
-
 %post dracut-measure-pcr
 %{?regenerate_initrd_post}
 
@@ -322,12 +306,6 @@ install -d -m 755 %{buildroot}%{_prefix}/lib/%{name}/entries.d
 %{_prefix}/lib/tukit/plugins/*
 %dir %{_prefix}%{_sysconfdir}/tukit.conf.d
 %{_prefix}%{_sysconfdir}/tukit.conf.d/*
-
-%files kernel-install
-%dir %{_prefix}/lib/kernel
-%dir %{_prefix}/lib/kernel/install.d
-%{_prefix}/lib/kernel/install.d/*
-%{_tmpfilesdir}/kernel-install-%{name}.conf
 
 %files enroll
 %{_bindir}/%{name}-enroll
