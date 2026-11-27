@@ -2164,17 +2164,18 @@ t_p15_status()
 	local out
 
 	out="$(status_pcr15)"
-	says "enabled" "$out" "Enabled:         yes"
 	says "no log" "$out" "cannot be told"
 
 	pcr15_log "15:volume-key:$VK" "15:phase:$LEAVE"
 	out="$(status_pcr15)"
-	says "this boot" "$out" "the volume key of the anchor was measured"
-	says "end of initrd" "$out" "End of initrd:   measured"
+	says "this boot" "$out" "measured in this boot, also the end of the initrd"
 
 	pcr15_log "15:volume-key:$VK"
 	out="$(status_pcr15)"
-	says "no boundary" "$out" "NOT measured in this boot"
+	says "no boundary" "$out" "the end of the initrd was NOT"
+	status_pcr15 > /dev/null
+	says "warning text" "${status_warnings[*]}" "the initrd has no measure-pcr-boundary.service"
+	status_warnings=()
 
 	pcr15_log "11:phase:$LEAVE"
 	out="$(status_pcr15)"

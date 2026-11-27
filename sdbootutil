@@ -8602,12 +8602,6 @@ status_subrow()
 	printf '    %-15s%s\n' "${1}:" "$2"
 }
 
-# "yes" for a flag that is set, "no" for one that is not
-status_yn()
-{
-	[ -z "$1" ] && echo no || echo yes
-}
-
 # "a, b, c", empty for no arguments
 status_join()
 {
@@ -8852,11 +8846,8 @@ status_policy()
 		status_policy_backend="pcr-oracle"
 	fi
 
-	echo "TPM2 policy"
-	status_row "Backend" "${status_policy_backend:-none}"
-
 	[ -n "$status_policy_backend" ] || {
-		echo "  No policy: the TPM2 does not open any device"
+		status_row "Policy" "none, the TPM2 opens no device"
 		return 0
 	}
 
@@ -8885,7 +8876,80 @@ status_policy()
 		bank="$(jq -r '.pcrBank // "sha256"' < "$policy")"
 	fi
 
+	# Rebuilt instead of echoed back, so that a list with an empty or
+	# a repeated field still reads the way the rest of the report does
+	local requested="" i
+	for i in ${FDE_SEAL_PCR_LIST//,/ }; do
+		[ -n "$i" ] || continue
+		[ -n "$requested" ] && requested="$requested,$i" || requested="$i"
+	done
+
+	# The signed PCR 11 of a UKI does not see the Secure Boot state
+	# (PCR 7), or a changed command line or addon (PCR 12).  With
+	# Secure Boot on, systemd-stub ignores an edited command line and
+	# refuses unsigned addons, so only PCR 7 matters.  With Secure
+	# Boot off it accepts both, and only PCR 12 sees them.  The PCRs
+	# are the choice of the user, so only a warning
+	if uki_selected; then
+		if is_secure_boot; then
+			[[ ",$requested," == *",7,"* ]] || \
+				status_warning "UKI is used, but PCR 7 is not in FDE_SEAL_PCR_LIST: the TPM2 does not check that Secure Boot stays enabled"
+		else
+			[[ ",$requested," == *",12,"* ]] || \
+				status_warning "UKI is used without Secure Boot, but PCR 12 is not in FDE_SEAL_PCR_LIST: the TPM2 does not check the kernel command line"
+		fi
+	fi
+
+	[ -n "$have_policy" ] || {
+		status_row "Policy" "$status_policy_backend, the PCRs it binds are unknown"
+		return 0
+	}
+
+	# For every bound PCR: how many alternative values the policy
+	# accepts, how far that is from the limit where the PCR gets
+	# dropped from the next policy, and whether the value the TPM2
+	# has right now is one of them.  The last one is exactly what the
+	# TPM2 checks when the NVIndex has to be re-authorized, and
+	# reading it costs two files and no credential at all
+	local values current mark match bound=() unmatched=() details=()
+	while read -r i; do
+		bound+=("$i")
+		values="$(jq -r --argjson p "$i" '.pcrValues[] | select(.pcr == $p) | .values | length' < "$policy")"
+		if [ ! -r "/sys/class/tpm/tpm0/pcr-$bank/$i" ]; then
+			mark="?"
+			match="cannot be read"
+		else
+			# sysfs writes them in upper case, the policy in
+			# lower
+			current="$(tr '[:upper:]' '[:lower:]' < "/sys/class/tpm/tpm0/pcr-$bank/$i")"
+			if jq -e --arg c "$current" --argjson p "$i" \
+			      '.pcrValues[] | select(.pcr == $p) | .values | index($c)' \
+			      < "$policy" > /dev/null; then
+				mark=" "
+				match="matches"
+			else
+				mark="!"
+				match="DOES NOT MATCH"
+				unmatched+=("$i")
+			fi
+		fi
+		# The mark is what the eye finds first, so it is spent on
+		# the PCR that does not match and not on the ones that do
+		details+=("   $mark PCR $i: $values value(s), $((8 - values)) before the PolicyOR limit, current value $match")
+	done < <(jq -r '.pcrValues[].pcr' < "$policy")
+
+	if [ "${#bound[@]}" -eq 0 ]; then
+		status_row "Policy" "$status_policy_backend, bound to no PCR"
+	elif [ "${#unmatched[@]}" -eq 0 ]; then
+		status_row "Policy" "$status_policy_backend, PCRs $(status_join "${bound[@]}"); the current values match"
+	else
+		status_row "Policy" "$status_policy_backend, PCRs $(status_join "${bound[@]}"); PCR $(status_join "${unmatched[@]}") DOES NOT MATCH"
+	fi
+
+	# The details, after the summary
 	if [ -n "$arg_full" ]; then
+		status_row "Requested PCRs" "${requested:-none}"
+		[ "${#details[@]}" -eq 0 ] || printf '%s\n' "  Bound PCRs:" "${details[@]}"
 		local nv_index=""
 		[ -z "$have_policy" ] || nv_index="$(jq -r '.nvIndex // empty' < "$policy")"
 		status_row "NVIndex" "${nv_index:-unknown}"
@@ -8903,80 +8967,19 @@ status_policy()
 			status_row "Shim changed" "no"
 		fi
 	fi
-
-	# Rebuilt instead of echoed back, so that a list with an empty or
-	# a repeated field still reads the way the rest of the report does
-	local requested="" i
-	for i in ${FDE_SEAL_PCR_LIST//,/ }; do
-		[ -n "$i" ] || continue
-		[ -n "$requested" ] && requested="$requested,$i" || requested="$i"
-	done
-	status_row "Requested PCRs" "${requested:-none}"
-
-	# The signed PCR 11 of a UKI does not see the Secure Boot state
-	# (PCR 7), or a changed command line or addon (PCR 12).  With
-	# Secure Boot on, systemd-stub ignores an edited command line and
-	# refuses unsigned addons, so only PCR 7 matters.  With Secure
-	# Boot off it accepts both, and only PCR 12 sees them.  The PCRs
-	# are the choice of the user, so only a warning
-	if uki_selected; then
-		[[ ",$requested," != *",9,"* ]] || \
-			echo "  PCR 9 is requested, but left out of the policy while the UKIs are selected"
-		echo "  Once there is an entry of a UKI, the entries of a kernel and an initrd ask for the password"
-		if is_secure_boot; then
-			[[ ",$requested," == *",7,"* ]] || \
-				warn "UKI is used, but PCR 7 is not in FDE_SEAL_PCR_LIST: the TPM2 does not check that Secure Boot stays enabled"
-		else
-			[[ ",$requested," == *",12,"* ]] || \
-				warn "UKI is used without Secure Boot, but PCR 12 is not in FDE_SEAL_PCR_LIST: the TPM2 does not check the kernel command line"
-		fi
+	if [ -n "$arg_full" ] && uki_selected; then
+		status_row "Kernel entries" "once there is an entry of a UKI, the entries of a kernel and an initrd ask for the password"
 	fi
-
-	echo "  Bound PCRs:"
-
-	[ -n "$have_policy" ] || {
-		echo "    none, the NVIndex is not bound to any PCR"
-		return 0
-	}
-
-	# For every bound PCR: how many alternative values the policy
-	# accepts, how far that is from the limit where the PCR gets
-	# dropped from the next policy, and whether the value the TPM2
-	# has right now is one of them.  The last one is exactly what the
-	# TPM2 checks when the NVIndex has to be re-authorized, and
-	# reading it costs two files and no credential at all
-	local values current mark match bound=""
-	while read -r i; do
-		bound=1
-		values="$(jq -r --argjson p "$i" '.pcrValues[] | select(.pcr == $p) | .values | length' < "$policy")"
-		if [ ! -r "/sys/class/tpm/tpm0/pcr-$bank/$i" ]; then
-			mark="?"
-			match="cannot be read"
-		else
-			# sysfs writes them in upper case, the policy in
-			# lower
-			current="$(tr '[:upper:]' '[:lower:]' < "/sys/class/tpm/tpm0/pcr-$bank/$i")"
-			if jq -e --arg c "$current" --argjson p "$i" \
-			      '.pcrValues[] | select(.pcr == $p) | .values | index($c)' \
-			      < "$policy" > /dev/null; then
-				mark=" "
-				match="matches"
-			else
-				mark="!"
-				match="DOES NOT MATCH"
-			fi
-		fi
-		# The mark is what the eye finds first, so it is spent on
-		# the PCR that does not match and not on the ones that do
-		echo "   $mark PCR $i: $values value(s), $((8 - values)) before the PolicyOR limit, current value $match"
-	done < <(jq -r '.pcrValues[].pcr' < "$policy")
-
-	[ -n "$bound" ] || echo "    none, the NVIndex is not bound to any PCR"
 
 	status_policy_stale="$(policy_stale_pcrs)"
 
 	local missing_list
 	missing_list="$(policy_missing_pcrs "$FDE_SEAL_PCR_LIST")"
+	# PCR 9 is out of the policy on purpose with the UKIs
+	if uki_selected && [[ ",$missing_list," == *",9,"* ]]; then
+		status_row "PCR 9" "not in the policy while the UKIs are selected"
+		missing_list="$(remove_pcr "$missing_list" 9)"
+	fi
 	[ -n "$missing_list" ] || return 0
 
 	# The reason a PCR was dropped only comes out of a prediction,
@@ -8988,7 +8991,6 @@ status_policy()
 	prediction="$(SYSTEMD_LOG_LEVEL=warning pcrlock --pcr="$FDE_SEAL_PCR_LIST" --json=short predict 2> /dev/null)" || pcrlock_status=$?
 	[ "$pcrlock_status" -eq 0 ] || prediction=""
 
-	echo "  Requested but not bound:"
 	local reason
 	for i in ${missing_list//,/ }; do
 		if [ -z "$prediction" ]; then
@@ -9005,7 +9007,7 @@ status_policy()
 		else
 			reason="no component matches the event log"
 		fi
-		echo "    PCR $i: $reason"
+		status_row "PCR $i" "requested, but $reason, so it is not in the policy"
 	done
 }
 
@@ -9048,13 +9050,10 @@ pcr15_events()
 
 status_pcr15()
 {
-	echo "PCR 15"
-
 	if ! grep -q "^[^#]*tpm2-measure-pcr=yes" /etc/crypttab 2> /dev/null; then
-		status_row "Enabled" "no"
+		status_row "PCR 15" "not enabled"
 		return 0
 	fi
-	status_row "Enabled" "yes"
 
 	if [ -n "$arg_full" ]; then
 		if [ -d /usr/lib/dracut/modules.d/50measure-pcr ]; then
@@ -9070,21 +9069,20 @@ status_pcr15()
 	# happens when the initrd carries no generator, or when the
 	# generator produced no drop-in for the anchor, and then the slots
 	# bound after the anchor do not unseal
+	#
+	# Without the end of the initrd, the slots bound to the initrd
+	# unseal also on the running system (see
+	# measure-pcr-boundary.service)
 	local log=/run/log/systemd/tpm2-measure.log
-	if [ -r "$log" ] && [ -n "$(pcr15_events "$log" volume-key)" ]; then
-		status_row "This boot" "the volume key of the anchor was measured"
-	elif [ -r "$log" ]; then
-		status_row "This boot" "NOTHING was measured into PCR 15"
+	if [ ! -r "$log" ]; then
+		status_row "PCR 15" "cannot be told, systemd recorded no measurement"
+	elif [ -z "$(pcr15_events "$log" volume-key)" ]; then
+		status_row "PCR 15" "NOTHING was measured in this boot"
+	elif [ -n "$(pcr15_events "$log" phase)" ]; then
+		status_row "PCR 15" "measured in this boot, also the end of the initrd"
 	else
-		status_row "This boot" "cannot be told, systemd recorded no measurement"
-	fi
-
-	# Without it the slots bound to the initrd unseal also on the
-	# running system (see measure-pcr-boundary.service)
-	if [ -r "$log" ] && [ -n "$(pcr15_events "$log" phase)" ]; then
-		status_row "End of initrd" "measured"
-	elif [ -r "$log" ]; then
-		status_row "End of initrd" "NOT measured in this boot, the initrd has no measure-pcr-boundary.service"
+		status_row "PCR 15" "the anchor was measured in this boot; the end of the initrd was NOT"
+		status_warning "The end of the initrd was NOT measured in this boot, the initrd has no measure-pcr-boundary.service"
 	fi
 }
 
@@ -9099,22 +9097,15 @@ status_recovery_pin()
 
 	[ -z "$keyring$environment" ] || status_pin_reachable=1
 
-	echo "Recovery PIN (only whether it can be reached, never its value)"
-
-	if [ -n "$arg_full" ]; then
-		status_row "Kernel keyring" "$(status_yn "$keyring")"
-		status_row "Environment" "$(status_yn "$environment")"
-		return 0
-	fi
-
+	# Only whether it can be reached, never its value
 	local where=()
 	[ -z "$keyring" ] || where+=("kernel keyring")
 	[ -z "$environment" ] || where+=("environment")
 
 	if [ "${#where[@]}" -eq 0 ]; then
-		status_row "Reachable" "no"
+		status_row "Recovery PIN" "not reachable"
 	else
-		status_row "Reachable" "yes ($(status_join "${where[@]}"))"
+		status_row "Recovery PIN" "reachable ($(status_join "${where[@]}"))"
 	fi
 }
 
@@ -9134,9 +9125,11 @@ status_service()
 	# what separates the two
 	[ -n "$timestamp" ] || { result=""; exit_status=""; }
 
-	echo "Last update-predictions"
-	status_row "Result" "${result:-never ran}${exit_status:+ (exit $exit_status)}"
-	status_row "Finished" "${timestamp:-never}"
+	if [ -z "$timestamp" ]; then
+		status_row "Last update" "never ran"
+	else
+		status_row "Last update" "${result}${exit_status:+ (exit $exit_status)}, $timestamp"
+	fi
 }
 
 # Every file that can configure this run, in the order that they are
@@ -9517,12 +9510,10 @@ fde_status()
 	echo
 	status_devices
 	echo
+	echo "TPM2"
 	status_policy
-	echo
 	status_pcr15
-	echo
 	status_recovery_pin
-	echo
 	status_service sdbootutil-update-predictions.service
 
 	# An entry that names a file the ESP does not have is invisible
