@@ -9233,14 +9233,15 @@ status_config()
 	EOF
 }
 
-# One row for a binary in the ESP against the one that the system ships,
-# decided the same way that `bootloader_needs_update` decides
-status_version_row()
+# A binary in the ESP of the version DEPLOYED against the version SYSTEM
+# that the system ships, in words, decided the same way that
+# `bootloader_needs_update` decides
+status_version_text()
 {
-	local label="$1" deployed="$2" system="$3"
+	local deployed="$1" system="$2"
 
 	if [ -z "$system" ]; then
-		status_row "$label" "$deployed, the version of the system cannot be read"
+		echo "the version of the system cannot be read"
 		return
 	fi
 
@@ -9249,24 +9250,59 @@ status_version_row()
 	local status=0
 	systemd-analyze compare-versions "$deployed" "$system" > /dev/null 2>&1 || status="$?"
 	case "$status" in
-		11) status_row "$label" "$deployed, newer than the $system of the system" ;;
-		12) status_row "$label" "OUTDATED: $deployed in the ESP, $system in the system" ;;
-		*)  status_row "$label" "up to date ($deployed)" ;;
+		11) echo "newer than the $system of the system" ;;
+		12) echo "OUTDATED, the system has $system" ;;
+		*)  echo "up to date" ;;
 	esac
+}
+
+# The warnings of `status`, printed together at the end
+status_warnings=()
+status_warning()
+{
+	status_warnings+=("$1")
 }
 
 # What the machine booted, and what it will boot next
 status_boot()
 {
 	echo "Boot loader"
-	status_row "Type" "$(bootloader_name 2> /dev/null || echo unknown)"
+
+	# The version in the ESP against the version that the system
+	# ships, and the same for the shim, as `install_bootloader`
+	# deploys both and `bootloader_needs_update` counts both.  Both
+	# can be missing on their own: no bootloader installed yet, or a
+	# snapshot with no bootloader package
+	local name deployed="" system="" path="" type
+	name="$(bootloader_name 2> /dev/null || echo unknown)"
+	deployed="$(bootloader_version 2> /dev/null)" || deployed=""
+	path="$(find_bootloader 2> /dev/null)" || path=""
+	# Only with a path: with an empty argument "bootloader_version"
+	# falls back to the copy in the ESP, and it would compare the
+	# deployed version against itself
+	[ -z "$path" ] || system="$(bootloader_version "$path" 2> /dev/null)" || system=""
+	if [ -z "$deployed" ]; then
+		type="$name, not found in the ESP"
+	else
+		type="$name $deployed, $(status_version_text "$deployed" "$system")"
+	fi
+	local deployed_shim="" system_shim=""
+	deployed_shim="$(shim_version 2> /dev/null)" || deployed_shim=""
+	if [ -n "$deployed_shim" ]; then
+		system_shim="$(shim_version "$(find_shim)" 2> /dev/null)" || system_shim=""
+		type+="; shim $(status_version_text "$deployed_shim" "$system_shim")"
+	elif is_secure_boot; then
+		type+="; no shim"
+	fi
+	status_row "Type" "$type"
+
 	status_row "UKI" "$(uki_mode_text)"
 	[ "${UKI:-}" = "$uki_config" ] || \
-		echo "  /etc/sysconfig/bootloader has UKI=\"$uki_config\", but the TPM2 slots are made for this one: enroll the TPM2 again ('sdbootutil enroll --method tpm2') to change"
+		status_warning "/etc/sysconfig/bootloader has UKI=\"$uki_config\", but the TPM2 slots are made for UKI=\"${UKI:-}\": enroll the TPM2 again ('sdbootutil enroll --method tpm2') to change"
 	if [ "${UKI:-}" = "yes" ]; then
 		local missing
 		missing="$(uki_missing_kernels | paste -sd ' ')"
-		status_row "UKI files" "${missing:+missing for }${missing:-present for every kernel}"
+		[ -z "$missing" ] || status_warning "No UKI for the kernels $missing, so they boot as a kernel and an initrd: install their kernel-<flavor>-uki-<variant> packages"
 	fi
 	# The addon of each entry, signed with the local key, has the rest
 	# (see `uki_addon_cmdline`)
@@ -9274,61 +9310,43 @@ status_boot()
 		local problem
 		problem="$(dps_root_problem)"
 		if [ -n "$problem" ]; then
-			status_row "Root discovery" "$problem, so $(dps_addon_path) has \"root=\" and the crypttab"
+			status_row "Root discovery" "no, $problem; the shared addon has \"root=\""
 		elif [ -e "$(dps_addon_path)" ]; then
-			status_row "Root discovery" "yes, and $(dps_addon_path) has the crypttab of the other devices of the initrd"
+			status_row "Root discovery" "yes; the shared addon has the crypttab of the other devices of the initrd"
 		else
 			status_row "Root discovery" "yes"
 		fi
+		[ -z "$arg_full" ] || [ ! -e "$(dps_addon_path)" ] || status_row "Shared addon" "$(dps_addon_path)"
 		local dps=""
 		[ -n "$problem" ] || dps=1
 		dps_addon_crypttab_current "$dps" || \
-			echo "  The crypttab in the addon of the root is not the one of /etc/crypttab: run 'sdbootutil mkinitrd'"
+			status_warning "The crypttab in the shared addon of the UKIs is not the one of /etc/crypttab: run 'sdbootutil mkinitrd'"
 		if [ -e "$(dps_addon_path)" ]; then
 			local others
 			others="$(dps_addon_others | paste -sd ' ')"
-			[ -z "$others" ] || echo "  The addon changes the boot of the UKIs of other systems too: $others"
+			[ -z "$others" ] || status_warning "The shared addon of the UKIs changes the boot of the UKIs of other systems too: $others"
 		fi
 		status_row "Command line" "$(uki_cmdline_text)"
-		status_row "UKI key" "$([ -e "$credstore/secureboot-private-key.pem" ] && echo "$secureboot_certificate" || echo "not made yet")"
-		[ "$UKI" != "local" ] || ! grep -qs "^[^#]*tpm2-device" /etc/crypttab || \
-			status_row "PCR 11 key" "$([ -e "$credstore/tpm2-pcr-initrd-private-key.pem" ] && echo "$pcr_public_key" || echo "not made yet")"
+		# The keys: their paths for --full, and a missing one always
+		if [ -e "$credstore/secureboot-private-key.pem" ]; then
+			[ -z "$arg_full" ] || status_row "UKI key" "$secureboot_certificate"
+		else
+			status_row "UKI key" "not made yet"
+		fi
+		if [ "$UKI" = "local" ] && grep -qs "^[^#]*tpm2-device" /etc/crypttab; then
+			if [ -e "$credstore/tpm2-pcr-initrd-private-key.pem" ]; then
+				[ -z "$arg_full" ] || status_row "PCR 11 key" "$pcr_public_key"
+			else
+				status_row "PCR 11 key" "not made yet"
+			fi
+		fi
 		if is_secure_boot && is_shim_installed && [ -e "$secureboot_certificate" ]; then
 			case "$(mok_state)" in
-				enrolled) status_row "MOK" "the UKI certificate is enrolled" ;;
+				enrolled) [ -z "$arg_full" ] || status_row "MOK" "the UKI certificate is enrolled" ;;
 				pending) status_row "MOK" "enrolled at the next boot, in MokManager" ;;
 				*) status_row "MOK" "the UKI certificate is not enrolled" ;;
 			esac
 		fi
-	fi
-
-
-	# The version in the ESP against the version that the system
-	# ships.  Both can be missing on their own: no bootloader
-	# installed yet, or a snapshot with no bootloader package
-	local deployed="" system="" path=""
-	deployed="$(bootloader_version 2> /dev/null)" || deployed=""
-	path="$(find_bootloader 2> /dev/null)" || path=""
-	# Only with a path: with an empty argument "bootloader_version"
-	# falls back to the copy in the ESP, and it would compare the
-	# deployed version against itself
-	[ -z "$path" ] || system="$(bootloader_version "$path" 2> /dev/null)" || system=""
-
-	if [ -z "$deployed" ]; then
-		status_row "In the ESP" "no bootloader found in the ESP"
-	else
-		status_version_row "In the ESP" "$deployed" "$system"
-	fi
-
-	# `install_bootloader` deploys the shim and the bootloader
-	# together, so a shim that is not the one of the system is also a
-	# reason to run it, the way `bootloader_needs_update` counts it.
-	# Without a shim in the ESP there is nothing to compare
-	local deployed_shim="" system_shim=""
-	deployed_shim="$(shim_version 2> /dev/null)" || deployed_shim=""
-	if [ -n "$deployed_shim" ]; then
-		system_shim="$(shim_version "$(find_shim)" 2> /dev/null)" || system_shim=""
-		status_version_row "Shim" "$deployed_shim" "$system_shim"
 	fi
 
 	# Its own copy of the entry list, and not "update_entries": that
@@ -9420,6 +9438,8 @@ status_boot()
 
 	if [ -n "$oneshot" ]; then
 		status_row "Next boot" "$oneshot (one shot, and then ${default:-the default})$broken$diverged"
+	elif [ -n "$default" ] && [ "$(entry_key "$default")" = "$(entry_key "$booted")" ] && [ -z "$guess$broken$diverged" ]; then
+		status_row "Next boot" "the same"
 	else
 		status_row "Next boot" "${default:-unknown, no default is set}$broken$diverged"
 	fi
@@ -9458,15 +9478,19 @@ status_system()
 	else
 		status_row "Secure Boot" "disabled in the firmware"
 	fi
-	if is_shim_installed; then
-		status_row "Shim" "installed"
-	else
-		status_row "Shim" "not installed"
-	fi
-	if is_transactional; then
-		status_row "Transactional" "yes"
-	else
-		status_row "Transactional" "no"
+	# Details for --full.  The boot loader section says if the shim
+	# is up to date
+	if [ -n "$arg_full" ]; then
+		if is_shim_installed; then
+			status_row "Shim" "installed"
+		else
+			status_row "Shim" "not installed"
+		fi
+		if is_transactional; then
+			status_row "Transactional" "yes"
+		else
+			status_row "Transactional" "no"
+		fi
 	fi
 	# The lockout is why a device that is enrolled and predicted
 	# correctly still does not open
@@ -9540,6 +9564,15 @@ fde_status()
 			explain_pcrlock_recovery "$status_policy_stale"
 		fi
 	}
+
+	if [ "${#status_warnings[@]}" -gt 0 ]; then
+		echo
+		echo "Warnings"
+		local warning
+		for warning in "${status_warnings[@]}"; do
+			echo "  $warning"
+		done
+	fi
 
 	# Only for somebody reading it.  A report that is being collected
 	# is already redirected, and there the line is noise
