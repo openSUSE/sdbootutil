@@ -1725,7 +1725,8 @@ entry_missing_files()
 }
 
 # jq: the snapshot and the kernel version of an entry, as
-# {snapshot, kernel}.  The entries of sdbootutil say "N_<kernel>" (or
+# {snapshot, kernel}, and the snapshot alone, also from the "rootflags="
+# of the options.  The entries of sdbootutil say "N_<kernel>" (or
 # "N@" before), the ones of "bootctl link" have the snapshot in the id
 # ("-commit_N.") and the version "<commit>.<snapshot>.<kernel>", or
 # "<commit>.<kernel>" without snapshots, maybe with ".<variant>".  jq
@@ -1740,7 +1741,10 @@ jq_entry_version='def entry_version:
 			    | sub("\\.[^.-]+$"; ""))}
 	else
 		(.version // "") | capture("((?<snapshot>[0-9]*)[@_])?(?<kernel>.*)")
-	end;'
+	end;
+def snapshot:
+	((.options // "") | capture("rootflags=subvol=[^ ]*/\\.snapshots/(?<n>[0-9]+)/snapshot") | .n)
+	// (entry_version | .snapshot);'
 
 # Reads a `bootctl list --json` array and prints one line per entry that
 # does not boot, as "id|path|snapshot|version|missing".
@@ -2430,9 +2434,7 @@ removable_entries()
 	jq -r --arg in_use "${in_use[*]}" --arg last "$root_snapshot" --arg keep "${reused_entry:-}" \
 	   --arg snapshots "$have_snapshots" "$jq_entry_version"'
 		def snapshot_of:
-			((.options // "") | capture("rootflags=subvol=[^ ]*/\\.snapshots/(?<n>[0-9]+)/snapshot") | .n)
-			// ((.id // "") | capture("-commit_(?<n>[0-9]+)[.@+]") | .n)
-			// ((.version // "") | capture("^(?<n>[0-9]+)[@_]") | .n)
+			snapshot
 			// ((.id // "") | capture("-(?<n>[0-9]+)(\\+[0-9]+(-[0-9]+)?)?\\.conf$") | .n)
 			// "";
 		def kernel_of:
@@ -4707,12 +4709,9 @@ entry_snapshot()
 	local id="${1:?}"
 
 	# The id can come without ".conf", or with a boot counter
-	jq -r --arg id "$(entry_key "$id")" '.[]
+	jq -r --arg id "$(entry_key "$id")" --arg snapshots "$have_snapshots" "$jq_entry_version"'.[]
 		| select((.id // "" | sub("\\.conf$"; "") | sub("\\+[0-9]+(-[0-9]+)?$"; "")) == $id)
-		| ((.options // "") | capture("rootflags=subvol=[^ ]*/\\.snapshots/(?<n>[0-9]+)/snapshot") | .n)
-		  // ((.id // "") | capture("-commit_(?<n>[0-9]+)[.@+]") | .n)
-		  // ((.version // "") | capture("^(?<n>[0-9]+)[@_]") | .n)
-		  // empty'
+		| snapshot // empty'
 }
 
 # The snapshot that snapper reports as default, which is the btrfs
@@ -5171,11 +5170,11 @@ select_entries_for_prediction()
 	# the entries of "bootctl link" ("-commit_N."), whose version is
 	# "<commit>.<snapshot>.<kernel>"
 	if [ -n "$have_snapshots" ]; then
-		filter='def priority(id): id as $id | $ids | split(" ") | index($id); def snapshot: [(.version // "" | scan("^(\\d+)[@_]") | .[]), (.id | scan("-commit_(\\d+)[.@+]") | .[])] | first; map(([.version // "" | scan("(\\d+)\\.(\\d+)\\.(\\d+)-(\\d+)")] | first) as $kernel | . + {"priority": priority(snapshot), "kernel": (($kernel // []) | map(tonumber))})'
+		filter="$jq_entry_version"'def priority(id): id as $id | $ids | split(" ") | index($id); map(([.version // "" | scan("(\\d+)\\.(\\d+)\\.(\\d+)-(\\d+)")] | first) as $kernel | . + {"priority": priority(snapshot), "kernel": (($kernel // []) | map(tonumber))})'
 	else
 		filter='map(([.version // "" | scan("(\\d+)\\.(\\d+)\\.(\\d+)-(\\d+)")] | first) as $kernel | . + {"priority": 0, "kernel": (($kernel // []) | map(tonumber))})'
 	fi
-	jq --arg ids "$ids" "$filter"' | sort_by(.priority, (.kernel | map(-.)))' < "$entryfile" > "${entryfile}.ext"
+	jq --arg ids "$ids" --arg snapshots "$have_snapshots" "$filter"' | sort_by(.priority, (.kernel | map(-.)))' < "$entryfile" > "${entryfile}.ext"
 	mv "${entryfile}.ext" "$entryfile"
 
 	# While the UKIs are selected PCR 9 is out of the policy, so
