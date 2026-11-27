@@ -2794,6 +2794,19 @@ dps_addon_others()
 		jq -r --arg token "$entry_token-" '.[] | select(.type == "type2" or (.uki and (.id | startswith($token) | not))) | .id'
 }
 
+# Whether the addon of the root has the crypttab that it would get now.
+# A new encrypted device in /etc/crypttab changes it, and then the
+# addon must be written again
+dps_addon_crypttab_current()
+{
+	local now="$tmpdir/crypttab-now.cpio" addon="$tmpdir/crypttab-addon.cpio" ret=0
+	crypttab_cpio "$now"
+	objcopy -O binary --only-section=.initrd "$(dps_addon_path)" "$addon" 2> /dev/null || ret=1
+	[ "$ret" -ne 0 ] || cmp -s "$now" "$addon" || ret=1
+	rm -f "$now" "$addon"
+	return "$ret"
+}
+
 # The addon of the root, when the discovery does not find it (see
 # `dps_root_problem`): "root=" and an initrd with the crypttab that
 # dracut would use.  It is the same for every UKI, local or of the
@@ -9194,6 +9207,8 @@ status_boot()
 		local problem
 		problem="$(dps_root_problem)"
 		status_row "Root discovery" "${problem:-yes}${problem:+, so $(dps_addon_path) has \"root=\" and the crypttab}"
+		[ -z "$problem" ] || dps_addon_crypttab_current || \
+			echo "  The crypttab in the addon of the root is not the one of /etc/crypttab: run 'sdbootutil mkinitrd'"
 		if [ -e "$(dps_addon_path)" ]; then
 			local others
 			others="$(dps_addon_others | paste -sd ' ')"
