@@ -55,7 +55,7 @@ The scenarios, roughly in order of how much of the tool they touch:
 |---|---|
 | `noop` | the capture is deterministic and the guest is healthy |
 | `orphan-initrd` | negative control: the harness is not blind |
-| `add-all-kernels` | the ordinary kernel-install path is idempotent |
+| `add-all-kernels` | the ordinary path for adding kernels is idempotent |
 | `missing-initrd` | a deleted initrd is regenerated and the entry made whole |
 | `remove-readd-kernel` | reference counting frees exactly what it should, and the round trip returns |
 | `update-all-entries` | editing an entry in place is not a silent no-op, and is deterministic |
