@@ -2668,7 +2668,7 @@ t_install_local_uki_kept()
 t_entries_linked()
 {
 	load
-	local entryfile="$workdir/entries.json" entry_token=opensuse-tumbleweed subvol_prefix=@
+	local entryfile="$workdir/entries.json" entry_token=opensuse-tumbleweed subvol_prefix=@ have_snapshots=1
 	get_all_rootfs() { echo "/dev/mapper/cr_root"; }
 	bootctl_entries()
 	{
