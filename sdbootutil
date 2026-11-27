@@ -8736,46 +8736,19 @@ status_device()
 		done
 	fi
 
-	echo "  ${dev}${name:+ ($name)}"
-
-	# In the summary the tracking is only worth a line when it is not
-	# the plain "yes": an untracked or an ignored device is the
-	# explanation for a password prompt that nobody expected
-	if [ -n "$arg_full" ] || [ -n "$ignored" ] || [ -z "$tracked" ]; then
-		if [ -n "$ignored" ]; then
-			status_subrow "Tracked" "no (x-sdbootutil.ignore)"
-		elif [ -n "$tracked" ]; then
-			status_subrow "Tracked" "yes"
-		else
-			status_subrow "Tracked" "no (not in /etc/crypttab)"
-		fi
-	fi
-
-	[ -n "$header" ] || status_subrow "LUKS2 header" "CANNOT BE READ"
-
-	if [ "${#unique[@]}" -eq 0 ]; then
-		status_subrow "Unlocks with" "nothing"
-	else
-		status_subrow "Unlocks with" "$(status_join "${unique[@]}")"
-	fi
-
-	if [ -n "$arg_full" ]; then
-		if [[ "$opts" == *"tpm2-measure-pcr=yes"* ]]; then
-			status_subrow "PCR 15" "measured (the anchor)"
-		else
-			status_subrow "PCR 15" "not measured"
-		fi
-	fi
+	# A device that is not in /etc/crypttab is only listed with
+	# --full.  The caller counts it
+	[ -n "$arg_full" ] || [ -n "$tracked" ] || [ -n "$ignored" ] || return 1
 
 	# A slot bound to PCR 15 only unseals in the initrd, or after it
 	# for the devices that the initrd does not unlock, which then also
 	# unseal on the running system (see `pcr15_slot_value`)
-	local binding=none bound="unseals only in the initrd"
+	local binding=none where="" bound="opens it only in the initrd"
 	[ -z "$header" ] || binding="$(tpm2_slot_binding "$dev" "$header")"
 	# The anchor is in the initrd: no need to read it
 	if [[ "$binding" == bound* ]] && [[ "$opts" != *"tpm2-measure-pcr=yes"* ]]; then
 		read_initrd_crypttab
-		[ "$(device_stage "$dev" "$anchor")" != late ] || bound="unseals after the initrd, also on the running system"
+		[ "$(device_stage "$dev" "$anchor")" != late ] || bound="opens it after the initrd, also on the running system"
 	fi
 	# See `pcr15_unbound_device`
 	if [ "$binding" = "plain" ] && uki_selected && [ -n "$anchor" ]; then
@@ -8783,29 +8756,57 @@ status_device()
 		! pcr15_unbound_device "$dev" "$anchor" || binding=late
 	fi
 	case "$binding" in
-		late) status_subrow "TPM2 slot" "unseals after the initrd, also on the running system (not bound to PCR 15 with the UKIs)" ;;
-		bound) status_subrow "TPM2 slot" "$bound" ;;
-		bound+plain) status_subrow "TPM2 slot" "$bound, but an older slot still unseals on the running system" ;;
-		plain|pin) status_subrow "TPM2 slot" "ALSO unseals on the running system" ;;
+		late) where="opens it after the initrd, also on the running system (a late device with the UKIs)" ;;
+		bound) where="$bound" ;;
+		bound+plain) where="$bound, but an older slot still opens it on the running system" ;;
+		plain|pin) where="opens it ALSO on the running system" ;;
 	esac
 
-	case "$binding" in
-		plain) echo "    WARNING: the next 'sdbootutil update-predictions' adds a slot bound to the boot, once the anchor was measured" ;;
-		pin) echo "    WARNING: enroll the TPM2 again ('sdbootutil enroll --method=tpm2+pin') to bind it to the boot" ;;
-	esac
+	local methods_text="nothing"
+	[ "${#unique[@]}" -eq 0 ] || methods_text="$(status_join "${unique[@]}")"
 
-	[ -z "$tpm2_only" ] || \
-		echo "    WARNING: only the TPM2 can open this device.  A firmware update, a bootloader update or a cleared TPM2 leaves it unopenable"
-
-	# See `warn_tpm2_slot_without_option`
-	[[ "$slots" != *", pcrlock NVIndex"* ]] || [ -z "$tracked" ] || [ -n "$ignored" ] || [[ "$opts" == *"tpm2-device"* ]] || \
-		echo "    WARNING: there is a TPM2 slot, but no \"tpm2-device\" option in /etc/crypttab, so the TPM2 policy is never updated"
-
-	[ -z "$arg_full" ] || \
+	local label="${dev}${name:+ ($name)}"
+	if [ -n "$arg_full" ]; then
+		echo "  $label"
+		if [ -n "$ignored" ]; then
+			status_subrow "Tracked" "no (x-sdbootutil.ignore)"
+		elif [ -n "$tracked" ]; then
+			status_subrow "Tracked" "yes"
+		else
+			status_subrow "Tracked" "no (not in /etc/crypttab)"
+		fi
+		[ -n "$header" ] || status_subrow "LUKS2 header" "CANNOT BE READ"
+		status_subrow "Unlocks with" "$methods_text"
+		if [[ "$opts" == *"tpm2-measure-pcr=yes"* ]]; then
+			status_subrow "PCR 15" "measured (the anchor)"
+		else
+			status_subrow "PCR 15" "not measured"
+		fi
+		[ -z "$where" ] || status_subrow "TPM2 slot" "$where"
 		while IFS=$'\t' read -r slot method token extra; do
 			[ -n "$slot" ] || continue
 			echo "    slot ${slot}: ${method}${token:+ ($token)}${extra}"
 		done <<<"$slots"
+	else
+		local line="$methods_text"
+		[ -n "$header" ] || line="LUKS2 header CANNOT BE READ"
+		[ -z "$ignored" ] || line+="; ignored (x-sdbootutil.ignore)"
+		[ -z "$where" ] || line+="; the TPM2 $where"
+		echo "  $label: $line"
+	fi
+
+	case "$binding" in
+		plain) status_warning "$label: the TPM2 slot also opens it on the running system.  The next 'sdbootutil update-predictions' adds a slot bound to the boot, once the anchor was measured" ;;
+		pin) status_warning "$label: the TPM2 slot also opens it on the running system.  Enroll the TPM2 again ('sdbootutil enroll --method=tpm2+pin') to bind it to the boot" ;;
+	esac
+
+	[ -z "$tpm2_only" ] || \
+		status_warning "$label: only the TPM2 can open it.  A firmware update, a bootloader update or a cleared TPM2 leaves it unopenable"
+
+	# See `warn_tpm2_slot_without_option`
+	[[ "$slots" != *", pcrlock NVIndex"* ]] || [ -z "$tracked" ] || [ -n "$ignored" ] || [[ "$opts" == *"tpm2-device"* ]] || \
+		status_warning "$label: there is a TPM2 slot, but no \"tpm2-device\" option in /etc/crypttab, so the TPM2 policy is never updated"
+	return 0
 }
 
 status_devices()
@@ -8831,11 +8832,13 @@ status_devices()
 	fi
 
 	# The same for every device, so read once
-	local anchor
+	local anchor others=0
 	anchor="$(measure_anchor 2> /dev/null)" || anchor=
 	for dev in "${all[@]}"; do
-		status_device "$dev" "$anchor"
+		status_device "$dev" "$anchor" || others=$((others + 1))
 	done
+	[ "$others" -eq 0 ] || \
+		echo "  $others other LUKS2 device(s) not in /etc/crypttab ('status --full' lists them)"
 }
 
 status_policy()
