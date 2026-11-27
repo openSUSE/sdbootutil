@@ -635,6 +635,36 @@ t_update_entry_uki()
 	return 0
 }
 
+# rewrite_old_entry_versions writes "N_" instead of "N@" in the version
+# of the entries of this system, records them, and asks for new
+# predictions.  Other lines, other entries and other systems stay
+# shellcheck disable=SC2034,SC2329  # read and called by the sourced library
+t_rewrite_old_entry_versions()
+{
+	load
+	local boot_root="$workdir/esp-rewrite" entry_token=t tmpdir="$workdir/tmp" update_predictions=
+	local e="$workdir/esp-rewrite/loader/entries"
+	mkdir -p "$e" "$tmpdir"
+	settle_entry_token() { :; }
+	record_esp_file() { echo "${1##*/}" >> "$workdir/rewrite-recorded"; }
+	printf 'title T\nversion    5@6.2.1-1-default\noptions a@b\n' > "$e/t-6.2.1-1-default-5.conf"
+	printf 'title T\nversion    6@6.2.1-1-default\n' > "$e/t-6.2.1-1-default-6+2-1.conf"
+	printf 'title T\nversion    7_6.2.1-1-default\n' > "$e/t-6.2.1-1-default-7.conf"
+	printf 'title O\nversion    5@6.2.1-1-default\n' > "$e/other-6.2.1-1-default-5.conf"
+
+	rewrite_old_entry_versions 5 2> /dev/null
+	is "old" "$(printf 'title T\nversion    5_6.2.1-1-default\noptions a@b')" "$(cat "$e/t-6.2.1-1-default-5.conf")"
+	is "with a boot counter" "$(printf 'title T\nversion    6_6.2.1-1-default')" "$(cat "$e/t-6.2.1-1-default-6+2-1.conf")"
+	is "another system" "$(printf 'title O\nversion    5@6.2.1-1-default')" "$(cat "$e/other-6.2.1-1-default-5.conf")"
+	is "recorded" "t-6.2.1-1-default-5.conf t-6.2.1-1-default-6+2-1.conf" "$(sort "$workdir/rewrite-recorded" | paste -sd ' ')"
+	is "predictions" 1 "$update_predictions"
+
+	update_predictions=
+	rewrite_old_entry_versions 5 2> /dev/null
+	is "once" "" "$update_predictions"
+	return 0
+}
+
 # remove_kernel changes the default entry only when it removed it
 # shellcheck disable=SC2034,SC2329  # read and called by the sourced library
 t_remove_kernel_default()
@@ -3416,6 +3446,7 @@ done <<-'EOF'
 	t_entry_snapshot_id         entry_snapshot finds the entry without .conf or with a boot counter
 	t_update_entry_conf         update_entry_conf writes the options once, as they are
 	t_update_entry_uki          update_entry rebuilds the addon of a UKI, not of another kind
+	t_rewrite_old_entry_versions the old "N@" versions of this system become "N_", once
 	t_remove_kernel_default     remove_kernel changes the default entry only when it removed it
 	t_unlink_replaced_entry     the entries of another kind go, but the booted one, and the default moves
 	t_enroll_anchor             enroll: the anchor measures, and its slot is bound to PCR 15 at zero

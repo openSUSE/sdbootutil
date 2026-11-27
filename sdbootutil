@@ -4353,6 +4353,26 @@ bootloader_update()
 	fi
 
 	install_extra_entries "${1:-$root_snapshot}"
+	rewrite_old_entry_versions "${1:-$root_snapshot}"
+}
+
+# Entries written before the "N_" prefix have "N@" in their version,
+# and systemd >= v262 warns about the "@" every time it reads one.  This
+# writes "N_" in the entries of this system, once.  The boot loader
+# sorts both the same.  grub2-bls measures the entry files, so the new
+# ones are recorded, and the predictions are updated
+rewrite_old_entry_versions()
+{
+	local snapshot="$1" f
+	settle_entry_token "$snapshot"
+	for f in "${boot_root}/loader/entries/${entry_token}-"*.conf; do
+		[ -e "$f" ] || continue
+		grep -qE '^version[[:space:]]+[0-9]+@' "$f" || continue
+		info "Writing \"N_\" in the version of ${f##*/}"
+		sed -i -E 's/^(version[[:space:]]+[0-9]+)@/\1_/' "$f"
+		record_esp_file "$f"
+		update_predictions=1
+	done
 }
 
 # `bootctl random-seed` hashes fresh entropy together with the seed
