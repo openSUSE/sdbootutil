@@ -1725,7 +1725,8 @@ t_enroll_uki_late()
 	echo "cr_test $dev none x-initrd.attach,tpm2-device=auto" > /etc/crypttab
 	UKI=local uki_config=local anchor=/dev/the-anchor
 	run_enroll || fail "enroll failed: $(cat "$workdir/out")"
-	is "steps" "initrd predict" "$(paste -sd ' ' "$workdir/log")"
+	# The entries are checked: the UKIs must carry the PCR 11 key
+	is "steps" "install:local initrd predict" "$(paste -sd ' ' "$workdir/log")"
 	says "no signed policy" "$(cat "$workdir/args")" "--tpm2-public-key="
 	says_not "PCR 15" "$(cat "$workdir/args")" "--tpm2-pcrs=15"
 }
@@ -2441,6 +2442,10 @@ t_uki()
 	detect_parent() { parent_snapshot=""; }
 	is "its own" "$boot_root/loader/entries/t-commit_5.5.7.3.4-1-default.conf" \
 		"$(reusable_uki 5 @/.snapshots/5/snapshot 7.3.4-1-default "root=UUID=1 quiet" "$workdir/linux")"
+	# The UKI must carry the PCR 11 key of now, and none without it
+	rm "$credstore/tpm2-pcr-initrd-private-key.pem"
+	reusable_uki 5 @/.snapshots/5/snapshot 7.3.4-1-default "root=UUID=1 quiet" "$workdir/linux" && \
+		fail "reused with a PCR 11 key that is not the one of now"
 	return 0
 }
 
