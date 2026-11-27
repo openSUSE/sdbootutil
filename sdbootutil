@@ -7381,6 +7381,21 @@ initrd_crypttab()
 	fi
 }
 
+# Where the device "$1" is opened, with the anchor "$2".  "anchor" is
+# the anchor itself.  "initrd" is a device that the initrd opens after
+# the anchor.  "late" is a device that is opened after the end of the
+# initrd.  The caller runs `read_initrd_crypttab` first
+device_stage()
+{
+	if [ "${1:?}" = "${2:-}" ]; then
+		echo anchor
+	elif in_initrd_crypttab "$1"; then
+		echo initrd
+	else
+		echo late
+	fi
+}
+
 # The value of PCR 15 that the TPM2 slot of "$1" is bound to, with the
 # anchor "$2".  The caller runs `read_initrd_crypttab` first, in its own
 # shell, as this one usually runs in a subshell
@@ -7395,13 +7410,11 @@ pcr15_slot_value()
 {
 	local dev="${1:?}" anchor="${2:?}"
 
-	if [ "$dev" = "$anchor" ]; then
-		printf '%064d\n' 0
-	elif in_initrd_crypttab "$dev"; then
-		pcr15_bound_value "$anchor" ""
-	else
-		pcr15_bound_value "$anchor" leave-initrd
-	fi
+	case "$(device_stage "$dev" "$anchor")" in
+		anchor) printf '%064d\n' 0 ;;
+		initrd) pcr15_bound_value "$anchor" "" ;;
+		late) pcr15_bound_value "$anchor" leave-initrd ;;
+	esac
 }
 
 # Whether "$1" is left without PCR 15 in its TPM2 slot, with the anchor
@@ -7412,7 +7425,7 @@ pcr15_slot_value()
 # caller runs `read_initrd_crypttab` first
 pcr15_unbound_device()
 {
-	uki_selected && [ "${1:?}" != "${2:-}" ] && ! in_initrd_crypttab "$1"
+	uki_selected && [ "$(device_stage "${1:?}" "${2:-}")" = late ]
 }
 
 # The arguments of systemd-cryptenroll for the signed PCR policy of the
@@ -7733,7 +7746,7 @@ can_unlock()
 		local anchor
 		anchor="$(measure_anchor)" || anchor=
 		read_initrd_crypttab
-		if [ "$dev" = "$anchor" ] || in_initrd_crypttab "$dev"; then
+		if [ "$(device_stage "$dev" "$anchor")" != late ]; then
 			info "Not unlocking using TPM2: the slot of $dev opens only in the initrd"
 			return 1
 		fi
@@ -8762,7 +8775,7 @@ status_device()
 	# The anchor is in the initrd: no need to read it
 	if [[ "$binding" == bound* ]] && [[ "$opts" != *"tpm2-measure-pcr=yes"* ]]; then
 		read_initrd_crypttab
-		in_initrd_crypttab "$dev" || bound="unseals after the initrd, also on the running system"
+		[ "$(device_stage "$dev" "$anchor")" != late ] || bound="unseals after the initrd, also on the running system"
 	fi
 	# See `pcr15_unbound_device`
 	if [ "$binding" = "plain" ] && uki_selected && [ -n "$anchor" ]; then
