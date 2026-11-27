@@ -2920,41 +2920,29 @@ entry_file()
 	return 1
 }
 
-# Remove the entries of the kernel VERSION in SNAPSHOT that are of
-# another kind than NEW, the entry just written.  The kinds are the
-# entry of the kernel and the initrd, the one of a local UKI, and the
-# ones of the UKIs of the packages (one per variant).  After a change of
-# UKI the others do not boot, as the TPM2 slots are made for the new
-# kind.  But not the booted one: if NEW does not boot, it is the way
-# back, and a later run removes it.  If one was the default entry, NEW
-# is the default now, also when it stays as the booted one
-unlink_replaced_entry()
+# Remove the entries of the kernel VERSION in SNAPSHOT that are not
+# KEPT..., the entries just written.  The others are of another kind
+# (kernel and initrd, local UKI, UKIs of the packages), or of a variant
+# that is gone.  After a change of UKI they do not boot, as the TPM2
+# slots are made for the new kind.  But not the booted one: if the new
+# entry does not boot, it is the way back, and a later run removes it.
+# If one was the default entry, the first of KEPT is the default now,
+# also when it stays as the booted one
+unlink_other_entries()
 {
-	local kernel_version="$1" snapshot="$2" new="$3"
-	local type1 local_uki kind id selected default ids=()
-	type1="$(entry_conf_file "$kernel_version" "$snapshot")"
-	local_uki="$(linked_entry_id "$kernel_version" "$snapshot")"
-	if [ "$(entry_key "$new")" = "$(entry_key "$type1")" ]; then
-		kind=type1
-	elif [ "$(entry_key "$new")" = "$(entry_key "$local_uki")" ]; then
-		kind=local
-	else
-		kind=yes
-	fi
-	[ "$kind" = type1 ] || ids+=("$type1")
-	for id in $(linked_entry_ids "$kernel_version" "$snapshot"); do
-		case "$kind" in
-			type1) ids+=("$id") ;;
-			local) [ "$id" = "$local_uki" ] || ids+=("$id") ;;
-			yes) [ "$id" != "$local_uki" ] || ids+=("$id") ;;
-		esac
+	local kernel_version="$1" snapshot="$2"
+	shift 2
+	local kept=" " id selected default
+	for id; do
+		kept+="$(entry_key "$id") "
 	done
 
 	selected="$(entry_key "$(bli_efi_var_get "LoaderEntrySelected" 2> /dev/null)")"
 	default="$(get_default_entry 2> /dev/null)" || default=
-	for id in "${ids[@]}"; do
+	for id in "$(entry_conf_file "$kernel_version" "$snapshot")" $(linked_entry_ids "$kernel_version" "$snapshot"); do
+		[[ "$kept" != *" $(entry_key "$id") "* ]] || continue
 		entry_file "$id" > /dev/null || continue
-		[ "$(entry_key "$id")" != "$(entry_key "$default")" ] || set_default_entry "$new"
+		[ "$(entry_key "$id")" != "$(entry_key "$default")" ] || set_default_entry "$1"
 		[ "$(entry_key "$id")" != "$selected" ] || continue
 		bootctl_entries unlink "$id"
 	done
@@ -3039,6 +3027,7 @@ install_local_uki()
 	fi
 
 	link_uki "$snapshot" "$subvol" "$kernel_version" "$uki" "" ""
+	unlink_other_entries "$kernel_version" "$snapshot" "$(linked_entry_id "$kernel_version" "$snapshot")"
 }
 
 # SRC as NAME-<hash>SUFFIX in $tmpdir, for "bootctl link": it takes the
@@ -3067,11 +3056,12 @@ install_distro_ukis()
 		return 1
 	}
 
-	local uki variant addon extras several=""
+	local uki variant addon extras several="" ids=()
 	[ "${#ukis[@]}" -eq 1 ] || several=1
 	for uki in "${ukis[@]}"; do
 		variant="${uki##*/vmlinuz-}"
 		variant="${variant%.efi}"
+		ids+=("$(linked_entry_id "$kernel_version" "$snapshot" "$variant")")
 		extras=()
 		for addon in "$uki.extra.d"/*.addon.efi; do
 			[ -e "$addon" ] || continue
@@ -3080,6 +3070,7 @@ install_distro_ukis()
 		link_uki "$snapshot" "$subvol" "$kernel_version" \
 			"$(stage_hashed "$uki" "$kernel_version-$variant" .efi)" "$variant" "$several" "${extras[@]}"
 	done
+	unlink_other_entries "$kernel_version" "$snapshot" "${ids[@]}"
 }
 
 # The name of the addon with the command line CMDLINE.  It changes with
@@ -3132,7 +3123,6 @@ link_uki()
 		have="$(for f in $have; do echo "${f##*/}"; done | sort)"
 		if [ "$wanted" = "$have" ] && [ -z "$(entry_missing_files "$entry")" ]; then
 			info "UKI of $kernel_version${variant:+ ($variant)} already in the ESP"
-			unlink_replaced_entry "$kernel_version" "$snapshot" "$id"
 			return 0
 		fi
 	fi
@@ -3175,7 +3165,6 @@ link_uki()
 	entry="$(entry_file "$id")" || err "No entry $id after linking the UKI"
 	sed -i "/^sort-key /d; \$a sort-key $sort_key" "$entry"
 
-	unlink_replaced_entry "$kernel_version" "$snapshot" "$id"
 	rm -f "$tmpdir"/*.efi
 	cleanup_pending=1
 	update_predictions=1
@@ -3317,7 +3306,7 @@ install_kernel()
 		|| [ -n "$arg_force" ] \
 		|| {
 		info "Kernel $kernel_version already in the ESP"
-		unlink_replaced_entry "$kernel_version" "$snapshot" "$(entry_conf_file "$kernel_version" "$snapshot")"
+		unlink_other_entries "$kernel_version" "$snapshot" "$(entry_conf_file "$kernel_version" "$snapshot")"
 		return 0
 	}
 
@@ -3438,7 +3427,7 @@ install_kernel()
 	fi
 	[ -z "$failed" ] || err "Failed to install $failed"
 	reset_rollback
-	unlink_replaced_entry "$kernel_version" "$snapshot" "$(entry_conf_file "$kernel_version" "$snapshot")"
+	unlink_other_entries "$kernel_version" "$snapshot" "$(entry_conf_file "$kernel_version" "$snapshot")"
 
 	# A replaced initrd is left in the ESP, see `bootctl_cleanup`
 	cleanup_pending=1
