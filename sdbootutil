@@ -732,7 +732,7 @@ settle_uki_mode()
 		UKI=yes
 		[ ! -e "$credstore/tpm2-pcr-initrd-private-key.pem" ] || UKI=local
 	fi
-	[ "$UKI" = "$uki_config" ] || dbg "UKI=\"$uki_config\" takes effect with 'sdbootutil enroll', the TPM2 slots are for UKI=\"$UKI\""
+	[ "$UKI" = "$uki_config" ] || dbg "UKI=\"$uki_config\" takes effect when the TPM2 is enrolled again ('sdbootutil enroll --method tpm2'), the TPM2 slots are for UKI=\"$UKI\""
 }
 
 # The UKIs are selected in /etc/sysconfig/bootloader
@@ -9182,7 +9182,7 @@ status_boot()
 	status_row "Type" "$(bootloader_name 2> /dev/null || echo unknown)"
 	status_row "UKI" "$(uki_mode_text)"
 	[ "${UKI:-}" = "$uki_config" ] || \
-		echo "  /etc/sysconfig/bootloader has UKI=\"$uki_config\", but the TPM2 slots are made for this one: run 'sdbootutil enroll' to change"
+		echo "  /etc/sysconfig/bootloader has UKI=\"$uki_config\", but the TPM2 slots are made for this one: enroll the TPM2 again ('sdbootutil enroll --method tpm2') to change"
 	if [ "${UKI:-}" = "yes" ]; then
 		local missing
 		missing="$(uki_missing_kernels | paste -sd ' ')"

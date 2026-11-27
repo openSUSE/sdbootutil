@@ -19,6 +19,10 @@ yourself to do the enrollment or to diagnose issues with FDE.
   (ESP), with shim when Secure Boot is used.
 - **Adds a boot entry for each kernel and each snapshot.**  You can
   boot an older snapshot from the boot menu.
+- **Can boot unified kernel images (UKI).**  It boots the UKIs of the
+  kernel packages, or builds and signs them in the system.  One UKI
+  boots every snapshot: small signed addons add the snapshot and the
+  kernel command line.  Only with systemd-boot.
 - **Saves space in the ESP.**  Kernels and initrds are named by their
   checksum, so snapshots that use the same file share one copy.
 - **Keeps free space in the ESP.**  Old entries are removed when a new
@@ -58,6 +62,21 @@ Update the boot loader when the package has a new version:
 Add the entries of all kernels of the current snapshot:
 
     sdbootutil add-all-kernels
+
+Boot the UKIs of the kernel packages.  Set `UKI="yes"` in
+`/etc/sysconfig/bootloader`, and add the entries again:
+
+    sdbootutil add-all-kernels
+
+With the TPM2 enrolled, enroll it again instead.  The TPM2 slots are
+made for one kind of boot entry:
+
+    sdbootutil enroll --method tpm2
+
+After a change in `/etc/crypttab`, build the initrds (and the addons
+of the UKIs) again:
+
+    sdbootutil mkinitrd
 
 List the boot entries:
 
