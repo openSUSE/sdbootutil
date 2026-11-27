@@ -2,33 +2,35 @@
 # SPDX-License-Identifier: MIT
 # SPDX-FileCopyrightText: Copyright 2026 SUSE LLC
 #
-# Unit tests for the library half of sdbootutil: the routing of the
-# secrets -- which source wins, what is published to the keyring, and
-# which warnings are printed -- the entry names the boot loaders spell
-# differently, the versions the status report compares, `grubenv`, the
-# entries that may be removed to make room in the ESP, and the files of
-# the ESP that may reach a TPM2 policy.
+# Unit tests for the library half of sdbootutil.  They cover how the
+# secrets are routed: which source wins, what goes to the keyring, and
+# which warnings are printed.  They also cover the entry names that the
+# boot loaders spell differently, the versions that the status report
+# compares, `grubenv`, the entries that may be removed to make room in
+# the ESP, and the files of the ESP that may reach a TPM2 policy.
 #
-# These are decisions the tool takes *before* it writes anything to the
-# TPM2, so they do not need one, and they do not need a guest either: a
-# scratch LUKS2 container on a loop device answers `cryptsetup` and
-# `systemd-cryptenroll` exactly like a real root device does.  What
-# cannot be reached from here is everything about the pcrlock NVIndex
-# (authorizing with the old PIN, the "not needed, so not validated"
-# skip); that needs a real TPM2 and destroys the enrollment of the
-# machine it runs on, so it belongs to a guest and not to this file.
+# The tool takes these decisions *before* it writes anything to the
+# TPM2.  So the tests need no TPM2, and no guest either.  A scratch
+# LUKS2 container on a loop device answers `cryptsetup` and
+# `systemd-cryptenroll` exactly like a real root device does.  The
+# pcrlock NVIndex cannot be tested here: authorizing with the old PIN,
+# and the "not needed, so not validated" skip.  That needs a real TPM2,
+# and it destroys the enrollment of the machine it runs on.  So it
+# belongs to a guest, not to this file.
 #
-# `tests/run` drives the boot and FDE state of a whole guest and never
-# writes outside a copy of the ESP.  This one is the opposite: it writes
-# LUKS2 headers, but only the ones it made itself.
+# `tests/run` drives the boot and FDE state of a whole guest.  It never
+# writes outside a copy of the ESP.  This file is the opposite: it
+# writes LUKS2 headers, but only the ones that it made itself.
 #
 # Usage:
 #   tests/unit [-h]
 #
-# Needs root, for losetup and for the keyring.  The entries it uses are
-# the real ones -- the names are in the code -- so it refuses to start
-# when one of them is already there, rather than overwrite a secret that
-# an installer or an interrupted enrollment left behind.
+# Needs root, for losetup and for the keyring.  The tests use the real
+# keyring entries, because the names are in the code.  So the tests
+# refuse to start when one of these entries is already there.  This is
+# because the entry can hold a secret that an installer or an
+# interrupted enrollment left behind, and the tests must not overwrite
+# it.
 
 set -e
 shopt -s nullglob
@@ -40,8 +42,9 @@ top="$(dirname "$here")"
 # authorizes every enrollment below
 BOOTSTRAP="bootstrap-password"
 
-# The keyring entries sdbootutil reads or writes.  Purged between cases
-# so that one cannot inherit what the one before it left
+# The keyring entries that sdbootutil reads or writes.  They are purged
+# between cases, so that a case does not inherit what the case before
+# it left
 KEYS=(cryptenroll sdbootutil sdbootutil-key sdbootutil-pw sdbootutil-pin
       sdbootutil-recovery-pin sdbootutil-tpm2-pin)
 
@@ -76,16 +79,17 @@ done
 
 # The PCR 15 cases read and write fixed paths of the host (/etc/crypttab,
 # /var/lib/sdbootutil, /var/lib/pcrlock.d, the measurement log).  They
-# put scratch mounts over them, so everything runs in a mount namespace
-# of its own, and nothing reaches the host
+# put scratch mounts over these paths.  So everything runs in a mount
+# namespace of its own, and nothing reaches the host
 if [ -z "${SDBOOTUTIL_UNIT_NS:-}" ]; then
 	command -v unshare > /dev/null || skip "unshare is not installed"
 	exec env SDBOOTUTIL_UNIT_NS=1 unshare --mount --propagation private "${BASH_SOURCE[0]}" "$@"
 fi
 
-# The library half of sdbootutil.  Everything below the marker is the
-# command dispatcher, which would run on source; everything above it is
-# definitions, and the marker is already there for the completion data
+# The library half of sdbootutil.  Everything below the "main" marker
+# is the command dispatcher, and it would run when sourced.  Everything
+# above the marker is definitions.  The marker is already there for the
+# completion data
 lib=
 dev=
 workdir="$(mktemp -d -t sdbootutil-unit.XXXXXX)"
@@ -116,9 +120,10 @@ extract_lib()
 	( . "$lib" ) || die "the library half of sdbootutil does not source cleanly"
 }
 
-# A fresh LUKS2 header for every case, so that the slots of one do not
-# reach the next.  pbkdf2 with the lowest iteration count keeps a format
-# under a tenth of a second; nothing here measures key derivation
+# A fresh LUKS2 header for every case, so that the slots of one case do
+# not reach the next.  pbkdf2 with the lowest iteration count keeps a
+# format under a tenth of a second.  No test here measures the key
+# derivation
 format_device()
 {
 	cryptsetup luksFormat --type luks2 --batch-mode \
@@ -134,8 +139,8 @@ setup_device()
 
 ####### the assertions #######
 #
-# They report and continue, so that one case tells the whole story
-# instead of only its first mistake.  `case_failed` is a plain variable
+# They report a failure and continue.  So one case shows all its
+# mistakes, not only the first one.  `case_failed` is a plain variable,
 # because every case runs in its own subshell
 
 fail()
@@ -157,8 +162,9 @@ says()
 	esac
 }
 
-# The content of the section NAME of the PE file FILE.  Not through
-# /dev/stdout: objcopy renames a new file over its output
+# The content of the section NAME of the PE file FILE.  It does not
+# write to /dev/stdout.  This is because objcopy renames a new file
+# over its output
 pe_section_text()
 {
 	objcopy -O binary --only-section="$2" "$1" "$workdir/section"
@@ -222,27 +228,29 @@ not_traced()
 	done
 }
 
-# Source the library with whatever the case put in the environment, and
-# take back the `set -e` that sdbootutil turns on: an assertion has to
-# be able to fail without ending the case
+# Source the library with the environment that the case set.  Then turn
+# off the `set -e` that sdbootutil turns on.  This is because an
+# assertion must be able to fail without ending the case
 load()
 {
 	# shellcheck source=/dev/null
 	. "$lib"
 	set +e
-	# grubenv_set and the installers record into it, never the host's
+	# `grubenv_set` and the installers record the files here, never in
+	# the file of the host
 	# shellcheck disable=SC2034  # read by the sourced library
 	esp_files="$workdir/esp-files"
 }
 
 # An empty tmpfs over "dir", for the cases that use a fixed path of the
-# host.  Only our own tmpfs is emptied: "dir" can be a mount point of the
-# host (/.snapshots is one), and its files are not ours
+# host.  Only our own tmpfs is emptied.  This is because "dir" can be a
+# mount point of the host (/.snapshots is one), and its files are not
+# ours
 scratch_dir()
 {
 	local dir="$1"
 
-	# The last one is on top of the ones of the host
+	# The last mount is on top of the mounts of the host
 	scratch_mounted() { [ "$(findmnt -n -o SOURCE --mountpoint "$dir" | tail -1)" = sdbootutil-unit ]; }
 	scratch_mounted || mount -t tmpfs sdbootutil-unit "$dir"
 	scratch_mounted || die "$dir is not a scratch tmpfs"
@@ -251,8 +259,8 @@ scratch_dir()
 
 ####### the cases #######
 #
-# get_device_password: every source of a *current* password, and the
-# rule that a candidate is validated before it is used
+# `get_device_password`: every source of a *current* password.  Also
+# the rule that a candidate is validated before it is used
 
 t_gdp_current_pw()
 {
@@ -280,8 +288,9 @@ t_gdp_pw()
 	is "returned" "$BOOTSTRAP" "$device_pw"
 }
 
-# The recovery PIN is the recovery key while the two are linked, so the
-# variable has to unlock exactly like its keyring twin below
+# The recovery PIN is the recovery key while the two are linked.  So
+# the variable RECOVERY_PIN must unlock exactly like the keyring entry
+# in the next case
 t_gdp_recovery_pin()
 {
 	RECOVERY_PIN="$BOOTSTRAP" load
@@ -299,8 +308,8 @@ t_gdp_keyring_recovery_pin()
 	is "returned" "$BOOTSTRAP" "$device_pw"
 }
 
-# %user:sdbootutil holds "any secret" and is deprecated as a name, but
-# not as a candidate: it is validated like the rest
+# %user:sdbootutil holds "any secret".  The name is deprecated, but the
+# entry is still a candidate.  It is validated like the others
 t_gdp_keyring_deprecated()
 {
 	load
@@ -316,8 +325,8 @@ t_gdp_all_wrong()
 
 	get_device_password "$dev"
 	is "returned" "" "$device_pw"
-	# A wrong candidate must not displace a good entry, so nothing
-	# is written when nothing validated
+	# A wrong candidate must not replace a good entry.  So nothing is
+	# written when no candidate is valid
 	no_key cryptenroll
 }
 
@@ -336,7 +345,7 @@ t_gdp_wrong_then_valid()
 t_erk_key_env()
 {
 	CURRENT_PW="$BOOTSTRAP" KEY="the-recovery-key" load
-	# No policy of the host, that would have a PIN
+	# Hide the policy of the host.  That policy would have a PIN
 	scratch_dir /var/lib/systemd
 	local -x TMPDIR="$workdir/keyfiles"
 	mkdir -p "$TMPDIR"
@@ -344,15 +353,16 @@ t_erk_key_env()
 	out="$(enroll_recovery_key "$dev" 2>&1)"
 
 	opens "the-recovery-key" "enrolled key"
-	# No PIN anywhere, so this key becomes one: a single secret
+	# There is no PIN anywhere, so this key becomes the PIN.  The user
+	# has a single secret
 	key_is sdbootutil-recovery-pin "the-recovery-key"
 	says_not "output" "$out" "are now different"
 	# The key never goes through a file
 	is "key files" "" "$(ls -A "$TMPDIR")"
 }
 
-# Nothing was given: systemd-cryptenroll generates the key, it is
-# printed, and it is published as the recovery PIN too
+# No key was given.  systemd-cryptenroll generates the key.  The key is
+# printed, and it is also published as the recovery PIN
 t_erk_generated()
 {
 	CURRENT_PW="$BOOTSTRAP" load
@@ -367,9 +377,9 @@ t_erk_generated()
 	key_is sdbootutil-recovery-pin "$key"
 }
 
-# A recovery PIN is presented and there is no recovery key yet, so the
-# key enrolled is the PIN: still one secret, and the entry that holds
-# the PIN is not rewritten
+# A recovery PIN is given, and there is no recovery key yet.  So the
+# enrolled key is the PIN, and the user still has one secret.  The
+# entry that holds the PIN is not rewritten
 t_erk_recovery_pin_env()
 {
 	CURRENT_PW="$BOOTSTRAP" RECOVERY_PIN="the-recovery-pin" load
@@ -380,8 +390,9 @@ t_erk_recovery_pin_env()
 	says_not "output" "$out" "are now different"
 }
 
-# Both given and different: the key is enrolled, the PIN is left alone
-# (it cannot be replaced) and the divergence is reported
+# The key and the PIN are both given, and they are different.  The key
+# is enrolled.  The PIN is left alone, because it cannot be replaced.
+# The difference is reported
 t_erk_diverging()
 {
 	CURRENT_PW="$BOOTSTRAP" KEY="the-recovery-key" RECOVERY_PIN="the-recovery-pin" load
@@ -393,11 +404,11 @@ t_erk_diverging()
 	no_key sdbootutil-recovery-pin
 }
 
-# A PIN already seals an NVIndex and it is not reachable here, so this
-# key is not it.  Publishing it would name as the recovery PIN a value
-# that no policy update can use, and `status` would then report a PIN
-# that is not there (github issue 250).  The TPM2 slot is faked because
-# the answer must not depend on having a TPM2
+# A PIN already seals an NVIndex, and the PIN is not known here.  So
+# this key is not the PIN, and it is not published as the recovery
+# PIN.  No policy update could use it.  `status` would then report a
+# PIN that is not there (github issue 250).  The TPM2 slot is faked,
+# because the answer must not depend on having a TPM2
 t_erk_unreachable_pin()
 {
 	CURRENT_PW="$BOOTSTRAP" KEY="the-recovery-key" load
@@ -418,8 +429,9 @@ t_erk_unreachable_pin()
 	no_key sdbootutil-recovery-pin
 }
 
-# The NVIndex is one for every device: a TPM2 slot in another device,
-# or a policy, means that a PIN already seals it, and this key is not it
+# All the devices share one NVIndex.  A TPM2 slot in another device
+# means that a PIN already seals the NVIndex.  A policy file means the
+# same.  In both cases this key is not the PIN
 t_erk_shared_nvindex()
 {
 	CURRENT_PW="$BOOTSTRAP" KEY="the-recovery-key" load
@@ -464,7 +476,8 @@ t_erk_change_fails()
 	is "no slot of an unknown key" "" "$(systemd-cryptenroll "$dev" | grep recovery)"
 }
 
-# A new recovery key replaces the old one only once it opens the device
+# A new recovery key replaces the old one only after the new key opens
+# the device
 t_erk_replace()
 {
 	CURRENT_PW="$BOOTSTRAP" KEY="the-old-key" load
@@ -493,8 +506,8 @@ t_erk_replace()
 }
 
 # A TPM2 slot bound to PCR 15 in the initrd cannot authorize a new slot
-# on the running system, so it is not used to unlock.  One bound after
-# the initrd can
+# on the running system.  So `can_unlock` does not use it.  A slot
+# bound to PCR 15 after the initrd can authorize, and it is used
 # shellcheck disable=SC2034,SC2329  # read and called by the sourced library
 t_can_unlock_bound()
 {
@@ -517,8 +530,8 @@ t_can_unlock_bound()
 	return 0
 }
 
-# The id of the top entry is all that get_top_entry_id prints, also
-# when it has to install the kernels first
+# `get_top_entry_id` prints only the id of the top entry.  This is also
+# true when it must install the kernels first
 # shellcheck disable=SC2034,SC2329  # read and called by the sourced library
 t_top_entry_install()
 {
@@ -534,8 +547,8 @@ t_top_entry_install()
 	return 0
 }
 
-# The anchor is the first encrypted device behind the root file system,
-# also when --devices names only some of the devices
+# The anchor is the first encrypted device behind the root file system.
+# This is also true when --devices names only some of the devices
 # shellcheck disable=SC2034,SC2329  # read and called by the sourced library
 t_measure_anchor_devices()
 {
@@ -558,8 +571,8 @@ t_measure_anchor_devices()
 	return 0
 }
 
-# get_top_entry_id does not install every kernel when bootctl fails:
-# that is not an empty ESP
+# `get_top_entry_id` does not install every kernel when bootctl fails.
+# This is because a failed bootctl does not mean an empty ESP
 # shellcheck disable=SC2034,SC2329  # read and called by the sourced library
 t_top_entry_bootctl_fails()
 {
@@ -574,8 +587,8 @@ t_top_entry_bootctl_fails()
 	return 0
 }
 
-# entry_snapshot finds the entry also when the id has no ".conf" (as
-# grub2-bls writes it) or has a boot counter
+# `entry_snapshot` finds the entry when the id has no ".conf", as
+# grub2-bls writes it.  It also finds it when the id has a boot counter
 t_entry_snapshot_id()
 {
 	load
@@ -587,8 +600,9 @@ t_entry_snapshot_id()
 	return 0
 }
 
-# update_entry_conf writes the options once, also when they have "&"
-# or "|", and the entry had more than one options line
+# `update_entry_conf` writes the options in one line.  This works when
+# the options have "&" or "|", and when the entry had more than one
+# options line
 # shellcheck disable=SC2034,SC2329  # read and called by the sourced library
 t_update_entry_conf()
 {
@@ -602,9 +616,9 @@ t_update_entry_conf()
 	return 0
 }
 
-# update_entry and update_all_entries install the kernel again for a
-# UKI, as its options are in the addon of its entry, but only when the
-# UKIs are selected
+# `update_entry` and `update_all_entries` install the kernel again for
+# a UKI.  This is because the options of a UKI are in the addon of its
+# entry.  They do it only when the UKIs are selected
 # shellcheck disable=SC2034,SC2329  # read and called by the sourced library
 t_update_entry_uki()
 {
@@ -635,9 +649,10 @@ t_update_entry_uki()
 	return 0
 }
 
-# rewrite_old_entry_versions writes "N_" instead of "N@" in the version
-# of the entries of this system, records them, and asks for new
-# predictions.  Other lines, other entries and other systems stay
+# `rewrite_old_entry_versions` writes "N_" instead of "N@" in the
+# version of the entries of this system.  It records these entries, and
+# asks for new predictions.  Other lines, other entries and the entries
+# of other systems stay unchanged
 # shellcheck disable=SC2034,SC2329  # read and called by the sourced library
 t_rewrite_old_entry_versions()
 {
@@ -665,7 +680,8 @@ t_rewrite_old_entry_versions()
 	return 0
 }
 
-# remove_kernel changes the default entry only when it removed it
+# `remove_kernel` changes the default entry only when it removed the
+# default entry
 # shellcheck disable=SC2034,SC2329  # read and called by the sourced library
 t_remove_kernel_default()
 {
@@ -685,9 +701,10 @@ t_remove_kernel_default()
 	return 0
 }
 
-# unlink_other_entries removes the entries of the kernel that were not
-# just written: of another kind, or of a variant that is gone.  Not the
-# booted one, and the default moves to the first kept entry
+# `unlink_other_entries` removes the entries of the kernel that were
+# not just written.  These are entries of another kind, or of a variant
+# that is gone.  It does not remove the booted entry.  The default moves
+# to the first kept entry
 # shellcheck disable=SC2034,SC2329  # read and called by the sourced library
 t_unlink_other_entries()
 {
@@ -718,13 +735,13 @@ t_unlink_other_entries()
 	unlink_other_entries "$k" 5 "$generic"
 	is "a variant that is gone" "$generic" "$(t_left)"
 
-	# The booted one stays, the default moves
+	# The booted entry stays, and the default moves
 	t_entries; t_selected="$local_uki" t_default="$type1"
 	unlink_other_entries "$k" 5 "$generic" "$virt"
 	is "booted" "$local_uki $generic $virt" "$(t_left)"
 	is "default" "default $generic" "$(cat "$workdir/unlink-log")"
 
-	# Also when the default is the booted one, that stays
+	# The booted entry also stays when it is the default
 	rm -f "$workdir/unlink-log"
 	t_entries; t_selected="$type1" t_default="$type1"
 	unlink_other_entries "$k" 5 "$local_uki"
@@ -733,11 +750,11 @@ t_unlink_other_entries()
 	return 0
 }
 
-# entry_key: the spellings a boot loader can leave in
-# "LoaderEntrySelected", all reduced to the ID that `bootctl` reports.
-# systemd-boot writes that ID as it is; grub2-bls drops the ".conf"
-# suffix and keeps the boot counter, which it records before
-# "systemd-bless-boot" renames the file
+# `entry_key`: the spellings that a boot loader can leave in
+# "LoaderEntrySelected".  All are reduced to the ID that `bootctl`
+# reports.  systemd-boot writes that ID as it is.  grub2-bls drops the
+# ".conf" suffix and keeps the boot counter.  This is because grub2-bls
+# records the name before "systemd-bless-boot" renames the file
 
 t_ek_systemd_boot()
 {
@@ -772,14 +789,15 @@ t_ek_not_a_counter()
 {
 	load
 
-	# Only "+" followed by digits is a counter, so an entry token
-	# that carries one keeps it
+	# Only "+" followed by digits is a counter.  So an entry token
+	# with a "+" keeps it
 	is "a + in the name" "my+entry-1" "$(entry_key "my+entry-1.conf")"
 	is "nothing to reduce" "" "$(entry_key "")"
 }
 
-# status_version_text: the three answers that the report can give about
-# a binary in the ESP, the same ones that `bootloader_needs_update` gives
+# `status_version_text`: the three answers that the report can give
+# about a binary in the ESP.  They are the same answers that
+# `bootloader_needs_update` gives
 
 t_svr_current()
 {
@@ -802,8 +820,8 @@ t_svr_newer()
 	is "text" "newer than the 261.2 of the system" "$(status_version_text 262 261.2)"
 }
 
-# The shim reports a major.minor that does not change between builds, so
-# the modification time appended to it is what decides
+# The shim reports a major.minor version that does not change between
+# builds.  So the modification time appended to the version decides
 t_svr_shim_mtime()
 {
 	load
@@ -819,8 +837,8 @@ t_svr_no_system()
 	is "text" "the version of the system cannot be read" "$(status_version_text 16.1-202506170714 "")"
 }
 
-# grubenv_set: GRUB2 reads a block of exactly 1024 bytes, so the size is
-# the whole of what the padding has to get right
+# `grubenv_set`: GRUB2 reads a block of exactly 1024 bytes.  So the
+# padding must always give this size
 
 t_grubenv_size()
 {
@@ -838,8 +856,8 @@ t_grubenv_size()
 	is "timeout" 5 "$(grubenv_get timeout)"
 }
 
-# A block whose variables already fill it needs no padding at all, and
-# that is where one byte used to be written anyway
+# A block that the variables already fill needs no padding at all.
+# Before, one byte of padding was written anyway in this case
 t_grubenv_full()
 {
 	load
@@ -854,20 +872,22 @@ t_grubenv_full()
 	is "size" 1024 "$(stat -c %s "$workdir/grubenv")"
 }
 
-# removable_entries: the entries that make_free_space may unlink when
-# the ESP is short of space.  A new snapshot reuses the initrd of an
-# entry of its parent (github issue 449), and unlinking that entry frees
-# the initrd the new entry is about to point at
+# `removable_entries`: the entries that `make_free_space` may unlink
+# when the ESP is short of space.  A new snapshot reuses the initrd of
+# an entry of its parent (github issue 449).  Unlinking that entry would
+# free the initrd that the new entry is about to use
 
-# The ESP of a Tumbleweed where snapshot 11 is being created from 10,
-# the default, which has two kernels.  Snapshot 5 is a leftover
+# The ESP of a Tumbleweed where snapshot 11 is being created from
+# snapshot 10.  Snapshot 10 is the default, and it has two kernels.
+# Snapshot 5 is a leftover
 removable_setup()
 {
 	load
 	# shellcheck disable=SC2034  # read by the sourced library
 	have_snapshots=1 root_snapshot=10 entryfile="$workdir/entries.json"
 
-	# What reads the system: bootctl, and the snapper database
+	# The stubs for what reads the system: bootctl, and the snapper
+	# database
 	# shellcheck disable=SC2329  # both are called by the sourced library
 	update_entries_for_this_system() { :; }
 	# shellcheck disable=SC2329
@@ -889,8 +909,8 @@ t_re_order()
 {
 	removable_setup
 
-	# The leftover first, the default snapshot as a last resort, and
-	# never the default entry
+	# The leftover comes first.  The default snapshot is the last
+	# resort.  The default entry is never a candidate
 	is "candidates" \
 	   "opensuse-tumbleweed-6.1.0-1-default-5.conf opensuse-tumbleweed-6.1.0-1-default-10.conf" \
 	   "$(removable_entries 11 | paste -sd' ')"
@@ -906,8 +926,8 @@ t_re_reused()
 	   "$(removable_entries 11 | paste -sd' ')"
 }
 
-# pending_kernel_size: a kernel that is already in the ESP is reused, so
-# it needs no space
+# `pending_kernel_size`: a kernel that is already in the ESP is reused.
+# So it needs no space
 t_pks_reused()
 {
 	load
@@ -917,17 +937,18 @@ t_pks_reused()
 	is "a 4K kernel" 5 "$(pending_kernel_size "$workdir/linux")"
 }
 
-# kernel_cmdline_files and create_boot_options: the kernel command line
-# of an entry.  The drop-ins follow the UAPI configuration files
-# specification: one with the same name in "/etc" replaces the one in
-# "/usr/lib", an empty one or a symlink to "/dev/null" masks it, and all
-# of them are sorted by name, wherever they are.  The whole command line
-# comes from one system: the snapshot of the entry, or the running one
-# when the snapshot configures nothing
+# `kernel_cmdline_files` and `create_boot_options`: the kernel command
+# line of an entry.  The drop-ins follow the UAPI configuration files
+# specification.  A drop-in in "/etc" replaces the one with the same
+# name in "/usr/lib".  An empty drop-in, or a symlink to "/dev/null",
+# masks it.  All the drop-ins are sorted by name, wherever they are.
+# The whole command line comes from one system.  This is the snapshot
+# of the entry, or the running system when the snapshot configures
+# nothing
 
-# Empty scratch copies of the configuration of the running system, a
-# "/proc/cmdline" with the content of "$1", and an empty snapshot in
-# "$root", that is "@$root" as a subvolume
+# Set up empty scratch copies of the configuration of the running
+# system.  Also a "/proc/cmdline" with the content of "$1", and an
+# empty snapshot in "$root".  As a subvolume, the snapshot is "@$root"
 cmdline_setup()
 {
 	load
@@ -938,7 +959,8 @@ cmdline_setup()
 		mkdir "$d/cmdline.d"
 	done
 
-	# Rewritten in place, so the bind mount of an earlier case sees it
+	# The file is rewritten in place.  So the bind mount of an earlier
+	# case sees the new content
 	echo "${1:-BOOT_IMAGE=/vmlinuz quiet}" > "$workdir/proc-cmdline"
 	grep -q ' /proc/cmdline ' /proc/self/mountinfo || \
 		mount --bind "$workdir/proc-cmdline" /proc/cmdline
@@ -958,11 +980,11 @@ cmdline_setup()
 	foreign_system() { return 1; }
 }
 
-# Run a function of sdbootutil under `set -e`, like sdbootutil does.  It
-# needs a shell of its own: every case is called in a `||` list, where
-# bash ignores `set -e`, even when it is set again inside.  The new shell
-# gets the functions of the case (the stubs too), and the variables
-# named in "strict_vars"
+# Run a function of sdbootutil under `set -e`, like sdbootutil does.
+# It needs a shell of its own.  This is because every case is called in
+# a `||` list, and there bash ignores `set -e`, even when it is set
+# again inside.  The new shell gets the functions of the case (also the
+# stubs), and the variables named in "strict_vars"
 strict()
 {
 	# shellcheck disable=SC2086  # a list of names
@@ -971,15 +993,15 @@ strict()
 	"$BASH" -c '. "$1"; . "$2"; shift 2; "$@"' _ "$lib" "$workdir/strict.sh" "$@"
 }
 
-# The files of the command line of "subvol", in one line, with "$root"
+# The files of the command line of "subvol", in one line.  "$root" is
 # written as "S"
 cmdline_files()
 {
 	strict kernel_cmdline_files "$1" | sed "s|^$root/|S/|" | paste -sd' '
 }
 
-# The drop-ins that packages ship are beside "/usr/lib/kernel/cmdline"
-# (github issue 467), and an empty one in "/etc" masks them
+# The drop-ins that packages ship are next to "/usr/lib/kernel/cmdline"
+# (github issue 467).  An empty drop-in in "/etc" masks them
 t_kcf_dropins()
 {
 	cmdline_setup
@@ -1008,7 +1030,7 @@ t_kcf_order()
 	   "$(cmdline_files "@$root")"
 }
 
-# A drop-in in "/etc" takes the place of the one it replaces
+# A drop-in in "/etc" takes the place of the drop-in that it replaces
 t_kcf_override()
 {
 	cmdline_setup
@@ -1022,7 +1044,7 @@ t_kcf_override()
 	   "$(cmdline_files "@$root")"
 }
 
-# A symlink to "/dev/null" masks a drop-in, and the base file
+# A symlink to "/dev/null" masks a drop-in.  It also masks the base file
 t_kcf_mask_symlink()
 {
 	cmdline_setup
@@ -1035,8 +1057,8 @@ t_kcf_mask_symlink()
 	is "files" "S/usr/lib/kernel/cmdline.d/20-b.conf" "$(cmdline_files "@$root")"
 }
 
-# An empty "/etc/kernel/cmdline" masks the one in "/usr/lib", and
-# "/proc/cmdline" too, but the drop-ins are still read
+# An empty "/etc/kernel/cmdline" masks the one in "/usr/lib".  It also
+# masks "/proc/cmdline".  The drop-ins are still read
 t_kcf_mask_base()
 {
 	cmdline_setup
@@ -1051,8 +1073,8 @@ t_kcf_mask_base()
 	is "vendor base" "/usr/lib/kernel/cmdline /usr/lib/kernel/cmdline.d/10-a.conf" "$(cmdline_files "")"
 }
 
-# Directories, hidden files, and the files that rpm and the editors
-# leave behind are not drop-ins
+# Directories and hidden files are not drop-ins.  The files that rpm
+# and the editors leave behind are not drop-ins either
 t_kcf_not_dropins()
 {
 	cmdline_setup
@@ -1067,15 +1089,15 @@ t_kcf_not_dropins()
 
 	is "files" "S/etc/kernel/cmdline.d/10-a.conf" "$(cmdline_files "@$root")"
 
-	# Neither are they a configuration of the snapshot of their own
+	# They also do not count as a configuration of the snapshot
 	rm "$d/10-a.conf"
 	echo "quiet" > /etc/kernel/cmdline
 	is "running" "/etc/kernel/cmdline" "$(cmdline_files "@$root")"
 }
 
-# A snapshot that has a configuration uses only its own: the files of
-# the running system are neither added nor do they mask the ones of the
-# snapshot (github issue 483)
+# A snapshot that has a configuration uses only its own files.  The
+# files of the running system are not added.  They also do not mask the
+# files of the snapshot (github issue 483)
 t_kcf_same_name()
 {
 	cmdline_setup
@@ -1084,9 +1106,9 @@ t_kcf_same_name()
 	echo "bar=1" > "$root/usr/lib/kernel/cmdline.d/20-bar.conf"
 
 	echo "splash" > /etc/kernel/cmdline
-	# The same name in both, the issue
+	# The same name in both systems.  This is the case of the issue
 	echo "foo=1" > /usr/lib/kernel/cmdline.d/10-foo.conf
-	# Replaced and masked in the running system only
+	# Replaced and masked only in the running system
 	echo "foo=2" > /etc/kernel/cmdline.d/10-foo.conf
 	: > /etc/kernel/cmdline.d/20-bar.conf
 	# Only in the running system
@@ -1097,8 +1119,8 @@ t_kcf_same_name()
 	   "$(cmdline_files "@$root")"
 }
 
-# A snapshot without any configuration takes the one of the running
-# system as a whole, its masks included
+# A snapshot without any configuration takes the whole configuration of
+# the running system.  This includes its masks
 t_kcf_fallback()
 {
 	cmdline_setup
@@ -1112,8 +1134,9 @@ t_kcf_fallback()
 	   "$(cmdline_files "@$workdir/missing")"
 }
 
-# A snapshot with drop-ins and no base file is a configuration: the base
-# file of the running system and "/proc/cmdline" are not its own
+# A snapshot with drop-ins and no base file has a configuration.  So
+# the base file of the running system is not used, and "/proc/cmdline"
+# is not used either
 t_kcf_no_base()
 {
 	cmdline_setup
@@ -1123,8 +1146,9 @@ t_kcf_no_base()
 	is "files" "S/etc/kernel/cmdline.d/10-a.conf" "$(cmdline_files "@$root")"
 }
 
-# "/proc/cmdline" is the last resort of the running system, never of a
-# foreign one, and without it nothing can be configured
+# "/proc/cmdline" is the last resort of the running system.  It is
+# never used for a foreign system.  Without it, a foreign system with
+# no files has nothing configured
 t_kcf_proc()
 {
 	cmdline_setup
@@ -1140,8 +1164,8 @@ t_kcf_proc()
 	strict kernel_cmdline_files "" > /dev/null && fail "nothing is configured"
 }
 
-# The snapshot that is running is "/", so "/proc/cmdline" is its last
-# resort too, and its files are read once (github issue 411)
+# The snapshot that is running is "/".  So "/proc/cmdline" is its last
+# resort too.  Its files are read only once (github issue 411)
 t_kcf_running()
 {
 	cmdline_setup
@@ -1167,7 +1191,8 @@ t_kcf_prefix()
 	is "files" "S/etc/kernel/cmdline" "$(cmdline_files "@root$root")"
 }
 
-# Every line counts, the last one too when it does not end in a newline
+# Every line counts.  This includes the last line when it does not end
+# in a newline
 t_cbo_newline()
 {
 	cmdline_setup
@@ -1177,7 +1202,7 @@ t_cbo_newline()
 	is "options" "quiet splash a=1 b=1 root=UUID=1" "$(strict create_boot_options "")"
 }
 
-# Comments, blank lines and the spaces around a line are dropped
+# Comments, blank lines, and the spaces around a line are dropped
 t_cbo_comments()
 {
 	cmdline_setup
@@ -1197,8 +1222,8 @@ t_cbo_snapshot()
 	is "options" "quiet rootflags=subvol=@$root root=UUID=1" "$(strict create_boot_options "@$root")"
 }
 
-# "/proc/cmdline" already has the drop-ins of the boot, that are not
-# added twice (and not once more on every boot)
+# "/proc/cmdline" already has the drop-ins of the boot.  They are not
+# added twice, and not once more on every boot
 t_cbo_proc()
 {
 	cmdline_setup 'BOOT_IMAGE=/vmlinuz root=UUID=0 quiet a=1 dyndbg="file a.c +p" old=1'
@@ -1211,20 +1236,22 @@ t_cbo_proc()
 	echo "dyndbg=\"file\"" > /usr/lib/kernel/cmdline.d/20-dyndbg.conf
 	is "quoted" 'root=UUID=1 quiet dyndbg="file a.c +p" old=1 a=1 dyndbg="file"' "$(strict create_boot_options "")"
 
-	# A value in quotes is one parameter, that keeps what is inside
+	# A value in quotes is one parameter.  What is inside the quotes is
+	# kept
 	cmdline_setup 'quiet opt="a b c"'
 	echo "b" > /usr/lib/kernel/cmdline.d/10-b.conf
 	is "inside quotes" 'quiet opt="a b c" b root=UUID=1' "$(strict create_boot_options "")"
 }
 
-# install_extra_entries: the boot entries that other packages add with
-# a file in /usr/lib/sdbootutil/entries.d, that has the EFI binary
-# (EFI=) and its boot entry (ENTRY=).  The files of the directory follow
-# the UAPI configuration files specification, like cmdline.d
+# `install_extra_entries`: the boot entries that other packages add.  A
+# package adds a file in /usr/lib/sdbootutil/entries.d.  The file names
+# the EFI binary (EFI=) and its boot entry (ENTRY=).  The files of the
+# directory follow the UAPI configuration files specification, like
+# cmdline.d
 
-# A scratch ESP with a kernel entry, and a scratch snapshot 5 over
-# "/.snapshots", in "$root", with the EFI binary /usr/share/a/a.efi and
-# its boot entry /usr/share/a/a.conf
+# Set up a scratch ESP with a kernel entry.  Also a scratch snapshot 5
+# over "/.snapshots", in "$root".  The snapshot has the EFI binary
+# /usr/share/a/a.efi and its boot entry /usr/share/a/a.conf
 extra_setup()
 {
 	load
@@ -1243,7 +1270,8 @@ extra_setup()
 
 	# shellcheck disable=SC2034  # read by the sourced library
 	have_snapshots=1
-	# Not "@": the prefix of the subvolume is not part of the path
+	# Not "@".  This checks that the prefix of the subvolume is not
+	# part of the path
 	# shellcheck disable=SC2034  # read by the sourced library
 	subvol_prefix="@root"
 	# shellcheck disable=SC2034  # read by the sourced library
@@ -1254,7 +1282,7 @@ extra_setup()
 	entryfile="$workdir/entries.json"
 	strict_vars="have_snapshots subvol_prefix esp_root boot_root entryfile esp_files"
 
-	# The extra entries in the ESP, like `bootctl list` reports them
+	# The extra entries in the ESP, as `bootctl list` reports them
 	# shellcheck disable=SC2329  # called by the sourced library
 	update_entries_for_extra()
 	{
@@ -1271,14 +1299,14 @@ esp_state()
 	(cd "$esp" && find . -type f | sed 's|^\./||' | sort | paste -sd' ')
 }
 
-# install_extra_entries for snapshot 5, with what it says
+# `install_extra_entries` for snapshot 5, with its messages
 extras()
 {
 	strict install_extra_entries 5 2>&1
 }
 
-# An entries.d file installs the EFI binary and the boot entry, from the
-# snapshot
+# An entries.d file installs the EFI binary and the boot entry.  Both
+# come from the snapshot
 t_iee_install()
 {
 	extra_setup
@@ -1288,8 +1316,8 @@ t_iee_install()
 	is "esp" "EFI/extra/a.efi loader/entries/a.conf loader/entries/linux.conf" "$(esp_state)"
 }
 
-# Comments, blank lines, spaces around "=" and the value, an "=" in the
-# value, and a last line without a newline are all valid
+# All these are valid: comments, blank lines, spaces around "=" and the
+# value, an "=" in the value, and a last line without a newline
 t_iee_parse()
 {
 	extra_setup
@@ -1300,8 +1328,8 @@ t_iee_parse()
 	is "esp" "EFI/extra/a=1.efi loader/entries/a.conf loader/entries/linux.conf" "$(esp_state)"
 }
 
-# A line that is not KEY=VALUE is reported and skipped, the rest of the
-# file is still valid
+# A line that is not KEY=VALUE is reported and skipped.  The rest of
+# the file is still valid
 t_iee_bad_line()
 {
 	extra_setup
@@ -1314,8 +1342,8 @@ t_iee_bad_line()
 	is "esp" "EFI/extra/a.efi loader/entries/linux.conf" "$(esp_state)"
 }
 
-# A file without EFI=, or with files that are not there, installs
-# nothing and is reported
+# A file without EFI= installs nothing, and it is reported.  The same
+# happens with a file that names files that are not there
 t_iee_invalid()
 {
 	extra_setup
@@ -1344,8 +1372,8 @@ t_iee_override()
 	is "esp" "EFI/extra/b.efi loader/entries/linux.conf" "$(esp_state)"
 }
 
-# An empty file in /etc, or a symlink to /dev/null, masks the one in
-# /usr/lib, and what it installed is removed
+# An empty file in /etc, or a symlink to /dev/null, masks the file in
+# /usr/lib.  What the masked file installed is removed
 t_iee_mask()
 {
 	extra_setup
@@ -1363,8 +1391,8 @@ t_iee_mask()
 	is "symlink" "loader/entries/linux.conf" "$(esp_state)"
 }
 
-# What is not in entries.d anymore is removed from the ESP, and only
-# that: the kernel entries stay
+# What is not in entries.d anymore is removed from the ESP.  Nothing
+# else is removed: the kernel entries stay
 t_iee_remove()
 {
 	extra_setup
@@ -1395,8 +1423,8 @@ t_iee_entry_changed()
 	is "dropped" "EFI/extra/a.efi loader/entries/linux.conf" "$(esp_state)"
 }
 
-# Two files cannot install the same name: the first one, by name, wins,
-# and stays on the next run
+# Two files cannot install the same name.  The first file, in the order
+# of the names, wins.  It still wins on the next run
 t_iee_same_name()
 {
 	extra_setup
@@ -1411,7 +1439,8 @@ t_iee_same_name()
 	is "second run" "a" "$(cat "$esp/EFI/extra/a.efi")"
 }
 
-# A file that changed is copied again, one that did not is left alone
+# A file that changed is copied again.  A file that did not change is
+# left alone
 t_iee_update()
 {
 	extra_setup
@@ -1428,11 +1457,11 @@ t_iee_update()
 	is "entry unchanged" "1" "$(stat -c %Y "$esp/loader/entries/a.conf")"
 }
 
-# verify_esp_files: only the files that sdbootutil installed in the ESP
-# can reach a new TPM2 policy (github issue 465)
+# `verify_esp_files`: only the files that sdbootutil installed in the
+# ESP can reach a new TPM2 policy (github issue 465)
 
-# A scratch ESP with an entry, a kernel and an initrd, and the record in
-# the working directory instead of /var/lib/sdbootutil
+# Set up a scratch ESP with an entry, a kernel and an initrd.  The
+# record is in the working directory, not in /var/lib/sdbootutil
 esp_setup()
 {
 	load
@@ -1440,13 +1469,14 @@ esp_setup()
 	esp_files="$workdir/esp-files" esp_root="$workdir/esp" boot_root="$workdir/esp" esp_dst="/EFI/systemd" arg_force=
 	rm -rf "$workdir/esp" "$esp_files"
 	mkdir -p "$workdir/esp/loader/entries" "$workdir/esp/token/7.2.3" /var/lib/pcrlock.d
-	# A refusal puts back the components, never the ones of the host
+	# A refusal puts back the components.  It must never put back the
+	# components of the host
 	scratch_dir /var/lib/pcrlock.d
 	echo "options root=UUID=x" > "$workdir/esp/loader/entries/$ENTRY+3.conf"
 	echo "kernel" > "$workdir/esp/token/7.2.3/linux-1"
 	echo "initrd" > "$workdir/esp/token/7.2.3/initrd-1"
 
-	# What `bootctl list` reports for that ESP
+	# What `bootctl list` reports for this ESP
 	# shellcheck disable=SC2329  # called by the sourced library
 	bootctl_entries()
 	{
@@ -1490,8 +1520,8 @@ t_vef_seed()
 	   "$(esp_file_digest "$workdir/esp/token/7.2.3/initrd-1")"
 }
 
-# The first record has the UKI and the addons of an entry too, or the
-# next prediction refuses them as foreign files
+# The first record also has the UKI and the addons of an entry.
+# Otherwise the next prediction refuses them as foreign files
 # shellcheck disable=SC2329  # called by the sourced library
 t_vef_seed_uki()
 {
@@ -1523,7 +1553,7 @@ t_vef_unchanged()
 	esp_track
 	verify_esp_files &> /dev/null
 
-	# systemd-boot counts a boot attempt, and later blesses it
+	# systemd-boot counts a boot attempt, and later blesses the entry
 	mv "$workdir/esp/loader/entries/$ENTRY+3.conf" "$workdir/esp/loader/entries/$ENTRY+2-1.conf"
 	esp_track
 	( verify_esp_files ) &> /dev/null || fail "a counted boot was refused"
@@ -1539,7 +1569,8 @@ t_vef_modified()
 	verify_esp_files &> /dev/null
 
 	echo "options root=UUID=x quiet" > "$workdir/esp/loader/entries/$ENTRY+3.conf"
-	# The components made from it, and the ones before
+	# The components made from the entry, and the components from
+	# before
 	mkdir -p /var/lib/pcrlock.d/710-c.pcrlock.d "$tmpdir/pcrlock.d/710-c.pcrlock.d"
 	echo "new" > /var/lib/pcrlock.d/710-c.pcrlock.d/cmdline-1.pcrlock
 	echo "old" > "$tmpdir/pcrlock.d/710-c.pcrlock.d/cmdline-1.pcrlock"
@@ -1557,8 +1588,8 @@ t_vef_new_file()
 	esp_track
 	verify_esp_files &> /dev/null
 
-	# A file that sdbootutil installs is accepted, one that appears
-	# by other means is not
+	# A file that sdbootutil installs is accepted.  A file that
+	# appears by other means is refused
 	echo "initrd 2" > "$tmpdir/initrd"
 	install_with_rollback "$tmpdir/initrd" "$workdir/esp/token/7.2.3/initrd-2" &> /dev/null
 	echo "unknown" > "$workdir/esp/token/7.2.3/initrd-3"
@@ -1590,14 +1621,14 @@ t_vef_force()
 ####### The real `enroll` runs on the loop device, with the TPM2, the
 ####### prediction and the initrds replaced by stubs that record
 
-# The values of PCR 15 that the stubs give: after the anchor (B), and
-# also after the initrd (C)
+# The values of PCR 15 that the stubs give.  B is the value after the
+# anchor.  C is the value after the end of the initrd too
 pcr15_b="$(printf 'b%.0s' {1..64})"
 pcr15_c="$(printf 'c%.0s' {1..64})"
 
-# The state of a TPM2 enrollment of "$dev" with the anchor "$anchor",
-# where the initrd unlocks what "$initrd_crypttab" says.  "$workdir/log"
-# has the order of the slow steps, and "$workdir/args" the arguments of
+# Set up a TPM2 enrollment of "$dev" with the anchor "$anchor".  The
+# initrd unlocks the devices in "$initrd_crypttab".  "$workdir/log" has
+# the order of the slow steps.  "$workdir/args" has the arguments of
 # the TPM2 enrollment
 # shellcheck disable=SC2034,SC2329  # read and called by the sourced library
 enroll_setup()
@@ -1626,7 +1657,7 @@ enroll_setup()
 	pcr15_bound_value() { if [ "$2" = leave-initrd ]; then echo "$pcr15_c"; else echo "$pcr15_b"; fi; }
 	systemctl() { :; }
 	check_enrolled() { :; }
-	# /etc/crypttab is a bind mount here, and "mv" cannot replace it
+	# /etc/crypttab is a bind mount here.  "mv" cannot replace it
 	replace_crypttab() { [ -z "$2" ] || cat "$1" > /etc/crypttab; rm -f "$1"; }
 	systemd-cryptenroll()
 	{
@@ -1639,8 +1670,9 @@ enroll_setup()
 	}
 }
 
-# `enroll` in a subshell, as it ends with `err` on failure, and with the
-# trap of sdbootutil that puts /etc/crypttab back
+# Run `enroll` in a subshell.  This is because it ends with `err` on
+# failure.  The subshell has the trap of sdbootutil that puts
+# /etc/crypttab back
 run_enroll()
 {
 	( trap cleanup EXIT; enroll ) > "$workdir/out" 2>&1
@@ -1653,9 +1685,10 @@ crypttab_opts()
 	echo "$opts"
 }
 
-# The anchor measures its volume key, and its slot is bound to PCR 15
-# before any measurement.  The changed crypttab rebuilds the initrds,
-# and only then the initrd says which devices it unlocks
+# The anchor measures its volume key.  Its slot is bound to the value
+# of PCR 15 before any measurement.  The changed crypttab rebuilds the
+# initrds.  Only after that does the initrd say which devices it
+# unlocks
 t_enroll_anchor()
 {
 	enroll_setup
@@ -1667,8 +1700,8 @@ t_enroll_anchor()
 	says "no signed policy" "$(cat "$workdir/args")" "--tpm2-public-key="
 }
 
-# Another device than the anchor does not measure, and its slot is bound
-# to PCR 15 after the anchor when the initrd unlocks it
+# A device that is not the anchor does not measure.  When the initrd
+# unlocks it, its slot is bound to PCR 15 after the anchor
 t_enroll_after_anchor()
 {
 	enroll_setup
@@ -1679,7 +1712,8 @@ t_enroll_after_anchor()
 	says "PCR 15" "$(cat "$workdir/args")" "--tpm2-pcrs=15:sha256=$pcr15_b"
 }
 
-# Without the initrd, the slot is bound to PCR 15 after the initrd
+# When the initrd does not unlock the device, its slot is bound to
+# PCR 15 after the initrd
 t_enroll_after_initrd()
 {
 	enroll_setup
@@ -1688,7 +1722,8 @@ t_enroll_after_initrd()
 	says "PCR 15" "$(cat "$workdir/args")" "--tpm2-pcrs=15:sha256=$pcr15_c"
 }
 
-# --no-measure-pcr: no anchor, so nothing measures and no slot is bound
+# --no-measure-pcr: there is no anchor.  So nothing measures, and no
+# slot is bound to PCR 15
 # shellcheck disable=SC2034  # read by the sourced library
 t_enroll_no_measure()
 {
@@ -1701,8 +1736,8 @@ t_enroll_no_measure()
 }
 
 # Switching to the UKIs writes the entries again before the initrd is
-# read: the UKI decides which devices are unlocked in the initrd.  The
-# slot adds the signed PCR 11 policy
+# read.  This is because the UKI decides which devices are unlocked in
+# the initrd.  The slot adds the signed PCR 11 policy
 t_enroll_uki_switch()
 {
 	enroll_setup
@@ -1717,21 +1752,23 @@ t_enroll_uki_switch()
 }
 
 # With the UKIs, a device that the initrd does not unlock opens after
-# PCR 15 has the identity of the system: a slot of the pcrlock policy
-# alone
+# PCR 15 has the identity of the system.  So its slot has only the
+# pcrlock policy
 t_enroll_uki_late()
 {
 	enroll_setup
 	echo "cr_test $dev none x-initrd.attach,tpm2-device=auto" > /etc/crypttab
 	UKI=local uki_config=local anchor=/dev/the-anchor
 	run_enroll || fail "enroll failed: $(cat "$workdir/out")"
-	# The entries are checked: the UKIs must carry the PCR 11 key
+	# The entries are checked, because the UKIs must carry the PCR 11
+	# key
 	is "steps" "install:local initrd predict" "$(paste -sd ' ' "$workdir/log")"
 	says "no signed policy" "$(cat "$workdir/args")" "--tpm2-public-key="
 	says_not "PCR 15" "$(cat "$workdir/args")" "--tpm2-pcrs=15"
 }
 
-# A failed enrollment puts /etc/crypttab back, and the initrds with it
+# A failed enrollment puts /etc/crypttab back.  It also builds the
+# initrds again
 t_enroll_fails()
 {
 	enroll_setup
@@ -1741,14 +1778,14 @@ t_enroll_fails()
 	is "steps" "install initrd predict install" "$(paste -sd ' ' "$workdir/log")"
 }
 
-# A failed switch to the UKIs writes the entries of the old mode again,
-# as the slots that are still there are of that mode
+# A failed switch to the UKIs writes the entries of the old mode again.
+# This is because the slots that are still there are for that mode
 t_enroll_fails_uki()
 {
 	enroll_setup
 	echo "cr_test $dev none x-initrd.attach,tpm2-device=auto" > /etc/crypttab
 	uki_config=local cryptenroll_fails=1
-	# The addon of the root is written once per run: the rollback
+	# The addon of the root is written once per run.  The rollback
 	# must write it again (`dps_addon_done`)
 	install_all_kernels() { echo "install${UKI:+:$UKI}${dps_addon_done:+:addon-done}" >> "$workdir/log"; dps_addon_done=1; }
 	# The slots that are there are for the kernel and the initrd
@@ -1784,8 +1821,8 @@ t_tr_recovery_pin()
 	not_traced "$SECRET"
 }
 
-# The PIN that systemd-pcrlock generates is printed, which is the point,
-# and kept in the keyring, but never traced
+# The PIN that systemd-pcrlock generates is printed, because the user
+# must see it.  It is kept in the keyring.  It is never traced
 t_tr_generated_pin()
 {
 	load
@@ -1800,14 +1837,14 @@ t_tr_generated_pin()
 	not_traced "$SECRET"
 }
 
-# The secret reaches the environment of the command, also when the
-# command is a shell function like `pcrlock`
+# The secret reaches the environment of the command.  This also works
+# when the command is a shell function, like `pcrlock`
 t_tr_run_with_secret()
 {
 	load
 	# shellcheck disable=SC2034  # read by name
 	local secret="$SECRET" out
-	# Called through run_with_secret
+	# Called through `run_with_secret`
 	# shellcheck disable=SC2329
 	show_env() { echo -n "$NEWPIN"; }
 
@@ -1823,8 +1860,8 @@ t_tr_enroll_password()
 	CURRENT_PW="$BOOTSTRAP" PW="$SECRET" load
 	# shellcheck disable=SC2034  # read by the sourced library
 	arg_method=password
-	# What `enroll` does with the secret, without the rest of it.
-	# Called through `traced`
+	# What `enroll` does with the secret, without the rest of
+	# `enroll`.  Called through `traced`
 	# shellcheck disable=SC2329
 	enroll_password_device()
 	{
@@ -1850,7 +1887,7 @@ t_tr_enroll_recovery_key()
 	not_traced "$SECRET" "$BOOTSTRAP"
 }
 
-# The generated recovery key is printed once, and only there
+# The generated recovery key is printed once.  It appears nowhere else
 t_tr_generated_key()
 {
 	CURRENT_PW="$BOOTSTRAP" load
@@ -1864,16 +1901,17 @@ t_tr_generated_key()
 	not_traced "$key" "$BOOTSTRAP"
 }
 
-# PCR 15: the measurement log and the report.  The digests are the
-# ones measured on a guest: the volume key of its root, and the end of
-# the initrd
+# PCR 15: the measurement log and the report.  The digests were
+# measured on a guest.  They are the volume key of its root, and the
+# end of the initrd
 
 VK="3dc9970202dc971eff4a39c3282e850e7218af84d60334b5937f988da8ddf0bb"
 LEAVE="3be261aff7db92bf507eae947f4003ffa2bcad0bffe3524601d62d0bc8be7135"
-# PCR 15 after the volume key, and after the end of the initrd too
+# PCR 15 after the volume key, and then also after the end of the
+# initrd
 PCR15_VK="47213c494b32c9f1f7905887bbb66101672b94fa628c225ecef188abd4a8d6b3"
 PCR15_VK_LEAVE="af1580f2a8d43bc468264f3ae5e5bf2e46f2d2458f4e52533532525287b58dbf"
-# PCR 15 after the end of the initrd only, no volume key measured
+# PCR 15 after only the end of the initrd.  No volume key was measured
 PCR15_LEAVE="4cc7f58e12f3393e31f32b547e15a980435e42c492f672f52adcea43cf4595a2"
 
 # Empty scratch copies of the paths that the PCR 15 code uses
@@ -1890,8 +1928,8 @@ pcr15_setup()
 	mountpoint -q /etc/crypttab || mount --bind "$workdir/crypttab" /etc/crypttab
 }
 
-# A systemd measurement log (RFC 7464 JSON-seq) with one record per
-# argument, "PCR:TYPE:DIGEST[:STRING]"
+# Write a systemd measurement log (RFC 7464 JSON-seq).  It has one
+# record per argument, "PCR:TYPE:DIGEST[:STRING]"
 pcr15_log()
 {
 	local r pcr type digest string
@@ -1921,10 +1959,11 @@ t_p15_events()
 	is "end of initrd" "$LEAVE" "$(pcr15_events /run/log/systemd/tpm2-measure.log phase)"
 }
 
-# The value of PCR 15 once the anchor is measured, from the log: only
-# when the log explains the current PCR 15 (systemd-analyze, replaced
-# here), and the record of the anchor comes before the end of the
-# initrd
+# `pcr15_bound_value` reads from the log the value of PCR 15 after the
+# anchor is measured.  It gives a value only when the log explains the
+# current PCR 15.  The current value comes from systemd-analyze, which
+# is replaced here.  Also, the record of the anchor must come before
+# the end of the initrd
 t_p15_bound()
 {
 	pcr15_setup
@@ -1949,8 +1988,10 @@ t_p15_bound()
 	is "another device" "" "$(pcr15_bound_value "$dev" "")"
 }
 
-# The anchor is bound to zero, the other devices to PCR 15 after the
-# anchor: in the initrd when its crypttab names them, after it if not
+# The anchor is bound to zero.  The other devices are bound to PCR 15
+# after the anchor.  When the crypttab of the initrd names a device,
+# this is the value in the initrd.  Otherwise it is the value after the
+# initrd
 t_p15_slot_value()
 {
 	load
@@ -1992,8 +2033,8 @@ pcrlock_variation()
 	printf '{"records":[{"pcr":5,"digests":[{"hashAlg":"sha256","digest":"%s"}]}]}\n' "$1"
 }
 
-# shift_component sets aside the variation of the current boot, and
-# restore_shifts puts it back only when the new prediction differs
+# `shift_component` sets aside the variation of the current boot.
+# `restore_shifts` puts it back only when the new prediction differs
 t_shift()
 {
 	pcr15_setup
@@ -2016,23 +2057,26 @@ t_shift()
 	restore_shifts
 	is "changed: the boot is kept" "generated.pcrlock shift-generated.pcrlock" "$(ls "$d" | tr '\n' ' ' | sed 's/ $//')"
 
-	# The kept one still matches the next run, under its own name
+	# The kept variation still matches on the next run, under its own
+	# name
 	pcrlock_variation "$PCR15_VK" > "$d/generated.pcrlock"
 	shift_component 641-test
 	pcrlock_variation "$PCR15_VK" > "$d/generated.pcrlock"
 	restore_shifts
 	is "still changed" "generated.pcrlock shift-generated.pcrlock" "$(ls "$d" | tr '\n' ' ' | sed 's/ $//')"
 
-	# Nothing matches the event log: the old variations go too, or
-	# the ones of entries that are gone would stay in the policy
+	# Nothing matches the event log.  Then the old variations are also
+	# removed.  Otherwise the variations of entries that are gone would
+	# stay in the policy
 	rm -f "$d"/*
 	pcrlock_variation "$LEAVE" > "$d/generated.pcrlock"
 	shift_component 641-test
 	is "no match" "" "$(ls "$d")"
 }
 
-# restore_shifts keeps the current boot in a full component by removing
-# its last variation, so the PCR stays inside the PolicyOR limit
+# `restore_shifts` keeps the current boot in a full component.  To make
+# room, it removes the last variation.  So the PCR stays inside the
+# PolicyOR limit
 t_shift_limit()
 {
 	pcr15_setup
@@ -2056,7 +2100,7 @@ t_shift_limit()
 	is "room: nothing goes" "cmdline-initrd-1.pcrlock shift-cmdline-initrd-1.pcrlock" "$(cd "$d" && echo *)"
 	rm -rf "$d"
 
-	# The number says the priority, not the name
+	# The number gives the priority, not the name
 	c=650-kernel-efi-application d="/var/lib/pcrlock.d/$c.pcrlock.d"
 	mkdir -p "$tmpdir/shift/$c.pcrlock.d" "$d"
 	for n in linux-1 uki-2 linux-3 linux-4; do
@@ -2068,8 +2112,9 @@ t_shift_limit()
 	rm -rf "$d"
 }
 
-# entries_bind_pcr15 needs every initrd to measure the anchor alone,
-# order the rest after it, measure the end of the initrd, and unlock
+# `entries_bind_pcr15` accepts the entries only when every initrd does
+# all of this: it measures only the anchor, it orders the other devices
+# after the anchor, it measures the end of the initrd, and it unlocks
 # the same devices as the initrd of the default entry
 # shellcheck disable=SC2329  # the stubs are called by the sourced library
 t_entries_bind()
@@ -2111,8 +2156,8 @@ swap UUID=2 none tpm2-device=auto"
 	generator='After=systemd-cryptsetup@$anchor.service' boundary=
 	entries_bind_pcr15 root && fail "an initrd without the boundary was accepted"
 
-	# A UKI of the packages: no crypttab in its initrd, the one of
-	# its addon counts
+	# A UKI of the packages has no crypttab in its initrd.  The
+	# crypttab of its addon counts
 	boundary=1 ct_a=""
 	touch "$boot_root/u.efi"
 	update_entries_for_this_system() { echo '[{"type":"type1","uki":"/u.efi","addons":[{"localAddon":"/c.addon.efi"}]}]' > "$entryfile"; }
@@ -2128,8 +2173,8 @@ swap UUID=2 none tpm2-device=auto"
 	addons_crypttab() { :; }
 	entries_bind_pcr15 root && fail "a UKI without a crypttab was accepted"
 
-	# With DPS the addon has only the other devices: the discovery
-	# opens the anchor and measures it
+	# With DPS, the addon has only the other devices.  This is because
+	# the discovery opens the anchor and measures it
 	# shellcheck disable=SC2034  # read by the sourced library
 	ct_default="swap UUID=2 none tpm2-device=auto" initrd_crypttab_read=
 	addons_crypttab() { [ "$*" != /c.addon.efi ] || echo "$ct_default"; }
@@ -2140,8 +2185,8 @@ swap UUID=2 none tpm2-device=auto"
 	return 0
 }
 
-# addons_crypttab reads the crypttab in the initrd of the addons, and
-# skips the addons without one
+# `addons_crypttab` reads the crypttab in the initrd of the addons.  It
+# skips the addons without a crypttab
 # shellcheck disable=SC2034,SC2329  # read and called by the sourced library
 t_addons_crypttab()
 {
@@ -2183,8 +2228,8 @@ t_p15_status()
 }
 
 # UKI from /etc/sysconfig/bootloader: empty, "no", "yes" or "local".
-# The last two need systemd-boot, and grub2-bls falls back to the
-# kernel and the initrd
+# "yes" and "local" need systemd-boot.  With grub2-bls, sdbootutil
+# falls back to the kernel and the initrd
 # shellcheck disable=SC2034  # UKI is read by the sourced library
 t_uki_config()
 {
@@ -2208,7 +2253,7 @@ t_uki_config()
 		UKI="$value"
 		( assert_uki_config ) > /dev/null 2>&1 || fail "UKI=\"$value\" was refused"
 	done
-	# A missing tool of UKI="local"
+	# A tool of UKI="local" is missing
 	UKI=local
 	# shellcheck disable=SC2123  # no tool can be found
 	( PATH=/nonexistent; assert_uki_config ) > /dev/null 2>&1 && fail "UKI=local without its tools was accepted"
@@ -2227,8 +2272,8 @@ t_uki_config()
 	return 0
 }
 
-# uki_mode_text and uki_missing_kernels: the UKI row of "status", and
-# the kernels that have no UKI file with UKI="yes"
+# `uki_mode_text` gives the UKI row of "status".  `uki_missing_kernels`
+# gives the kernels that have no UKI file with UKI="yes"
 # shellcheck disable=SC2034  # UKI is read by the sourced library
 t_uki_status()
 {
@@ -2253,8 +2298,9 @@ t_uki_status()
 	return 0
 }
 
-# uki_keys makes the keys of UKI="local" when they are missing, stores
-# the private parts only encrypted, and uki_key gives them back
+# `uki_keys` makes the keys of UKI="local" when they are missing.  It
+# stores the private parts only encrypted.  `private_key` gives them
+# back
 # shellcheck disable=SC2034  # read by the sourced library
 t_uki_keys()
 {
@@ -2278,7 +2324,7 @@ t_uki_keys()
 		private_key tpm2-pcr-initrd-private-key.pem 2> /dev/null | openssl pkey -noout 2> /dev/null || fail "the PCR key does not decrypt"
 	fi
 
-	# Made once, never replaced
+	# The keys are made once, and never replaced
 	local before
 	before="$(cat "$secureboot_certificate")"
 	uki_keys > /dev/null 2>&1
@@ -2292,8 +2338,9 @@ t_uki_keys()
 	return 0
 }
 
-# mok_enroll imports a missing certificate once, waits while it is
-# pending, and imports it again when a boot did not enroll it
+# `mok_enroll` imports a missing certificate once.  It waits while the
+# import is pending.  It imports the certificate again when a boot did
+# not enroll it
 # shellcheck disable=SC2034,SC2329  # read and called by the sourced library
 t_mok()
 {
@@ -2323,7 +2370,7 @@ t_mok()
 	}
 	rm -f /var/lib/sdbootutil/mok-import
 
-	# root without a password: a one-time password
+	# root has no password, so a one-time password is used
 	mok_enroll > "$workdir/out" 2>&1
 	says "password" "$(cat "$workdir/out")" "MOK password: "
 	says "hash file" "$(cat "$workdir/import")" "--hash-file"
@@ -2331,7 +2378,8 @@ t_mok()
 	mok_enroll > /dev/null 2>&1
 	is "imported once" "1" "$imports"
 
-	# A boot that did not enroll it, and root has a password now
+	# A boot did not enroll the certificate, and root has a password
+	# now
 	# shellcheck disable=SC2016  # a literal hash
 	state=missing shadow='$6$salt$hash'
 	mok_enroll > "$workdir/out" 2>&1
@@ -2346,9 +2394,9 @@ t_mok()
 	return 0
 }
 
-# build_addon makes a signed addon with the exact command line, and the
-# initrd when given, and pe_add_sections puts each section after the
-# last one
+# `build_addon` makes a signed addon with the exact command line.  It
+# also adds the initrd when one is given.  `pe_add_sections` puts each
+# section after the last one
 # shellcheck disable=SC2034  # read by the sourced library
 t_addon()
 {
@@ -2367,7 +2415,8 @@ t_addon()
 	private_key() { cat "$workdir/sb.key"; }
 
 	build_addon "rootflags=subvol=@/.snapshots/42/snapshot" "$addon" || fail "build_addon failed"
-	# Signed again, the same file: the measurement does not change
+	# Signed again, it is the same file.  So the measurement does not
+	# change
 	sleep 1
 	build_addon "rootflags=subvol=@/.snapshots/42/snapshot" "$workdir/again.addon.efi" || fail "build_addon failed"
 	cmp -s "$addon" "$workdir/again.addon.efi" || fail "the same addon signed again is another file"
@@ -2388,8 +2437,8 @@ t_addon()
 	return 0
 }
 
-# build_uki makes a signed UKI, and with the PCR key its .pcrsig is
-# the signature of the exact sections that it carries
+# `build_uki` makes a signed UKI.  With the PCR key, its .pcrsig is the
+# signature of the exact sections that the UKI carries
 # shellcheck disable=SC2034  # read by the sourced library
 t_uki()
 {
@@ -2434,8 +2483,9 @@ t_uki()
 		--private-key="$workdir/pcr.key" --public-key="$pcr_public_key" --json=short > "$x/resign" 2> /dev/null
 	is "signature of the sections" "$(jq -c . "$x/resign")" "$(jq -c . "$x/pcrsig")"
 
-	# A new snapshot reuses the UKI of its parent, and an entry its own
-	# UKI, only with the same command line and the same kernel
+	# A new snapshot reuses the UKI of its parent.  An entry reuses its
+	# own UKI.  Both happen only with the same command line and the
+	# same kernel
 	local boot_root="$workdir/esp" entry_token=t
 	mkdir -p "$boot_root/t" "$boot_root/loader/entries"
 	cp "$uki" "$boot_root/t/uki.efi"
@@ -2452,15 +2502,17 @@ t_uki()
 	detect_parent() { parent_snapshot=""; }
 	is "its own" "$boot_root/loader/entries/t-commit_5.5.7.3.4-1-default.conf" \
 		"$(reusable_uki 5 @/.snapshots/5/snapshot 7.3.4-1-default "root=UUID=1 quiet" "$workdir/linux")"
-	# The UKI must carry the PCR 11 key of now, and none without it
+	# The UKI must carry the current PCR 11 key.  Without that key, no
+	# UKI is reused
 	rm "$credstore/tpm2-pcr-initrd-private-key.pem"
 	reusable_uki 5 @/.snapshots/5/snapshot 7.3.4-1-default "root=UUID=1 quiet" "$workdir/linux" && \
 		fail "reused with a PCR 11 key that is not the one of now"
 	return 0
 }
 
-# The addon of an entry is built again for another command line or a
-# new signing key: the name in the ESP decides if it is there already
+# The addon of an entry is built again for another command line, or for
+# a new signing key.  This is because the name in the ESP decides if
+# the addon is there already
 # shellcheck disable=SC2034  # read by the sourced library
 t_addon_name()
 {
@@ -2477,8 +2529,9 @@ t_addon_name()
 	return 0
 }
 
-# link_uki links the addon of the snapshot, never one with an initrd:
-# the crypttab is in the addon of the root, that is not linked
+# `link_uki` links the addon of the snapshot.  It never links an addon
+# with an initrd.  This is because the crypttab is in the addon of the
+# root, and that addon is not linked
 # shellcheck disable=SC2034,SC2329  # read and called by the sourced library
 t_link_uki_addon()
 {
@@ -2502,10 +2555,10 @@ t_link_uki_addon()
 }
 
 # The addon of the root has "root=" and the crypttab when the discovery
-# does not find the root.  With DPS it has only the crypttab, without
-# the root, and only when the initrd opens other devices.  It is
-# written again only when it changes: a new disk, or a new key.  It
-# goes away without UKIs
+# does not find the root.  With DPS, it has only the crypttab, without
+# the root.  Then it exists only when the initrd opens other devices.
+# It is written again only when it changes: a new disk, or a new key.
+# It is removed when there are no UKIs
 # shellcheck disable=SC2034,SC2329  # read and called by the sourced library
 t_update_dps_addon()
 {
@@ -2519,7 +2572,7 @@ t_update_dps_addon()
 	get_rootfs() { echo /dev/mapper/cr_root; }
 	dracut_crypttab() { echo "$t_ct"; }
 	crypttab_cpio() { echo "$2" > "$1"; }
-	# The addon is the command line, the initrd and the key
+	# Here the addon is the command line, the initrd and the key
 	build_addon() { { echo "$1"; cat "$3"; echo "$t_key"; } > "$2"; }
 	record_esp_file() { echo written >> "$workdir/dps-written"; }
 
@@ -2534,7 +2587,7 @@ t_update_dps_addon()
 	dps_addon_done='' update_dps_addon > /dev/null 2>&1
 	is "a new key" "$(printf 'root=/dev/mapper/cr_root\n%s\nkey2' "$t_ct")" "$(cat "$out" 2> /dev/null)"
 
-	# With DPS the discovery opens "root" and "usr"
+	# With DPS, the discovery opens "root" and "usr"
 	t_problem="" t_ct="$(printf 'root UUID=1 none x-initrd.attach\nusr UUID=3 none x-initrd.attach')"
 	dps_addon_done='' update_dps_addon > /dev/null 2>&1
 	[ -e "$out" ] && fail "the addon stays with DPS and no other device"
@@ -2548,8 +2601,9 @@ t_update_dps_addon()
 	return 0
 }
 
-# The UKIs in the ESP that the addon of the root reaches and that are
-# not of this system: /EFI/Linux, and other entry tokens
+# `dps_addon_others`: the UKIs in the ESP that the addon of the root
+# reaches, but that are not of this system.  These are /EFI/Linux and
+# other entry tokens
 # shellcheck disable=SC2034,SC2329  # read and called by the sourced library
 t_dps_addon_others()
 {
@@ -2569,8 +2623,8 @@ t_dps_addon_others()
 }
 
 # The addon of the root is current while its initrd has the crypttab
-# that it would get now.  With DPS and no other device, it is current
-# when there is no addon
+# that it would get now.  With DPS and no other device, the state is
+# current when there is no addon
 # shellcheck disable=SC2034,SC2329  # read and called by the sourced library
 t_dps_addon_crypttab()
 {
@@ -2596,8 +2650,9 @@ t_dps_addon_crypttab()
 	return 0
 }
 
-# The initrd of a UKI is made new, without the crypttab and the command
-# line of the disks, and from a fixed path and time, as dracut keeps them
+# The initrd of a UKI is always made new.  It has no crypttab and no
+# command line of the disks.  Its files come from a fixed path and with
+# a fixed time, because dracut keeps both in the initrd
 # shellcheck disable=SC2034,SC2329  # read and called by the sourced library
 t_stage_initrd_uki()
 {
@@ -2616,9 +2671,10 @@ t_stage_initrd_uki()
 	return 0
 }
 
-# The command line of the addon of a UKI entry: the "rootflags=" of the
-# snapshot, and the options of the system only with UKI_CMDLINE="yes".
-# Never "root=", that is in the addon of the root
+# The command line of the addon of a UKI entry.  It has the
+# "rootflags=" of the snapshot.  It has the options of the system only
+# with UKI_CMDLINE="yes".  It never has "root=", because that is in the
+# addon of the root
 # shellcheck disable=SC2034,SC2329  # read and called by the sourced library
 t_uki_addon_cmdline()
 {
@@ -2638,8 +2694,8 @@ t_uki_addon_cmdline()
 }
 
 # The UKI of an entry built here is used again when `reusable_uki`
-# finds it, and the entry is linked again anyway, as its addon can
-# change without the UKI (see `link_uki`)
+# finds it.  The entry is linked again anyway.  This is because its
+# addon can change while the UKI stays the same (see `link_uki`)
 # shellcheck disable=SC2034,SC2329  # read and called by the sourced library
 t_install_local_uki_kept()
 {
@@ -2662,8 +2718,9 @@ t_install_local_uki_kept()
 	return 0
 }
 
-# The entries of a snapshot and of this system include the ones made by
-# "bootctl link" (<token>-commit_<snapshot>.<version>.conf, no options)
+# The entries of a snapshot, and the entries of this system, include
+# the entries made by "bootctl link".  These have the name
+# <token>-commit_<snapshot>.<version>.conf, and no options
 # shellcheck disable=SC2034,SC2329  # read and called by the sourced library
 t_entries_linked()
 {
@@ -2693,8 +2750,8 @@ t_entries_linked()
 	return 0
 }
 
-# find_conf_file finds the file of the entry of a kernel by its name,
-# with or without a boot counter
+# `find_conf_file` finds the file of the entry of a kernel by its name.
+# The name can have a boot counter or not
 # shellcheck disable=SC2034,SC2329  # read and called by the sourced library
 t_find_conf_file()
 {
@@ -2710,8 +2767,9 @@ t_find_conf_file()
 	return 0
 }
 
-# update_entries_for_snapshot without a snapshot gives the entries of
-# this system, and with one only those of the snapshot
+# `update_entries_for_snapshot` without a snapshot gives the entries of
+# this system.  With a snapshot, it gives only the entries of that
+# snapshot
 # shellcheck disable=SC2034,SC2329  # read and called by the sourced library
 t_update_entries_for_snapshot()
 {
@@ -2737,7 +2795,7 @@ t_update_entries_for_snapshot()
 	return 0
 }
 
-# set_default_entry refuses an entry that is not there
+# `set_default_entry` refuses an entry that is not there
 # shellcheck disable=SC2034  # read by the sourced library
 t_set_default_unknown()
 {
@@ -2748,9 +2806,9 @@ t_set_default_unknown()
 	return 0
 }
 
-# The snapshot and the kernel of every kind of entry.  cleanup removes
-# the entry whose kernel is not installed, so a wrong kernel here
-# deletes a good entry
+# The snapshot and the kernel of every kind of entry.  `cleanup` removes
+# an entry when its kernel is not installed.  So a wrong kernel here
+# would delete a good entry
 # shellcheck disable=SC2154  # set by the sourced library
 t_entry_version()
 {
@@ -2785,8 +2843,8 @@ t_dangling_uki()
 	return 0
 }
 
-# The entries of the UKIs of a kernel: the one of UKI="local" and one
-# per variant, with or without a boot counter
+# The entries of the UKIs of a kernel.  There is one for UKI="local",
+# and one per variant.  The names can have a boot counter or not
 # shellcheck disable=SC2034  # read by the sourced library
 t_linked_entry_ids()
 {
@@ -2805,8 +2863,9 @@ t_linked_entry_ids()
 }
 
 
-# The entries of "bootctl link" take part in the prediction: their
-# snapshot is in the id, and their version is "<commit>.<snapshot>.<kernel>"
+# The entries of "bootctl link" take part in the prediction.  Their
+# snapshot is in the id.  Their version is
+# "<commit>.<snapshot>.<kernel>"
 # shellcheck disable=SC2034,SC2329  # read and called by the sourced library
 t_prediction_entries_linked()
 {
@@ -2821,12 +2880,12 @@ t_prediction_entries_linked()
 	}
 	select_entries_for_prediction > /dev/null
 	is "entries" 3 "$(jq length "$entryfile")"
-	# Sorted by priority, then the newest kernel first
+	# Sorted by priority, then with the newest kernel first
 	is "priorities" "0 0 1" "$(jq -r '[.[].priority] | join(" ")' "$entryfile")"
 	is "kernels" "6.12.10.1 6.2.1.1 7.3.5.1" "$(jq -r '[.[].kernel | join(".")] | join(" ")' "$entryfile")"
 
-	# With the UKIs selected only their entries are predicted, and
-	# the others stay while there is none
+	# When the UKIs are selected, only their entries are predicted.
+	# While there is no UKI entry yet, the other entries stay
 	local UKI=local
 	select_entries_for_prediction > /dev/null
 	is "only UKIs" "t-commit_5.5.6.12.10-1-default+3.conf t-commit_1.1.7.3.5-1-default.conf" \
@@ -2840,8 +2899,8 @@ t_prediction_entries_linked()
 	return 0
 }
 
-# The UKI of an entry is predicted with its addons, and nothing else
-# that "bootctl link" lists as extras (credentials, extensions)
+# The UKI of an entry is predicted with its addons.  The other extras
+# that "bootctl link" lists (credentials, extensions) are not predicted
 # shellcheck disable=SC2034,SC2329  # read and called by the sourced library
 t_pcrlock_uki_addons()
 {
@@ -2862,7 +2921,7 @@ t_pcrlock_uki_addons()
 	return 0
 }
 
-# The stub joins the command lines of the addons with a space, and
+# The stub joins the command lines of the addons with a space.  It
 # measures them into PCR 12 as one event
 # shellcheck disable=SC2034  # read by the sourced library
 t_pcrlock_addons_cmdline()
@@ -2881,9 +2940,9 @@ t_pcrlock_addons_cmdline()
 }
 
 # The command lines of the addons go to PCR 12 for as many entries as
-# fit in the PolicyOR limit, like PCR 9 for the kernel entries.  An
-# entry with a missing addon is skipped, and the addons that are read
-# are tracked
+# fit in the PolicyOR limit.  This is like PCR 9 for the kernel
+# entries.  An entry with a missing addon is skipped.  The addons that
+# are read are tracked
 # shellcheck disable=SC2034,SC2329  # read and called by the sourced library
 t_pcrlock_addons_limit()
 {
@@ -2904,8 +2963,8 @@ t_pcrlock_addons_limit()
 	return 0
 }
 
-# show-entry shows the entry of the UKI of a kernel, with its uki and
-# extra lines
+# show-entry shows the entry of the UKI of a kernel, with its "uki" and
+# "extra" lines
 # shellcheck disable=SC2034,SC2329  # read and called by the sourced library
 t_show_entry_uki()
 {
@@ -2925,8 +2984,8 @@ t_show_entry_uki()
 	return 0
 }
 
-# A cached variation is written also when the directory of its
-# component is gone (unenroll keeps the cache)
+# A cached variation is written even when the directory of its
+# component is gone.  This happens because unenroll keeps the cache
 # shellcheck disable=SC2034,SC2329  # read and called by the sourced library
 t_pcrlock_file_cache()
 {
@@ -2955,9 +3014,10 @@ t_list_devices_none()
 	return 0
 }
 
-# dracut_crypttab keeps the lines of /etc/crypttab that dracut puts in a
-# host-only initrd: "x-initrd.attach" or "force", or a device that
-# `dracut --print-cmdline` names (root, resume)
+# `dracut_crypttab` keeps the lines of /etc/crypttab that dracut puts
+# in a host-only initrd.  These are the lines with "x-initrd.attach" or
+# "force", and the devices that `dracut --print-cmdline` names (root,
+# resume)
 # shellcheck disable=SC2034,SC2329  # read and called by the sourced library
 t_dracut_crypttab()
 {
@@ -2978,7 +3038,8 @@ t_dracut_crypttab()
 	EOF
 	mountpoint -q /etc/crypttab || mount --bind "$workdir/crypttab" /etc/crypttab
 	dracut() { echo "rd.driver.pre=btrfs rd.luks.uuid=luks-$luks_uuid root=UUID=4444"; }
-	# Not $dev in the stub: `device_path` has a local of that name
+	# The stub does not use $dev.  This is because `device_path` has a
+	# local variable with that name
 	local t_loop="$dev"
 	blkid() { [ "${*: -1}" != LABEL=data ] || echo "$t_loop"; }
 	is "lines" "cr_swap $dev none tpm2-device=auto|cr_root UUID=1111 none x-initrd.attach,tpm2-device=auto|cr_force UUID=2222 none force|cr_byuuid UUID=$luks_uuid none|cr_bylabel LABEL=data none" \
@@ -2991,7 +3052,7 @@ t_dracut_crypttab()
 	is "only initrd lines" "cr_root UUID=1111 none x-initrd.attach" "$(dracut_crypttab)"
 	[ ! -e "$workdir/dracut-asked" ] || fail "dracut was asked"
 
-	# Without /etc/crypttab there is nothing to copy
+	# Without /etc/crypttab, there is nothing to copy
 	umount /etc/crypttab
 	mount -t tmpfs none /etc
 	local strict_vars="verbose"
@@ -3001,8 +3062,8 @@ t_dracut_crypttab()
 	return 0
 }
 
-# crypttab_cpio makes the same archive for the same crypttab, with the
-# file in etc/crypttab
+# `crypttab_cpio` makes the same archive for the same crypttab.  The
+# file is in etc/crypttab
 # shellcheck disable=SC2034,SC2329  # read and called by the sourced library
 t_crypttab_cpio()
 {
@@ -3021,7 +3082,8 @@ t_crypttab_cpio()
 }
 
 # The initrd of an addon goes to PCR 12 after the command lines of the
-# addons, as the stub measures it, and an addon without one adds nothing
+# addons.  This is the order in which the stub measures them.  An addon
+# without an initrd adds nothing
 # shellcheck disable=SC2034,SC2329  # read and called by the sourced library
 t_pcrlock_addons_initrd()
 {
@@ -3039,7 +3101,7 @@ t_pcrlock_addons_initrd()
 	is "records" "12 cmdline|12 crypttab" "$(jq -r '.records[] | "\(.pcr) \(.t)"' "$d/addons-1.pcrlock" | paste -sd '|')"
 	pcrlock_addons_initrd 2 "$workdir/b.addon.efi"
 	[ -e "$d/addons-2.pcrlock" ] && fail "a variation for addons without an initrd"
-	# The same initrd again comes from the cache
+	# The same initrd comes from the cache the second time
 	pcrlock() { echo called >> "$workdir/addons-initrd-pcrlock"; return 1; }
 	pcrlock_addons_initrd 3 "$workdir/a.addon.efi"
 	is "cached" "12 crypttab" "$(jq -r '.records[] | "\(.pcr) \(.t)"' "$d/addons-3.pcrlock" | paste -sd '|')"
@@ -3047,8 +3109,8 @@ t_pcrlock_addons_initrd()
 	return 0
 }
 
-# uki_cmdline_text: with UKI_CMDLINE="no", the options of the kernel
-# command line that the UKI does not have, one by one
+# `uki_cmdline_text`: with UKI_CMDLINE="no", it lists one by one the
+# options of the kernel command line that the UKI does not have
 # shellcheck disable=SC2034,SC2329  # read and called by the sourced library
 t_uki_cmdline_text()
 {
@@ -3063,9 +3125,9 @@ t_uki_cmdline_text()
 	return 0
 }
 
-# The addons are predicted in the order that systemd-stub loads them:
-# the global ones, then the ones of the entry, each sorted by the name.
-# Not in the order of the entry file
+# The addons are predicted in the order that systemd-stub loads them.
+# First the global addons, then the addons of the entry.  Each group is
+# sorted by name.  The order in the entry file does not matter
 # shellcheck disable=SC2034,SC2329  # read and called by the sourced library
 t_pcrlock_addons_order()
 {
@@ -3092,8 +3154,9 @@ t_pcrlock_addons_order()
 	return 0
 }
 
-# The kind of the next boot (a UKI or not) against the kind of this one:
-# systemd measures os-separator only on the boots of a UKI
+# `boot_kind_changes` compares the kind of the next boot (a UKI or not)
+# with the kind of this boot.  This is because systemd measures
+# os-separator only on the boots of a UKI
 # shellcheck disable=SC2034,SC2329  # read and called by the sourced library
 t_boot_kind_changes()
 {
@@ -3114,9 +3177,10 @@ t_boot_kind_changes()
 	return 0
 }
 
-# At a change of the kind of boot the os-separator gets an empty
-# variation, next to the one of the system, and a mask of an earlier
-# run goes.  Without a change, nothing of it is left
+# When the kind of boot changes, the os-separator gets an empty
+# variation, next to the variation of the system.  A mask from an
+# earlier run is removed.  When the kind does not change, none of this
+# is left
 # shellcheck disable=SC2034,SC2329  # read and called by the sourced library
 t_os_separator_variations()
 {
@@ -3136,7 +3200,7 @@ t_os_separator_variations()
 	return 0
 }
 
-# remove_pcr and policy_missing_pcrs work on the comma lists of PCRs
+# `remove_pcr` and `policy_missing_pcrs` work on comma lists of PCRs
 # shellcheck disable=SC2034  # read by the sourced library
 t_pcr_lists()
 {
@@ -3157,9 +3221,10 @@ t_pcr_lists()
 	return 0
 }
 
-# snapshot_ids_for_prediction: the running snapshot, the default entry,
-# the default and active snapshots of snapper, without repeats, and the
-# newest ones up to three
+# `snapshot_ids_for_prediction` gives the running snapshot, the
+# snapshot of the default entry, and the default and active snapshots
+# of snapper.  It gives no repeats.  It fills up to three with the
+# newest snapshots
 # shellcheck disable=SC2034,SC2329  # read and called by the sourced library
 t_snapshot_ids_for_prediction()
 {
@@ -3175,8 +3240,8 @@ t_snapshot_ids_for_prediction()
 	return 0
 }
 
-# get_final_pcrs reports the PCRs that cannot be predicted, and the
-# reason, and prints the ones of the policy
+# `get_final_pcrs` reports the PCRs that cannot be predicted, with the
+# reason.  It prints the PCRs of the policy
 # shellcheck disable=SC2034,SC2329  # read and called by the sourced library
 t_get_final_pcrs()
 {
@@ -3199,8 +3264,9 @@ t_get_final_pcrs()
 	return 0
 }
 
-# pcrlock_cmdline_initrd measures the command line once, for PCR 9 with
-# the initrd, and for the boot loader in PCR 12, as UTF-16 with a NUL
+# `pcrlock_cmdline_initrd` measures the command line once for PCR 9,
+# with the initrd.  It measures it once for the boot loader in PCR 12,
+# as UTF-16 with a NUL
 # shellcheck disable=SC2034  # read by the sourced library
 t_pcrlock_cmdline_initrd()
 {
@@ -3219,11 +3285,11 @@ t_pcrlock_cmdline_initrd()
 	return 0
 }
 
-# settle_uki_mode: the TPM2 slots decide the UKI mode in effect.  A
-# signed slot gives "local" with the key of this system and "yes" with
-# another one, a slot bound to PCR 15 gives the kernel and the initrd,
-# and a pcrlock slot alone keeps the configuration.  It reads all the
-# devices, also with --devices
+# `settle_uki_mode`: the TPM2 slots decide the UKI mode in effect.  A
+# signed slot with the key of this system gives "local".  A signed slot
+# with another key gives "yes".  A slot bound to PCR 15 gives the
+# kernel and the initrd.  A pcrlock slot alone keeps the configuration.
+# It reads all the devices, also with --devices
 # shellcheck disable=SC2034,SC2329  # read and called by the sourced library
 t_settle_uki_mode()
 {
@@ -3231,7 +3297,8 @@ t_settle_uki_mode()
 	local UKI uki_config pcr_public_key="$workdir/settle-pcr.pem" header_a header_b key
 	echo "the local key" > "$pcr_public_key"
 	key="$(base64 -w0 < "$pcr_public_key")"
-	# Like the real one: it reads the devices only when there are none
+	# Like the real function, it reads the devices only when there are
+	# none
 	detect_tracked_devices() { [ "${#tracked_devices[@]}" -gt 0 ] || tracked_devices=(/dev/a /dev/b); }
 	luks_header() { if [ "$1" = /dev/a ]; then echo "$header_a"; else echo "$header_b"; fi; }
 	header_b='{"tokens": {}}'
@@ -3265,9 +3332,9 @@ t_settle_uki_mode()
 	return 0
 }
 
-# rebind_tpm2_slots makes the slot that enroll would make: with the UKIs
-# the signed PCR 11 for a device of the initrd, and nothing for a device
-# unlocked later; without them, PCR 15 for both
+# `rebind_tpm2_slots` makes the slot that enroll would make.  With the
+# UKIs, a device of the initrd gets the signed PCR 11, and a device
+# unlocked later gets nothing.  Without the UKIs, both get PCR 15
 # shellcheck disable=SC2034,SC2329  # read and called by the sourced library
 t_rebind_uki()
 {
@@ -3297,7 +3364,7 @@ t_rebind_uki()
 	return 0
 }
 
-# enroll_secret takes the secret of the method from its sources
+# `enroll_secret` takes the secret of the method from its sources
 # shellcheck disable=SC2034  # read by the sourced library
 t_enroll_secret()
 {
@@ -3312,8 +3379,8 @@ t_enroll_secret()
 	return 0
 }
 
-# unenroll_device wipes the slot kind of the method, and names the
-# methods of the device when the method is not known
+# `unenroll_device` wipes the slot kind of the method.  When the method
+# is not known, it names the methods of the device
 # shellcheck disable=SC2034,SC2329  # read and called by the sourced library
 t_unenroll_device()
 {
@@ -3333,8 +3400,8 @@ t_unenroll_device()
 	return 0
 }
 
-# get_device_password tries each different candidate once: every wrong
-# one costs one Argon2 per keyslot
+# `get_device_password` tries each different candidate only once.  This
+# is because every wrong candidate costs one Argon2 per keyslot
 # shellcheck disable=SC2329  # called by the sourced library
 t_gdp_tried_once()
 {
@@ -3346,8 +3413,9 @@ t_gdp_tried_once()
 	return 0
 }
 
-# reuse_initrd takes the initrd of the parent, and leaves the entry
-# token of the snapshot: the new entry is written with it
+# `reuse_initrd` takes the initrd of the parent.  It leaves the entry
+# token of the snapshot as it is, because the new entry is written
+# with it
 # shellcheck disable=SC2034,SC2329  # read and called by the sourced library
 t_reuse_initrd_token()
 {
@@ -3372,8 +3440,8 @@ t_reuse_initrd_token()
 	return 0
 }
 
-# stage_initrd stages the initrd of the package for every kernel, also
-# when the one of the previous kernel is still there
+# `stage_initrd` stages the initrd of the package for every kernel.
+# This also works when the initrd of the previous kernel is still there
 # shellcheck disable=SC2034  # read by the sourced library
 t_stage_initrd_twice()
 {
@@ -3387,7 +3455,8 @@ t_stage_initrd_twice()
 	return 0
 }
 
-# pending_initrds_size counts the initrd that a link points to
+# `pending_initrds_size` counts the size of the initrd that a link
+# points to
 t_pending_initrds_size()
 {
 	load
@@ -3396,7 +3465,7 @@ t_pending_initrds_size()
 	ln -sf "$workdir/big-initrd" "$workdir/pend/initrd-0"
 	is "size in KB" 201 "$(pending_initrds_size "$workdir/pend")"
 
-	# One with the same content in the ESP needs no space
+	# An initrd with the same content in the ESP needs no space
 	local boot_root="$workdir/esp" sum
 	read -r sum _ < <(sha1sum "$workdir/big-initrd")
 	mkdir -p "$boot_root/t/7.3.5"
@@ -3406,10 +3475,11 @@ t_pending_initrds_size()
 	return 0
 }
 
-# pcrlock_unlockable has to name every category that systemd-pcrlock
-# can remove through varlink (fwupd uses them before a firmware update),
-# and the file that each one removes.  A category added upstream would
-# be locked again by `update-predictions` before the update is applied
+# `pcrlock_unlockable` must name every category that systemd-pcrlock
+# can remove through varlink, and the file that each one removes.
+# fwupd uses these categories before a firmware update.  A category
+# added upstream and missing here would be locked again by
+# `update-predictions` before the update is applied
 t_pcrlock_unlockable()
 {
 	local pcrlock=/usr/lib/systemd/systemd-pcrlock
@@ -3443,8 +3513,9 @@ run_case()
 	purge_keys
 	format_device
 
-	# The case runs apart: it sources the library, it defines
-	# secrets in its environment and it can replace a function
+	# The case runs in a subshell.  This is because it sources the
+	# library, it defines secrets in its environment, and it can
+	# replace a function
 	( set +e; case_failed=; "$fn"; [ -z "$case_failed" ] ) || rc=$?
 
 	# `skip` inside a case skips only that case
