@@ -153,8 +153,9 @@ rollback=()
 # Set by `enroll` while /etc/crypttab already asks for an unlock method
 # that no keyslot backs yet.  Cleared once the enrollment succeeded
 restore_crypttab=
-# The same for the UKI mode: "=" and the mode of the slots that are
-# there, while `enroll` writes the entries for a new one
+# The same for the UKI mode, while `enroll` writes the entries for a
+# new one.  No slot changed yet, so the slots still give the old mode
+# (see `settle_uki_mode`)
 restore_uki=
 
 # Lifetime of the keys that sdbootutil adds to the kernel keyring.  It
@@ -214,7 +215,7 @@ cleanup()
 	fi
 	if [ -n "$restore_uki" ]; then
 		info "Restoring the boot entries of the UKI mode in effect"
-		UKI="${restore_uki#=}"
+		settle_uki_mode
 		rebuild=1
 	fi
 	# In a subshell because `err` is an `exit`, and from inside the
@@ -710,28 +711,34 @@ assert_uki_config()
 # is the mode in effect
 uki_config=
 
-# The TPM2 slots decide the mode in effect: a slot made for the UKIs
+# The TPM2 slots decide the mode in effect.  A slot made for the UKIs
 # (signed PCR 11) never opens a kernel and an initrd, so the UKI of the
-# configuration takes effect with "enroll", that replaces the slots
+# configuration takes effect with "enroll", that replaces the slots.
+# A signed slot with the key of this system is for UKI="local", and
+# with another key for UKI="yes".  A slot bound to PCR 15 without a
+# signature is for the kernel and the initrd.  The other slots, like
+# the pcrlock slots of the devices that the initrd does not open, work
+# with both, so they do not decide
 settle_uki_mode()
 {
 	uki_config="${UKI:-}"
 	grep -qs "^[^#]*tpm2-device" /etc/crypttab || return 0
+	# All the devices, not only the ones given with --devices
+	local tracked_devices=()
 	detect_tracked_devices || return 0
 
-	local dev kind="" slot
+	local key="" dev slot
+	[ ! -e "$pcr_public_key" ] || key="$(base64 -w0 < "$pcr_public_key")"
 	for dev in "${tracked_devices[@]}"; do
-		slot="$(luks_header "$dev" | jq -r "$jq_tpm2_token_defs"'[.tokens[]? | select(pcrlock)]
-			| if any(signed) then "uki" elif length > 0 then "plain" else empty end')"
-		[ -z "$slot" ] || kind="$slot"
-		[ "$kind" != "uki" ] || break
+		slot="$(luks_header "$dev" | jq -r --arg key "$key" "$jq_tpm2_token_defs"'[.tokens[]? | select(pcrlock)]
+			| if any(signed) then (if any(.tpm2_pubkey == $key) then "local" else "yes" end)
+			  elif any(bound) then "plain" else empty end')"
+		# A signed slot is enough to decide
+		case "$slot" in
+			local|yes) UKI="$slot"; break ;;
+			plain) UKI="" ;;
+		esac
 	done
-	if [ "$kind" = "plain" ] && uki_selected; then
-		UKI=""
-	elif [ "$kind" = "uki" ] && ! uki_selected; then
-		UKI=yes
-		[ ! -e "$credstore/tpm2-pcr-initrd-private-key.pem" ] || UKI=local
-	fi
 	[ "$UKI" = "$uki_config" ] || dbg "UKI=\"$uki_config\" takes effect when the TPM2 is enrolled again ('sdbootutil enroll --method tpm2'), the TPM2 slots are for UKI=\"$UKI\""
 }
 
@@ -8329,7 +8336,7 @@ enroll()
 	if [ "$arg_method" = "tpm2" ] || [ "$arg_method" = "tpm2+pin" ]; then
 		if [ "${UKI:-}" != "$uki_config" ]; then
 			mode_changed=1
-			restore_uki="=${UKI:-}"
+			restore_uki=1
 		fi
 		UKI="$uki_config"
 		uki_keys
