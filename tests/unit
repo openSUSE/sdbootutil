@@ -2515,6 +2515,28 @@ t_dps_addon_others()
 	return 0
 }
 
+# The addon of the root is current while its initrd has the crypttab
+# that it would get now
+# shellcheck disable=SC2034,SC2329  # read and called by the sourced library
+t_dps_addon_crypttab()
+{
+	load
+	local boot_root="$workdir/esp" entry_token=t tmpdir="$workdir/tmp" t_ct="cr_root"
+	local out="$boot_root/loader/addons/t-dps.addon.efi"
+	mkdir -p "${out%/*}" "$tmpdir"
+	crypttab_cpio() { echo "$t_ct" > "$1"; }
+	# The addon is its initrd here
+	objcopy() { [ -e "$4" ] && cp "$4" "$5"; }
+
+	dps_addon_crypttab_current && fail "current without the addon"
+	echo "cr_root" > "$out"
+	dps_addon_crypttab_current || fail "not current with the same crypttab"
+	t_ct="cr_root cr_new"
+	dps_addon_crypttab_current && fail "current after a new device"
+	[ ! -e "$tmpdir/crypttab-now.cpio" ] && [ ! -e "$tmpdir/crypttab-addon.cpio" ] || fail "files left in $tmpdir"
+	return 0
+}
+
 # The initrd of a UKI is made new, without the crypttab and the command
 # line of the disks, and from a fixed path and time, as dracut keeps them
 # shellcheck disable=SC2034,SC2329  # read and called by the sourced library
@@ -3483,6 +3505,7 @@ done <<-'EOF'
 	t_link_uki_addon            link_uki links the addon of the snapshot, without an initrd
 	t_update_dps_addon          the addon of the root follows the discovery, the crypttab, the key and the UKIs
 	t_dps_addon_others          the UKIs of other systems that the addon of the root reaches
+	t_dps_addon_crypttab        the addon of the root is current while it has the crypttab of now
 	t_stage_initrd_uki          the initrd of a UKI has no crypttab nor command line of the disks
 	t_install_local_uki_kept    the UKI that reusable_uki finds is linked again, as a copy
 	t_entries_linked            the entries of a snapshot include the ones made by bootctl link
