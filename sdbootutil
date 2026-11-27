@@ -9521,43 +9521,39 @@ fde_status()
 	# offers it, and the failure is a firmware message on the one boot
 	# that picked it.  Worth the lines it takes to name them, because
 	# the reader cannot ask any other question that would show this
-	[ -z "$status_dangling" ] || {
-		echo
-		warn "Boot entries that name a file that is not in the ESP, and do not boot:"
+	if [ -n "$status_dangling" ]; then
 		local id path snapshot kernel_version missing
 		while IFS='|' read -r id path snapshot kernel_version missing; do
-			warn "  $id (${snapshot:+snapshot $snapshot, }$kernel_version) is missing $missing"
+			status_warning "The boot entry $id (${snapshot:+snapshot $snapshot, }$kernel_version) is missing $missing, so it does not boot: run 'sdbootutil cleanup --repair' to write it again from the kernel"
 		done <<<"$status_dangling"
-		warn "Run 'sdbootutil cleanup --repair' to write them again from the kernels that are still installed"
-	}
+	fi
 
 	# A policy with no device behind it is not an error, but it is
-	# never what the reader assumes when they see "Backend: pcrlock".
+	# never what the reader assumes when they see "Policy: pcrlock".
 	# It is what a partial unenroll leaves, and it makes the whole
 	# TPM2 section describe something that opens nothing
-	[ -z "$status_policy_backend" ] || [ -n "$status_tpm2_device" ] || {
-		echo
-		warn "There is a TPM2 policy, but no device has a TPM2 keyslot. Nothing is opened by the TPM2, and everything above about the policy describes a leftover"
-	}
+	[ -z "$status_policy_backend" ] || [ -n "$status_tpm2_device" ] || \
+		status_warning "There is a TPM2 policy, but no device has a TPM2 keyslot.  Nothing is opened by the TPM2, and the TPM2 part above describes a leftover"
 
 	# The two cases of a stale PCR are opposite, and the difference is
 	# the whole answer: routine when the next `update-predictions`
 	# rewrites the policy, terminal when it cannot, because
 	# re-authorizing the NVIndex without a recovery PIN needs the
 	# current PCRs to satisfy the *old* policy (github issue 250)
-	[ -z "$status_policy_stale" ] || {
-		echo
-		local i
+	if [ -n "$status_policy_stale" ]; then
+		local i line
 		if [ -n "$status_pin_reachable" ]; then
-			warn "PCR $status_policy_stale no longer match the policy. The next 'sdbootutil update-predictions' rewrites it with the reachable recovery PIN, trusting the current boot path"
+			status_warning "PCR $status_policy_stale no longer match the policy.  The next 'sdbootutil update-predictions' rewrites it with the reachable recovery PIN, trusting the current boot path"
 			for i in ${status_policy_stale//,/ }; do
-				warn "PCR $i measures $(pcr_meaning "$i")"
+				status_warning "PCR $i measures $(pcr_meaning "$i")"
 			done
 		else
-			warn "PCR $status_policy_stale no longer match the policy, and no recovery PIN is reachable, so every 'update-predictions' from now on fails the same way"
-			explain_pcrlock_recovery "$status_policy_stale"
+			status_warning "PCR $status_policy_stale no longer match the policy, and no recovery PIN is reachable, so every 'update-predictions' from now on fails the same way"
+			while IFS= read -r line; do
+				status_warning "${line#WARNING: }"
+			done < <(explain_pcrlock_recovery "$status_policy_stale" 2>&1)
 		fi
-	}
+	fi
 
 	if [ "${#status_warnings[@]}" -gt 0 ]; then
 		echo
