@@ -10,14 +10,15 @@
 # reboot too late:
 #
 #   I1  ESP consistency.  Every registered entry points at a kernel and
-#       an initrd that are present, no snapshot that must boot has lost
-#       its entry, nothing is left behind in the ESP that no entry
-#       refers to, and the reserve of free space is respected.
+#       an initrd, or a UKI and its addons, that are present, no
+#       snapshot that must boot has lost its entry, nothing is left
+#       behind in the ESP that no entry refers to, and the reserve of
+#       free space is respected.
 #
 #   I2  Unlock continuity.  Every device that the TPM2 is supposed to
 #       open is still covered by a policy that matches the PCRs as they
-#       are now, and the PCR 15 measurements still describe the devices
-#       that are in `/etc/crypttab`.
+#       are now, and the devices that the initrd unlocks are bound to
+#       PCR 15, so their slots do not open once the initrd is gone.
 #
 # It deliberately does NOT use sdbootutil.  A harness written in terms
 # of the tool under test cannot detect that tool regressing: whatever
@@ -118,6 +119,9 @@ capture_entries()
 		"entry/\(.id)/linux=\(.linux // "")",
 		"entry/\(.id)/initrd=\((.initrd // []) | join(" "))",
 		"entry/\(.id)/devicetree=\(.devicetree // "")",
+		"entry/\(.id)/uki=\(.uki // "")",
+		"entry/\(.id)/extras=\((.extras // []) | join(" "))",
+		"entry/\(.id)/cmdline=\(.cmdline // "")",
 		"entry/\(.id)/default=\(.isDefault // false)"
 	' >> "$statefile"
 }
@@ -284,16 +288,6 @@ capture_pcrlock()
 	' < /var/lib/systemd/pcrlock.json >> "$statefile"
 }
 
-capture_pcr15_measurements()
-{
-	local f
-	for f in /var/lib/pcrlock.d/790-volume-key-*.pcrlock.d/generated.pcrlock; do
-		[ -e "$f" ] || continue
-		read -r sum _ < <(sha256sum "$f")
-		emit "pcr15/$(basename "$(dirname "$f")")" "$sum"
-	done
-}
-
 capture_volatile()
 {
 	local bank i
@@ -328,7 +322,6 @@ do_capture()
 	capture_crypttab
 	capture_luks
 	capture_pcrlock
-	capture_pcr15_measurements
 	capture_volatile
 
 	sort "$statefile"
@@ -371,6 +364,17 @@ warn_check()
 # I1.1 -- every entry points at files that are there.  An entry whose
 # kernel or initrd is missing is an entry that drops the machine into
 # the firmware
+# The files of an entry.  An entry has a kernel and initrds, or a UKI.
+# It can also have addons.  bootctl lists all the addons in "extras":
+# the ones of the entry and the shared ones
+jq_entry_files='def entry_files:
+	([.linux, .uki, .devicetree] + (.initrd // []) + (.extras // []))[] |
+	select(. != null and . != "");'
+
+# The command line of an entry: its "options", or for a UKI the one
+# that bootctl builds from its addons
+jq_entry_cmdline='def entry_cmdline: .options // .cmdline // "";'
+
 check_entry_files()
 {
 	local id path missing n=0
@@ -378,11 +382,9 @@ check_entry_files()
 		[ -n "$path" ] || continue
 		n=$((n + 1))
 		[ -e "$esp$path" ] || missing+="${missing:+ }$id:$path"
-	done < <(entries_json | jq -r '
+	done < <(entries_json | jq -r "$jq_entry_files"'
 		.[] | select(.type == "type1") |
-		. as $e |
-		([$e.linux] + ($e.initrd // []) + [$e.devicetree // empty])[] |
-		select(. != null and . != "") |
+		. as $e | entry_files |
 		"\($e.id)\t\(.)"')
 
 	if [ "$n" -eq 0 ]; then
@@ -390,7 +392,7 @@ check_entry_files()
 	elif [ -n "${missing:-}" ]; then
 		fail "I1.1 entry references a file that is not in the ESP: ${missing}"
 	else
-		pass "I1.1 all $n kernel/initrd references resolve in the ESP"
+		pass "I1.1 all $n file references resolve in the ESP"
 	fi
 }
 
@@ -401,20 +403,23 @@ check_no_orphans()
 {
 	local -A referenced=()
 	local -A tokens=()
-	local path
+	local path json
+	json="$(entries_json)"
 
 	while read -r path; do
 		[ -n "$path" ] || continue
 		referenced["$path"]=1
-		# The first component of the reference is the entry
-		# token directory, taken from the data instead of
-		# guessed from the configuration
+	done < <(jq -r "$jq_entry_files"'.[] | select(.type == "type1") | entry_files' <<<"$json")
+
+	# Find the entry token directories.  The kernel or the UKI of an
+	# entry is inside one, so take the first part of its path.  The
+	# addons are not used here, as the shared addon is in
+	# /loader/addons, and that is not an entry token directory
+	while read -r path; do
+		[ -n "$path" ] || continue
 		path="${path#/}"
 		tokens["${path%%/*}"]=1
-	done < <(entries_json | jq -r '
-		.[] | select(.type == "type1") |
-		([.linux] + (.initrd // []) + [.devicetree // empty])[] |
-		select(. != null and . != "")')
+	done < <(jq -r '.[] | select(.type == "type1") | (.linux // .uki // empty)' <<<"$json")
 
 	if [ "${#tokens[@]}" -eq 0 ]; then
 		skip "I1.2 no entry token directory in use"
@@ -457,7 +462,7 @@ check_snapshot_coverage()
 	}
 
 	local options
-	options="$(entries_json | jq -r '.[] | select(.type == "type1") | .options // ""')"
+	options="$(entries_json | jq -r "$jq_entry_cmdline"'.[] | select(.type == "type1") | entry_cmdline')"
 
 	local n missing="" checked=0
 	# The default snapshot is what the next boot picks, the active
@@ -488,9 +493,9 @@ check_snapshot_coverage()
 check_duplicate_entries()
 {
 	local dups
-	dups="$(entries_json | jq -r '
+	dups="$(entries_json | jq -r "$jq_entry_cmdline"'
 		.[] | select(.type == "type1") |
-		(((.options // "") | capture("rootflags=subvol=(?<s>[^ ]+)") | .s) // "-") as $subvol |
+		((entry_cmdline | capture("rootflags=subvol=(?<s>[^ ]+)") | .s) // "-") as $subvol |
 		"\(.version // "")@\($subvol)"
 	' | sort | uniq -d)" || dups=""
 
@@ -567,9 +572,9 @@ check_kernel_coverage()
 	# Only entries for the running system are relevant: another
 	# snapshot legitimately carries other kernels
 	if [ -n "$subvol" ]; then
-		versions="$(entries_json | jq -r --arg s "$subvol" '
+		versions="$(entries_json | jq -r --arg s "$subvol" "$jq_entry_cmdline"'
 			.[] | select(.type == "type1") |
-			select((.options // "") | contains("subvol=" + $s)) |
+			select(entry_cmdline | contains("subvol=" + $s)) |
 			.version // ""')"
 	else
 		versions="$(entries_json | jq -r '.[] | select(.type == "type1") | .version // ""')"
@@ -621,12 +626,21 @@ check_free_space()
 tpm2_devices()
 {
 	[ -e /etc/crypttab ] || return 0
-	local name dev opts uuid
+	local name dev opts uuid want match
 	while read -r name dev _ opts || [ -n "$name" ]; do
 		[ -n "$name" ] || continue
 		[[ "$name" = \#* ]] && continue
 		[[ "${opts:-}" != *"tpm2-device="* ]] && continue
 		[[ "${opts:-}" == *"x-sdbootutil.ignore"* ]] && continue
+		# When options are given, keep only the lines that have one
+		# of them
+		if [ "$#" -gt 0 ]; then
+			match=
+			for want in "$@"; do
+				[[ ",$opts," != *",$want,"* ]] || match=1
+			done
+			[ -n "$match" ] || continue
+		fi
 		if [[ "$dev" = "UUID="* ]]; then
 			uuid="${dev#UUID=}"
 		else
@@ -752,40 +766,37 @@ check_policy_binds()
 	fi
 }
 
-# I2.4 -- the PCR 15 measurements still describe the current crypttab,
-# and the policy includes PCR 15.  A boot whose initrd did not measure
-# the end of the initrd (measure-pcr-boundary.service) is only skipped,
-# as pcrlock can drop PCR 15 when the event log does not match
-check_pcr15_measurements()
+# I2.4 -- the devices that the initrd opens are bound to PCR 15.  These
+# are the device with "tpm2-measure-pcr=yes" and the devices with
+# "x-initrd.attach".  Each one needs a TPM2 token that uses PCR 15.
+# Without it, the slot would still open after the initrd is gone.  The
+# other devices may use PCR 15 or not, so they are not checked
+check_pcr15_binding()
 {
-	if [ ! -e /etc/crypttab ] || ! grep -q "tpm2-measure-pcr=yes" /etc/crypttab; then
+	local -a devices
+	mapfile -t devices < <(tpm2_devices tpm2-measure-pcr=yes x-initrd.attach)
+	if [ "${#devices[@]}" -eq 0 ]; then
+		skip "I2.4 no device of the initrd is unlocked by the TPM2"
+		return
+	fi
+	if ! grep -q "^[^#]*tpm2-measure-pcr=yes" /etc/crypttab; then
 		skip "I2.4 no device measures PCR 15"
 		return
 	fi
 
-	local dir=/var/lib/sdbootutil
-	if [ ! -e /var/lib/pcrlock.d/790-volume-key-01.pcrlock.d/generated.pcrlock ]; then
-		fail "I2.4 crypttab measures PCR 15 but there are no measurements; the policy cannot include it"
-		return
-	fi
+	local uuid dev unbound=""
+	for uuid in "${devices[@]}"; do
+		dev="$(blkid --uuid "$uuid" 2> /dev/null)" || continue
+		cryptsetup luksDump --dump-json-metadata "$dev" 2> /dev/null | \
+			jq -e '.tokens // {} | to_entries[] | select(.value.type == "systemd-tpm2") |
+			       select(.value."tpm2-pcrs" | index(15))' > /dev/null || \
+			unbound+="${unbound:+ }$uuid"
+	done
 
-	local current
-	read -r current _ < <(sha1sum /etc/crypttab)
-	if ! grep -Fixq "$current" "$dir/crypttab.sha1" 2> /dev/null; then
-		fail "I2.4 the PCR 15 measurements were made for a different /etc/crypttab"
-		return
-	fi
-
-	# The log is RFC 7464 JSON-seq, with a 0x1e separator per record
-	local log=/run/log/systemd/tpm2-measure.log boundary=
-	[ ! -r "$log" ] || boundary="$(tr -d '\036' < "$log" | \
-		jq -r 'select(.pcr == 15 and .content.eventType == "phase") | .pcr' 2> /dev/null)"
-	if grep -qs '"pcr":15' /var/lib/systemd/pcrlock.json; then
-		pass "I2.4 the PCR 15 measurements match the current crypttab, and the policy includes PCR 15"
-	elif [ -z "$boundary" ]; then
-		skip "I2.4 the policy does not include PCR 15, and the end of the initrd was not measured in this boot"
+	if [ -n "$unbound" ]; then
+		fail "I2.4 a device of the initrd has no TPM2 token bound to PCR 15: $unbound"
 	else
-		fail "I2.4 the end of the initrd was measured, but the policy does not include PCR 15"
+		pass "I2.4 the ${#devices[@]} TPM2 device(s) of the initrd are bound to PCR 15"
 	fi
 }
 
@@ -803,7 +814,7 @@ do_check()
 	check_tpm2_tokens
 	check_policy_fresh
 	check_policy_binds
-	check_pcr15_measurements
+	check_pcr15_binding
 
 	echo
 	echo "$checks checks, $failures failed"
