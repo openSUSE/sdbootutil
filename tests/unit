@@ -2594,11 +2594,12 @@ t_entries_linked()
 		jq -n '[
 			{id: "opensuse-tumbleweed-6.1.0-1-default-5.conf",
 			 options: "root=/dev/mapper/cr_root rootflags=subvol=@/.snapshots/5/snapshot"},
-			{id: "opensuse-tumbleweed-commit_5.6.2.0-1-default.conf", uki: "/opensuse-tumbleweed/uki-a.efi"},
-			{id: "opensuse-tumbleweed-commit_50.6.2.0-1-default.conf", uki: "/opensuse-tumbleweed/uki-a.efi"},
-			{id: "other-commit_5.6.2.0-1-default.conf", uki: "/other/uki-b.efi"},
+			{id: "opensuse-tumbleweed-commit_5.6.2.0-1-default.conf", type: "type1", uki: "/opensuse-tumbleweed/uki-a.efi"},
+			{id: "opensuse-tumbleweed-commit_50.6.2.0-1-default.conf", type: "type1", uki: "/opensuse-tumbleweed/uki-a.efi"},
+			{id: "other-commit_5.6.2.0-1-default.conf", type: "type1", uki: "/other/uki-b.efi"},
 			{id: "other-6.1.0-1-default-5.conf", options: "root=/dev/sdz1 rootflags=subvol=@/.snapshots/5/snapshot"},
-			{id: "opensuse-tumbleweed-commit_5@1+3.conf", uki: "/opensuse-tumbleweed/uki-c.efi"}
+			{id: "opensuse-tumbleweed-commit_5@1+3.conf", type: "type1", uki: "/opensuse-tumbleweed/uki-c.efi"},
+			{id: "opensuse-tumbleweed-commit_5.6.1.0-1-default.conf", type: "loader"}
 		]'
 	}
 
@@ -2638,7 +2639,8 @@ t_update_entries_for_snapshot()
 	bootctl_entries()
 	{
 		jq -n '[{id: "t-6.2.1-1-default-5.conf", options: "root=/dev/mapper/root rootflags=subvol=@/.snapshots/5/snapshot"},
-			{id: "t-commit_7.7.6.2.1-1-default.conf", uki: "/t/a.efi"},
+			{id: "t-commit_7.7.6.2.1-1-default.conf", type: "type1", uki: "/t/a.efi"},
+			{id: "t-commit_7.7.6.1.0-1-default.conf", type: "loader"},
 			{id: "other-6.2.1-1-default-5.conf", options: "root=/dev/sdz1 rootflags=subvol=@/.snapshots/5/snapshot"},
 			{id: "t-6.2.1-1-default-6.conf", options: "quiet rootflags=subvol=@/.snapshots/6/snapshot root=/dev/mapper/root"},
 			{id: "t-6.2.1-1-default-60.conf", options: "root=/dev/mapper/root rootflags=subvol=@/.snapshots/60/snapshot"}]'
@@ -2650,7 +2652,7 @@ t_update_entries_for_snapshot()
 	update_entries_for_snapshot 6
 	is "rootflags first, not snapshot 60" "t-6.2.1-1-default-6.conf" "$(jq -r '[.[].id] | join(" ")' "$entryfile")"
 	update_entries
-	is "all, the filter does not stay" 5 "$(jq length "$entryfile")"
+	is "all, the filter does not stay" 6 "$(jq length "$entryfile")"
 	return 0
 }
 

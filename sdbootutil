@@ -1510,7 +1510,10 @@ all_rootfs()
 # The entries of this system come in two forms.  The ones that
 # sdbootutil writes name the root and the snapshot in "options".  The
 # ones made by "bootctl link" have no "options": their file name is
-# "<entry token>-commit_<snapshot>.<version>.conf"
+# "<entry token>-commit_<snapshot>.<version>.conf".  bootctl also lists
+# the entries that the boot loader saw at boot.  When the file is gone,
+# the entry is still listed, with the type "loader".  Only the type
+# "type1" has a file, so only that type is taken by its name
 update_entries_for_snapshot()
 {
 	local n="$1"
@@ -1520,7 +1523,7 @@ update_entries_for_snapshot()
 
 	# "root=" and "rootflags=" in any order, each one a whole option
 	update_entries jq "[.[]|select((.options // \"\" | test(\"(^| )root=(?:$root)( |$)\") and test(\"(^| )rootflags=subvol=${subvol_prefix}/.snapshots/$n/snapshot( |$)\"))
-				   or (.id|test(\"^${entry_token}-commit_${n}[.@+]\")))]"
+				   or (.type == \"type1\" and (.id|test(\"^${entry_token}-commit_${n}[.@+]\"))))]"
 }
 
 update_entries_for_this_system()
@@ -1529,7 +1532,7 @@ update_entries_for_this_system()
 	root="$(all_rootfs)"
 
 	update_entries jq "[.[]|select((.options // \"\"|test(\"root=(?:$root)(?: |$)\"))
-				   or (.id|startswith(\"${entry_token}-commit_\")))]"
+				   or (.type == \"type1\" and (.id|startswith(\"${entry_token}-commit_\"))))]"
 }
 
 update_entries_for_extra()
