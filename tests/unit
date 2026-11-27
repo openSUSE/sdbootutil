@@ -602,6 +602,39 @@ t_update_entry_conf()
 	return 0
 }
 
+# update_entry and update_all_entries install the kernel again for a
+# UKI, as its options are in the addon of its entry, but only when the
+# UKIs are selected
+# shellcheck disable=SC2034,SC2329  # read and called by the sourced library
+t_update_entry_uki()
+{
+	load
+	local TRANSACTIONAL_UPDATE='' entryfile="$workdir/entries.json" t_uki=local
+	local -A found_kernels
+	settle_entry_token() { :; }
+	make_free_space() { :; }
+	update_entries_for_snapshot() { :; }
+	update_entry_conf() { echo "options $1"; }
+	uki_selected() { [ -n "$t_uki" ]; }
+	find_conf_file() { [ "$1" = 6.2.1-1-default ] || [ "$1" = 7.4.0-1-default ] && echo "$workdir/e.conf"; }
+	linked_entry_ids() { [ "$1" = 7.3.5-1-default ] || [ "$1" = 7.4.0-1-default ] && echo "t-commit_5.5.$1.conf"; }
+	find_kernels() { found_kernels=([6.2.1-1-default]=a [7.3.5-1-default]=b); }
+	install_kernel() { echo "install $2"; }
+	touch "$workdir/e.conf"
+	echo '[{"path": "e.conf"}]' > "$entryfile"
+
+	is "kernel and initrd" "options $workdir/e.conf" "$(update_entry 5 6.2.1-1-default 2> /dev/null)"
+	is "UKI" "install 7.3.5-1-default" "$(update_entry 5 7.3.5-1-default 2> /dev/null)"
+	is "UKI and the old entry" "install 7.4.0-1-default|options $workdir/e.conf" "$(update_entry 5 7.4.0-1-default 2> /dev/null | paste -sd '|')"
+	is "no entry" "" "$(update_entry 5 7.5.0-1-default 2> /dev/null)"
+	is "all" "options e.conf|install 7.3.5-1-default" "$(update_all_entries 5 2> /dev/null | paste -sd '|')"
+
+	t_uki=""
+	is "UKI, not selected" "" "$(update_entry 5 7.3.5-1-default 2> /dev/null)"
+	is "all, not selected" "options e.conf" "$(update_all_entries 5 2> /dev/null | paste -sd '|')"
+	return 0
+}
+
 # remove_kernel changes the default entry only when it removed it
 # shellcheck disable=SC2034,SC2329  # read and called by the sourced library
 t_remove_kernel_default()
@@ -3358,6 +3391,7 @@ done <<-'EOF'
 	t_top_entry_bootctl_fails   get_top_entry_id installs nothing when bootctl fails
 	t_entry_snapshot_id         entry_snapshot finds the entry without .conf or with a boot counter
 	t_update_entry_conf         update_entry_conf writes the options once, as they are
+	t_update_entry_uki          update_entry rebuilds the addon of a UKI, not of another kind
 	t_remove_kernel_default     remove_kernel changes the default entry only when it removed it
 	t_unlink_replaced_entry     the entries of another kind go, but the booted one, and the default moves
 	t_enroll_anchor             enroll: the anchor measures, and its slot is bound to PCR 15 at zero

@@ -365,11 +365,11 @@ helpandquit()
 
 		update-entry VERSION [SNAPSHOT]
 		           Update "options" field from /etc/kernel/cmdline
-		           for an entry
+		           for an entry, or the addon of a UKI
 
 		update-all-entries [SNAPSHOT]
 		           Update "options" field from /etc/kernel/cmdline
-		           for all entries
+		           for all entries, and the addons of the UKIs
 
 		set-default-snapshot [SNAPSHOT]
 		           Make SNAPSHOT the default for next boot.
@@ -3648,6 +3648,13 @@ update_entry()
 	local conf
 	# A missing entry is not an error, but `set -e` would end the
 	# script before the check below
+	# The options of a UKI are in the addon of its entry, made again
+	# when the kernel is installed.  The entry of the kernel and the
+	# initrd can still be there too, as the booted one is kept after
+	# a switch to the UKIs
+	if uki_selected && [ -n "$(linked_entry_ids "$kernel_version" "$snapshot")" ]; then
+		install_kernel "$snapshot" "$kernel_version"
+	fi
 	conf="$(find_conf_file "$kernel_version" "$snapshot")" || :
 	[ -f "$conf" ] || return 0
 
@@ -3684,6 +3691,16 @@ update_all_entries()
 	while read -r conf; do
 		update_entry_conf "$conf" "$snapshot"
 	done < <(jq -r '.[]|.path' < "$entryfile")
+
+	# The options of a UKI are in the addon of its entry, made again
+	# when the kernel is installed
+	if uki_selected; then
+		local kv
+		find_kernels "$snapshot"
+		for kv in "${!found_kernels[@]}"; do
+			[ -z "$(linked_entry_ids "$kv" "$snapshot")" ] || install_kernel "$snapshot" "$kv"
+		done
+	fi
 
 	# This action will require to update the PCR predictions
 	update_predictions=1
