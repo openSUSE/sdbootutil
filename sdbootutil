@@ -2952,20 +2952,26 @@ reusable_uki()
 }
 
 # Whether the UKI of the entry ENTRY is in the ESP, with the command
-# line CMDLINE and the kernel LINUX
+# line CMDLINE, the kernel LINUX, and the key of the signed PCR 11
+# policy of now (none without FDE)
 uki_matches()
 {
-	local entry="$1" cmdline="$2" linux="$3" path same=
+	local entry="$1" cmdline="$2" linux="$3" path key="" ret=1
 	path="$(entry_field "$entry" uki)"
 	[ -n "$path" ] && [ -e "${boot_root}$path" ] || return 1
+	[ ! -e "$credstore/tpm2-pcr-initrd-private-key.pem" ] || key="$(< "$pcr_public_key")"
 	# objcopy writes a new file and renames it over its output, so
 	# never /dev/stdout: it can replace the link with a file
 	objcopy -O binary --only-section=.cmdline "${boot_root}$path" "$tmpdir/uki-cmdline"
 	# A kernel rebuilt with the same version is a new UKI
 	objcopy -O binary --only-section=.linux "${boot_root}$path" "$tmpdir/uki-linux"
-	[ "$(< "$tmpdir/uki-cmdline")" != "$cmdline" ] || ! cmp -s "$tmpdir/uki-linux" "$linux" || same=1
-	rm -f "$tmpdir/uki-cmdline" "$tmpdir/uki-linux"
-	[ -n "$same" ]
+	objcopy -O binary --only-section=.pcrpkey "${boot_root}$path" "$tmpdir/uki-pcrpkey"
+	if [ "$(< "$tmpdir/uki-cmdline")" = "$cmdline" ] && cmp -s "$tmpdir/uki-linux" "$linux" && \
+	   [ "$(< "$tmpdir/uki-pcrpkey")" = "$key" ]; then
+		ret=0
+	fi
+	rm -f "$tmpdir/uki-cmdline" "$tmpdir/uki-linux" "$tmpdir/uki-pcrpkey"
+	return "$ret"
 }
 
 # The entry of the kernel VERSION of SNAPSHOT (in SUBVOL) as a UKI built
@@ -8332,8 +8338,11 @@ enroll()
 	# written again when it changes.  The key of the signed PCR 11
 	# policy of UKI="local" needs "tpm2-device" in /etc/crypttab,
 	# added above
-	local mode_changed=
-	if [ "$arg_method" = "tpm2" ] || [ "$arg_method" = "tpm2+pin" ]; then
+	local tpm2="" mode_changed=""
+	case "$arg_method" in
+		tpm2|tpm2+pin) tpm2=1 ;;
+	esac
+	if [ -n "$tpm2" ]; then
 		if [ "${UKI:-}" != "$uki_config" ]; then
 			mode_changed=1
 			restore_uki=1
@@ -8343,12 +8352,14 @@ enroll()
 	fi
 
 	# If the crypttab file changed (that is expected), we need to
-	# generate a new initrd
-	if [ "$arg_no_reuse_initrd" = "1" ] || [ -n "$mode_changed" ]; then
+	# generate a new initrd.  With the UKIs, the entries are checked
+	# always: the first TPM2 enrollment makes the key of the signed
+	# PCR 11 policy, and the UKIs must carry it
+	if [ "$arg_no_reuse_initrd" = "1" ] || [ -n "$mode_changed" ] || { [ -n "$tpm2" ] && uki_selected; }; then
 		install_all_kernels "$root_snapshot"
 	fi
 
-	if [ "$arg_method" = "tpm2" ] || [ "$arg_method" = "tpm2+pin" ]; then
+	if [ -n "$tpm2" ]; then
 		# Which devices the initrd unlocks, see `enroll_tpm2`.  From
 		# the entries written above: a distribution UKI can unlock
 		# other devices
