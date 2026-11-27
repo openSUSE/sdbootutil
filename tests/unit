@@ -1750,6 +1750,8 @@ t_enroll_fails_uki()
 	# The addon of the root is written once per run: the rollback
 	# must write it again (`dps_addon_done`)
 	install_all_kernels() { echo "install${UKI:+:$UKI}${dps_addon_done:+:addon-done}" >> "$workdir/log"; dps_addon_done=1; }
+	# The slots that are there are for the kernel and the initrd
+	settle_uki_mode() { UKI=""; }
 	run_enroll && fail "enroll succeeded"
 	is "steps" "install:local initrd predict install" "$(paste -sd ' ' "$workdir/log")"
 }
@@ -3193,29 +3195,48 @@ t_pcrlock_cmdline_initrd()
 }
 
 # settle_uki_mode: the TPM2 slots decide the UKI mode in effect.  A
-# slot of pcr-oracle (signed policy, no pcrlock) is not a UKI slot
+# signed slot gives "local" with the key of this system and "yes" with
+# another one, a slot bound to PCR 15 gives the kernel and the initrd,
+# and a pcrlock slot alone keeps the configuration.  It reads all the
+# devices, also with --devices
 # shellcheck disable=SC2034,SC2329  # read and called by the sourced library
 t_settle_uki_mode()
 {
 	pcr15_setup
-	local UKI uki_config credstore="$workdir/settle-cred" header
-	rm -rf "$credstore"
-	mkdir -p "$credstore"
-	detect_tracked_devices() { tracked_devices=(/dev/a); }
-	luks_header() { echo "$header"; }
-	header='{"tokens": {"0": {"type": "systemd-tpm2", "tpm2_pubkey": "k"}}}'
+	local UKI uki_config pcr_public_key="$workdir/settle-pcr.pem" header_a header_b key
+	echo "the local key" > "$pcr_public_key"
+	key="$(base64 -w0 < "$pcr_public_key")"
+	# Like the real one: it reads the devices only when there are none
+	detect_tracked_devices() { [ "${#tracked_devices[@]}" -gt 0 ] || tracked_devices=(/dev/a /dev/b); }
+	luks_header() { if [ "$1" = /dev/a ]; then echo "$header_a"; else echo "$header_b"; fi; }
+	header_b='{"tokens": {}}'
+
+	header_a='{"tokens": {"0": {"type": "systemd-tpm2", "tpm2_pubkey": "k"}}}'
 	UKI=local; settle_uki_mode
 	is "pcr-oracle slot" "local" "$UKI"
-	header='{"tokens": {"0": {"type": "systemd-tpm2", "tpm2_pcrlock": true}}}'
+	header_a='{"tokens": {"0": {"type": "systemd-tpm2", "tpm2_pcrlock": true, "tpm2-pcrs": [15]}}}'
 	UKI=local; settle_uki_mode
-	is "plain slot" "" "$UKI"
+	is "slot bound to PCR 15" "" "$UKI"
 	is "configuration" "local" "$uki_config"
-	header='{"tokens": {"0": {"type": "systemd-tpm2", "tpm2_pcrlock": true, "tpm2_pubkey": "k"}}}'
+	header_a='{"tokens": {"0": {"type": "systemd-tpm2", "tpm2_pcrlock": true, "tpm2-pcrs": []}}}'
+	UKI=local; settle_uki_mode
+	is "pcrlock slot alone" "local" "$UKI"
+	header_a='{"tokens": {"0": {"type": "systemd-tpm2", "tpm2_pcrlock": true, "tpm2_pubkey": "other"}}}'
+	UKI=local; settle_uki_mode
+	is "UKI slot of another key" "yes" "$UKI"
+	header_a='{"tokens": {"0": {"type": "systemd-tpm2", "tpm2_pcrlock": true, "tpm2_pubkey": "'"$key"'"}}}'
 	UKI=""; settle_uki_mode
-	is "UKI slot" "yes" "$UKI"
-	touch "$credstore/tpm2-pcr-initrd-private-key.pem"
-	UKI=""; settle_uki_mode
-	is "UKI slot with the local key" "local" "$UKI"
+	is "UKI slot of the local key" "local" "$UKI"
+	UKI=yes; settle_uki_mode
+	is "UKI slot of the local key, configured yes" "local" "$UKI"
+
+	# --devices names /dev/b only, and /dev/a has the UKI slot
+	header_b='{"tokens": {"0": {"type": "systemd-tpm2", "tpm2_pcrlock": true, "tpm2-pcrs": [15]}}}'
+	tracked_devices=(/dev/b)
+	UKI=local; settle_uki_mode
+	is "all the devices" "local" "$UKI"
+	is "--devices kept" "/dev/b" "${tracked_devices[*]}"
+	tracked_devices=()
 	return 0
 }
 
