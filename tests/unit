@@ -778,30 +778,28 @@ t_ek_not_a_counter()
 	is "nothing to reduce" "" "$(entry_key "")"
 }
 
-# status_version_row: the three answers that the report can give about a
-# binary in the ESP, the same ones that `bootloader_needs_update` gives
+# status_version_text: the three answers that the report can give about
+# a binary in the ESP, the same ones that `bootloader_needs_update` gives
 
 t_svr_current()
 {
 	load
 
-	says "row" "$(status_version_row "In the ESP" 261.2 261.2)" "up to date (261.2)"
+	is "text" "up to date" "$(status_version_text 261.2 261.2)"
 }
 
 t_svr_outdated()
 {
 	load
 
-	says "row" "$(status_version_row "In the ESP" 258.4 261.2)" \
-	     "OUTDATED: 258.4 in the ESP, 261.2 in the system"
+	is "text" "OUTDATED, the system has 261.2" "$(status_version_text 258.4 261.2)"
 }
 
 t_svr_newer()
 {
 	load
 
-	says "row" "$(status_version_row "In the ESP" 262 261.2)" \
-	     "262, newer than the 261.2 of the system"
+	is "text" "newer than the 261.2 of the system" "$(status_version_text 262 261.2)"
 }
 
 # The shim reports a major.minor that does not change between builds, so
@@ -810,16 +808,15 @@ t_svr_shim_mtime()
 {
 	load
 
-	says "older" "$(status_version_row Shim 16.1-202506170714 16.1-202601011200)" "OUTDATED"
-	says "newer" "$(status_version_row Shim 16.1-202601011200 16.1-202506170714)" "newer than"
+	says "older" "$(status_version_text 16.1-202506170714 16.1-202601011200)" "OUTDATED"
+	says "newer" "$(status_version_text 16.1-202601011200 16.1-202506170714)" "newer than"
 }
 
 t_svr_no_system()
 {
 	load
 
-	says "row" "$(status_version_row Shim 16.1-202506170714 "")" \
-	     "the version of the system cannot be read"
+	is "text" "the version of the system cannot be read" "$(status_version_text 16.1-202506170714 "")"
 }
 
 # grubenv_set: GRUB2 reads a block of exactly 1024 bytes, so the size is
@@ -3510,11 +3507,11 @@ done <<-'EOF'
 	t_ek_counter                entry_key drops the boot counter
 	t_ek_counted_boot           entry_key drops a counter with the attempts done
 	t_ek_not_a_counter          entry_key keeps a "+" that is not a boot counter
-	t_svr_current               status_version_row reports a version that is the one of the system
-	t_svr_outdated              status_version_row reports a version older than the one of the system
-	t_svr_newer                 status_version_row reports a version newer than the one of the system
-	t_svr_shim_mtime            status_version_row compares the shim by its modification time
-	t_svr_no_system             status_version_row reports a system version that cannot be read
+	t_svr_current               status_version_text reports a version that is the one of the system
+	t_svr_outdated              status_version_text reports a version older than the one of the system
+	t_svr_newer                 status_version_text reports a version newer than the one of the system
+	t_svr_shim_mtime            status_version_text compares the shim by its modification time
+	t_svr_no_system             status_version_text reports a system version that cannot be read
 	t_grubenv_size              grubenv_set writes a block of exactly 1024 bytes
 	t_grubenv_full              grubenv_set does not pad a block that is already full
 	t_re_order                  removable_entries keeps the default and removes leftovers first
